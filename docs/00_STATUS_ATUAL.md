@@ -1,358 +1,615 @@
-# Yuki — Status Atual
+Yuki — Status Atual do Projeto
 
-**Data:** 11/09/2026
-
-## Estado do projeto
-
-**Fase atual: Arquitetura e especificação**
-
-A implementação do MVP ainda não começou.
-
-O objetivo desta fase é estabelecer uma arquitetura suficientemente sólida para permitir implementação, expansão e evolução futura sem criar dependências estruturais desnecessárias.
+Última atualização: 2026-09-26
+Status geral: Arquitetura definida — início da fase de implementação
+Repositório: "JoseLeandroAC/YUKI"
+Branch de referência: "main"
 
 ---
 
-# 1. O que já foi definido
+1. Estado atual
 
-## Visão
+A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural.
 
-Yuki será uma plataforma pessoal de IA de longo prazo, funcionando como:
+O projeto possui atualmente uma arquitetura conceitual extensa, documentada e versionada em Git, cobrindo infraestrutura, capacidades, integrações, credenciais, segurança, verificação, segurança física, workflows, reconciliação, federação distribuída, agência humana, privacidade, contexto/conhecimento e reutilização de plataformas externas.
 
-* assistente;
-* agente;
-* secretária digital;
-* sistema de memória;
-* sistema de planejamento;
-* plataforma de integração;
-* interface para múltiplos modelos de IA;
-* plataforma de capacidades.
+A situação atual pode ser resumida como:
 
----
+ARQUITETURA
+████████████████████████████████████████
+DEFINIDA E DOCUMENTADA
 
-# 2. Arquitetura
+CONTRATOS DE IMPLEMENTAÇÃO
+████████████████░░░░░░░░░░░░░░░░░░░░░░
+EM DEFINIÇÃO
 
-Já foram definidos conceitualmente:
+IMPLEMENTAÇÃO DE SOFTWARE
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+AINDA NÃO INICIADA DE FORMA ESTRUTURAL
 
-* Yuki Core;
-* Memory System;
-* Knowledge System;
-* Personal Context Engine;
-* Executive Brain;
-* Reasoning;
-* Planning;
-* Model Router;
-* Capability Registry;
-* Security Controller;
-* Execution Layer;
-* Verification;
-* Learning;
-* Evolution Manager.
+TESTES DE INTEGRAÇÃO
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+AINDA NÃO INICIADOS
+
+PRODUÇÃO
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+NÃO INICIADA
 
 ---
 
-# 3. Memória
+2. O que a Yuki já possui
 
-A arquitetura de memória deverá possuir diferentes tipos de memória:
+A Yuki já possui definições arquiteturais para:
 
-* Working Memory;
-* Episodic Memory;
-* Semantic Memory;
-* Procedural Memory;
-* Preferences;
-* Project Memory;
-* Goal Memory;
-* Relationship Graph;
-* External Knowledge.
+- visão e princípios;
+- agentes e tarefas;
+- sistema de capacidades;
+- Model Router;
+- segurança;
+- evolução;
+- voz e multimodalidade;
+- eventos e execução em background;
+- infraestrutura;
+- integrações;
+- Resource Model;
+- Integration Model;
+- Credential Isolation;
+- External Action Verification;
+- Physical World Safety;
+- Durable Workflow;
+- Reconciliation;
+- Home/Cloud Federation;
+- Personal Goal Reconciliation;
+- Privacy & Data Minimization;
+- Context & Knowledge;
+- External Platform Reuse & Vendor Independence.
 
-Também foram definidos conceitos de:
-
-* recuperação;
-* ranking;
-* consolidação;
-* compressão;
-* versionamento;
-* confiança;
-* arquivamento;
-* recuperação histórica.
-
----
-
-# 4. Contexto pessoal
-
-Foi definido o Personal Context Engine.
-
-Seu objetivo é determinar:
-
-> O que está acontecendo agora e quais informações são relevantes para a tarefa atual?
-
-O sistema não deverá enviar todos os dados disponíveis para todos os processos.
-
-Deve utilizar minimização de dados.
+Essas definições devem ser tratadas como contratos arquiteturais, não como prova de que a funcionalidade já está implementada.
 
 ---
 
-# 5. Objetivos e planejamento
+3. ADRs oficiais atuais
 
-Yuki deverá possuir:
+A arquitetura atual possui os seguintes ADRs principais:
 
-* objetivos de longo prazo;
-* objetivos de médio prazo;
-* objetivos de curto prazo;
-* tarefas;
-* hábitos;
-* projetos;
-* prioridades;
-* dependências;
-* métricas;
-* prazos;
-* conflitos;
-* recursos;
-* histórico.
+ADR-006
+Yuki Infrastructure Resource Model
 
-Yuki poderá recomendar decisões, mas o usuário permanece como autoridade final.
+ADR-007
+Yuki Integration Model & Manifest
 
----
+ADR-008
+Yuki Credential Isolation & Secret Delivery
 
-# 6. Sistema de capacidades
+ADR-009
+Yuki External Action Verification
 
-Yuki utilizará um Capability Registry.
+ADR-010
+Yuki Physical World Safety & Hardware Interlocks
 
-Cada capacidade deverá possuir informações como:
+ADR-011
+Yuki Durable Workflow, Saga & Compensation
 
-* ID;
-* versão;
-* descrição;
-* entradas;
-* saídas;
-* dependências;
-* permissões;
-* risco;
-* recursos;
-* efeitos colaterais;
-* acesso a dados;
-* acesso à rede;
-* nível de aprovação.
+ADR-012
+Yuki Reconciliation Engine
 
----
+ADR-013
+Yuki Home/Cloud Event Store Synchronization & Offline State Federation
 
-# 7. Multi-modelo
+ADR-014
+Yuki Personal Goal Reconciliation & Human Agency
 
-Yuki não deverá depender de um único modelo.
+ADR-015
+Yuki Privacy, Data Minimization & Information Boundaries
 
-Deverá ser possível utilizar:
+ADR-016
+Yuki Context & Knowledge Architecture
 
-* GPT;
-* Gemini;
-* outros modelos comerciais;
-* modelos especializados;
-* modelos locais;
-* modelos futuros.
+ADR-017
+Yuki External Platform Reuse, Runtime Adapters & Vendor Independence
 
-O Model Router deverá selecionar o modelo apropriado de acordo com:
+Os ADRs posteriores complementam e refinam os anteriores.
 
-* tarefa;
-* qualidade;
-* latência;
-* custo;
-* privacidade;
-* contexto;
-* capacidade;
-* disponibilidade.
+Quando houver conflito entre documentos antigos e decisões posteriores formalizadas, a arquitetura deverá seguir a decisão mais recente e explicitamente aceita.
 
 ---
 
-# 8. Segurança
+4. Arquitetura versus implementação
 
-A segurança é considerada um requisito fundamental.
+Uma distinção fundamental passa a ser adotada neste documento:
 
-Já foram definidos conceitualmente:
-
-* Security Controller independente;
-* identidade;
-* autenticação;
-* autorização;
-* least privilege;
-* sandbox;
-* Tool Gateway;
-* isolamento;
-* auditoria;
-* logs;
-* monitoramento;
-* proteção contra prompt injection;
-* proteção de segredos;
-* backup;
-* recuperação;
-* kill switch;
-* hardware keys;
-* classificação de dados;
-* estados de contenção.
-
-Princípio:
-
-> A comprometimento de uma ferramenta não deve significar o comprometimento de Yuki.
-
----
-
-# 9. Evolução
-
-Yuki deverá possuir um Evolution Manager.
-
-Processo conceitual:
-
-```text
-Detectar necessidade
-        ↓
-Pesquisar
-        ↓
-Propor mudança
-        ↓
-Criar protótipo
-        ↓
-Testar
-        ↓
-Avaliar segurança
-        ↓
-Aprovar
-        ↓
-Implementar
-        ↓
-Monitorar
-        ↓
-Rollback se necessário
-```
-
-A evolução nunca deverá utilizar uma atualização para conceder automaticamente novos privilégios.
-
----
-
-# 10. Infraestrutura
-
-Estratégia atual:
-
-**Cloud-first.**
-
-No futuro:
-
-**Cloud + Home Server**
-
-Também deverá existir abstração da camada computacional:
-
-```text
-Yuki
-  ↓
-Compute Interface
-  ↓
-CPU / GPU / QPU / outros
-```
-
----
-
-# 11. Voz e multimodalidade
-
-Arquitetura conceitual:
-
-```text
-Wake Word
+PRINCÍPIO
     ↓
-STT
+ARQUITETURA
     ↓
-Yuki Core
+CONTRATO
     ↓
-Tools / Agents
+IMPLEMENTAÇÃO
     ↓
-TTS
+TESTE
     ↓
-Usuário
-```
+PRODUÇÃO
 
-Também deverá existir suporte futuro a:
-
-* visão;
-* imagens;
-* vídeo;
-* áudio;
-* sensores;
-* dispositivos externos.
-
----
-
-# 12. Sistemas externos
-
-Yuki deverá acessar sistemas externos através de gateways e contratos padronizados.
+A existência de um documento arquitetural não significa que seu componente correspondente exista no software.
 
 Exemplo:
 
-```text
-Yuki
+ADR-008 define Credential Isolation
+                 ↓
+não significa
+                 ↓
+que o Credential Broker já esteja implementado.
+
+Da mesma forma:
+
+ADR-012 define Reconciliation
+                 ↓
+não significa
+                 ↓
+que exista um Reconciliation Engine funcional.
+
+Essa distinção deve permanecer explícita para evitar falsa sensação de progresso.
+
+---
+
+5. Estado da implementação
+
+No estado atual do repositório, a Yuki ainda não possui uma implementação estrutural consolidada do runtime.
+
+Ainda não existe uma base de código que represente integralmente:
+
+Yuki Core
+Context
+Capability System
+Security Controller
+Model Router
+Execution Layer
+Integration Gateway
+Verification Engine
+Workflow Engine
+Memory
+Knowledge
+Reconciliation
+Agent System
+Event System
+Infrastructure Runtime
+
+Portanto, a próxima fase do projeto não será uma grande refatoração de código existente.
+
+Será a construção da primeira implementação estrutural da Yuki.
+
+---
+
+6. Próxima fase: Foundation
+
+A primeira fase de implementação será chamada de:
+
+Yuki Foundation
+
+Seu objetivo é criar as abstrações e contratos fundamentais sobre os quais os demais componentes poderão ser construídos.
+
+A Foundation não deve tentar implementar toda a Yuki.
+
+Ela deve estabelecer:
+
+Core
+Contracts
+Types
+Configuration
+Capability abstraction
+Context abstraction
+Execution abstraction
+Authorization abstraction
+Observability foundation
+Testing foundation
+
+---
+
+7. Ordem inicial de implementação
+
+A ordem inicial recomendada é:
+
+1. Repository / Documentation Consistency
+             ↓
+2. Foundation Contracts
+             ↓
+3. Project Structure
+             ↓
+4. Core
+             ↓
+5. Context
+             ↓
+6. Model Router
+             ↓
+7. Capability System
+             ↓
+8. Security / Policy Boundary
+             ↓
+9. Execution Layer
+             ↓
+10. Integration Gateway
+             ↓
+11. Verification Engine
+             ↓
+12. Workflow
+             ↓
+13. Memory / Knowledge
+             ↓
+14. Agents
+             ↓
+15. Events / Background
+             ↓
+16. Reconciliation
+             ↓
+17. Federation
+             ↓
+18. Evolution
+
+Essa ordem não significa que os componentes posteriores não possam ser prototipados antes.
+
+Ela define a ordem da fundação estrutural, evitando que componentes de alto nível criem contratos incompatíveis com o núcleo.
+
+---
+
+8. Primeiro objetivo funcional
+
+O primeiro objetivo não será criar uma Yuki extremamente inteligente.
+
+Será criar uma Yuki arquiteturalmente correta e funcional em pequena escala.
+
+O primeiro fluxo deverá ser capaz de representar algo semelhante a:
+
+USER
+ ↓
+YUKI CORE
+ ↓
+CONTEXT
+ ↓
+MODEL ROUTER
+ ↓
+CAPABILITY
+ ↓
+SECURITY / AUTHORIZATION
+ ↓
+EXECUTION
+ ↓
+VERIFICATION
+ ↓
+RESULT
+
+Mesmo que inicialmente exista apenas uma capacidade simples.
+
+O objetivo é validar a arquitetura através de software real.
+
+---
+
+9. Contratos fundamentais
+
+Antes de expandir o runtime, deverão ser definidos contratos centrais para conceitos como:
+
+TypedContext
+Capability
+Permission
+Authorization
+Operation
+Attempt
+Evidence
+VerificationResult
+Integration
+CredentialReference
+Mission
+Task
+Workflow
+Resource
+DesiredState
+ObservedState
+ReconciliationIntent
+
+Esses conceitos não devem ser duplicados de forma incompatível entre módulos.
+
+Cada conceito fundamental deve possuir uma definição canônica ou uma interface claramente estabelecida.
+
+---
+
+10. Regra de implementação
+
+A implementação deverá seguir:
+
+ADR
+ ↓
+Contract
+ ↓
+Implementation
+ ↓
+Tests
+ ↓
+Review
+ ↓
+Integration
+
+Nenhum agente de desenvolvimento deve inventar silenciosamente uma nova arquitetura para preencher uma lacuna.
+
+Quando uma implementação exigir uma decisão arquitetural ainda não definida:
+
+Implementação encontra lacuna
+        ↓
+registra a lacuna
+        ↓
+proposta arquitetural
+        ↓
+revisão
+        ↓
+ADR/decisão, quando necessário
+        ↓
+implementação
+
+---
+
+11. Google e plataformas externas
+
+A Yuki adotará o princípio:
+
+«Reutilizar tecnologia madura antes de reimplementá-la.»
+
+Porém:
+
+«Reutilizar uma implementação não significa transferir a ela a autoridade arquitetural da Yuki.»
+
+Plataformas externas como:
+
+- Gemini;
+- Google ADK;
+- Google Agent Platform;
+- MCP;
+- A2A;
+- Cloud Run;
+- Vertex AI;
+- outros modelos;
+- outros runtimes;
+- outros provedores;
+
+podem ser utilizadas através das abstrações e adaptadores definidos pela Yuki.
+
+Nenhuma dessas tecnologias deve se tornar uma dependência constitucional do Core sem uma decisão arquitetural explícita.
+
+---
+
+12. Agentes de desenvolvimento
+
+Agentes externos de desenvolvimento poderão atuar como implementadores dentro de um ambiente controlado.
+
+Modelo:
+
+Yuki Architecture
+        ↓
+Development Specification
+        ↓
+Development Agent
+        ↓
+Branch
+        ↓
+Implementation
+        ↓
+Tests
+        ↓
+Security / Architecture Review
+        ↓
+Human Approval
+        ↓
+Merge
+
+O agente de desenvolvimento não recebe autoridade automática sobre:
+
+- arquitetura;
+- segurança;
+- identidade;
+- permissões;
+- produção;
+- credenciais;
+- políticas críticas.
+
+---
+
+13. Git como memória de engenharia
+
+O Git é parte fundamental da engenharia da Yuki.
+
+Decisões arquiteturais importantes devem ser preservadas em arquivos versionados.
+
+O estado do projeto não deve depender exclusivamente de conversas.
+
+A documentação deve permitir que um novo agente ou desenvolvedor compreenda:
+
+O que a Yuki é
+↓
+Por que foi projetada dessa maneira
+↓
+Quais decisões já foram tomadas
+↓
+Quais decisões continuam abertas
+↓
+Como implementar
+↓
+Como testar
+
+---
+
+14. O que NÃO fazer nesta fase
+
+Não começar simultaneamente a construir:
+
+- todos os agentes;
+- memória completa;
+- sistema de voz completo;
+- automação residencial;
+- robótica;
+- câmeras;
+- finanças;
+- dezenas de integrações;
+- infraestrutura distribuída completa;
+- autoevolução completa.
+
+Isso aumentaria a superfície de complexidade antes de validar a fundação.
+
+Primeiro:
+
+FOUNDATION
+
+Depois:
+
+CAPABILITIES
+
+Depois:
+
+EXECUTION
+
+Depois:
+
+INTELLIGENCE + AGENCY
+
+Depois:
+
+DISTRIBUTED / PHYSICAL / EVOLUTION
+
+---
+
+15. Critério de progresso
+
+O projeto não deve medir progresso apenas pelo número de arquivos ou linhas de código.
+
+O progresso deve ser medido pela quantidade de arquitetura que passou de:
+
+IDEIA
+ ↓
+DOCUMENTO
+ ↓
+CONTRATO
+ ↓
+IMPLEMENTAÇÃO
+ ↓
+TESTE
+ ↓
+USO REAL
+
+Uma capacidade só será considerada implementada quando houver implementação e teste correspondente.
+
+---
+
+16. Estado atual resumido
+
+┌──────────────────────────────────────────────┐
+│                 YUKI                         │
+├──────────────────────────────────────────────┤
+│ Visão                       ✅               │
+│ Princípios                  ✅               │
+│ Arquitetura macro           ✅               │
+│ ADRs 006–017                ✅               │
+│ Contratos de implementação  🟡              │
+│ Foundation                  🔴               │
+│ Core                        🔴               │
+│ Runtime                     🔴               │
+│ Security Runtime            🔴               │
+│ Capability Runtime          🔴               │
+│ Execution                   🔴               │
+│ Verification                🔴               │
+│ Workflow                    🔴               │
+│ Memory                      🔴               │
+│ Agents                      🔴               │
+│ Background                  🔴               │
+│ Reconciliation              🔴               │
+│ Federation                  🔴               │
+│ Production                  🔴               │
+└──────────────────────────────────────────────┘
+
+Legenda:
+
+✅ Definido/documentado
+🟡 Em definição
+🔴 Ainda não implementado
+
+---
+
+17. Próximo marco
+
+O próximo marco oficial do projeto é:
+
+YUKI FOUNDATION v0.1
+
+Objetivos:
+
+1. definir contratos fundamentais;
+2. definir estrutura inicial do código;
+3. escolher a primeira implementação tecnológica sem torná-la constitucional;
+4. implementar o Core mínimo;
+5. implementar o primeiro fluxo end-to-end;
+6. criar testes estruturais;
+7. validar os contratos contra os ADRs;
+8. preparar a base para os agentes de desenvolvimento.
+
+---
+
+18. Regra de ouro desta fase
+
+«Não construir a Yuki inteira. Construir a fundação sobre a qual a Yuki inteira possa ser construída.»
+
+A Yuki deve crescer por composição:
+
+Foundation
+    +
+Capabilities
+    +
+Models
+    +
+Integrations
+    +
+Memory
+    +
+Agents
+    +
+Knowledge
+    +
+Workflow
+    +
+Events
+    +
+Reconciliation
+    +
+Evolution
+
+e não por um único bloco monolítico.
+
+---
+
+19. Próximo documento
+
+O próximo documento a ser criado é:
+
+docs/FOUNDATION_CONTRACTS.md
+
+Ele definirá os contratos canônicos dos objetos fundamentais utilizados pela implementação.
+
+Depois dele:
+
+docs/IMPLEMENTATION_ROADMAP.md
+
+Esses documentos serão a ponte entre:
+
+ADRs
   ↓
-System Gateway
+Arquitetura
   ↓
-Sistema externo
-```
+Código
 
 ---
 
-# 13. Estado de desenvolvimento
+20. Status
 
-## Concluído conceitualmente
+Estado: FOUNDATION STARTING
 
-* [x] Visão geral
-* [x] Princípios
-* [x] Arquitetura inicial
-* [x] Memória
-* [x] Contexto
-* [x] Objetivos
-* [x] Capability Registry
-* [x] Model Router
-* [x] Segurança conceitual
-* [x] Evolução conceitual
-* [x] Cloud-first
-* [x] Hardware abstraction
+Arquitetura: definida
 
-## Em aprofundamento
+Implementação: iniciando
 
-* [ ] Multi-Agent System
-* [ ] Task System
-* [ ] Guardrails
-* [ ] RAG
-* [ ] Knowledge Base
-* [ ] Knowledge Graph
-* [ ] Security Controller detalhado
-* [ ] Tool Gateway
-* [ ] Permission System
-* [ ] Event System
-* [ ] Model Router detalhado
-* [ ] Evolution Manager detalhado
+Próximo objetivo: Yuki Foundation v0.1
 
-## Ainda não definido completamente
-
-* arquitetura concreta do MVP;
-* stack tecnológica definitiva;
-* banco de dados definitivo;
-* framework de agentes;
-* provedor cloud;
-* sistema de autenticação definitivo;
-* arquitetura de deployment;
-* custos;
-* observabilidade;
-* interface inicial.
-
----
-
-# 14. Próxima grande etapa
-
-**Multi-Agent + Task System**
-
-Objetivo:
-
-Definir como Yuki transforma uma solicitação em uma missão, divide o trabalho, executa tarefas em paralelo quando apropriado, acompanha estado, verifica resultados e finaliza a missão.
-
----
-
-# 15. Regra de atualização
-
-Este documento deverá ser atualizado sempre que houver uma mudança significativa no estado do projeto.
-
-Ele representa o:
-
-**"Save Game" da Yuki.**
+Regra: preservar a arquitetura enquanto transformamos decisões em software testável.
