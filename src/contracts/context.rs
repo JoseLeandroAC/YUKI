@@ -62,7 +62,12 @@ pub struct ContextObject {
 }
 
 impl ContextObject {
-    /// Validates that no raw credentials or forbidden secrets are present in context
+    /// Proteção básica e preventiva da Foundation v0.1 contra a inclusão inadvertida
+    /// de credenciais ou padrões de segredos em texto bruto no ContextObject.
+    ///
+    /// NOTA ARQUITETURAL: Esta validação é uma salvaguarda local mínima da Foundation
+    /// e NÃO substitui a arquitetura completa de Credential Isolation (ADR-008),
+    /// que será provida pelo Credential Broker em fases posteriores.
     pub fn assert_no_secrets(&self) -> Result<(), String> {
         let serialized = serde_json::to_string(self)
             .unwrap_or_default()

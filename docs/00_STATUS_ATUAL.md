@@ -1,35 +1,39 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-09-26
-Status geral: Arquitetura definida — início da fase de implementação
+Status geral: Foundation v0.1 / MVP-0 implementada, auditada e testada; base consolidada para MVP-1
 Repositório: "JoseLeandroAC/YUKI"
-Branch de referência: "main"
+Branch de referência: "feature/foundation-v0.1" (incorporada em "main")
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural.
+A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural, bem como a implementação, auditoria e consolidação da **Foundation v0.1 / MVP-0**.
 
-O projeto possui atualmente uma arquitetura conceitual extensa, documentada e versionada em Git, cobrindo infraestrutura, capacidades, integrações, credenciais, segurança, verificação, segurança física, workflows, reconciliação, federação distribuída, agência humana, privacidade, contexto/conhecimento e reutilização de plataformas externas.
+O projeto possui atualmente uma arquitetura conceitual extensa documentada em ADRs e uma primeira célula funcional de software implementada em Rust puro (1.98.1), com testes de integração positivos e negativos protegendo os invariantes fundamentais.
 
 A situação atual pode ser resumida como:
 
 ARQUITETURA
 ████████████████████████████████████████
-DEFINIDA E DOCUMENTADA
+DEFINIDA E DOCUMENTADA (ADRs 006 a 017)
 
-CONTRATOS DE IMPLEMENTAÇÃO
-████████████████░░░░░░░░░░░░░░░░░░░░░░
-EM DEFINIÇÃO
+CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1)
+████████████████████████████████████████
+DEFINIDOS, IMPLEMENTADOS E AUDITADOS
 
-IMPLEMENTAÇÃO DE SOFTWARE
+FOUNDATION v0.1 / MVP-0 (SOFTWARE & PIPELINE VERTICAL SLICE)
+████████████████████████████████████████
+IMPLEMENTADA, AUDITADA E CONSOLIDADA
+
+TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS)
+████████████████████████████████████████
+26/26 TESTES PASSANDO (TESTES A AO I + NEGATIVOS DE VIOLAÇÃO)
+
+PROVEDORES REAIS DE MODELO / RUNTIME ASSÍNCRONO / INTEGRAÇÕES
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-AINDA NÃO INICIADA DE FORMA ESTRUTURAL
-
-TESTES DE INTEGRAÇÃO
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-AINDA NÃO INICIADOS
+PLANEJADOS PARA MVP-1 (NÃO INICIADOS)
 
 PRODUÇÃO
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░

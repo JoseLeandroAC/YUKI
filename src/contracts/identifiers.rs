@@ -4,12 +4,22 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Retorna o timestamp UTC corrente via SystemTime do Rust padrão.
 pub fn now_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from(SystemTime::now())
 }
 
+/// Contador atômico monotônico em memória para desambiguação temporal.
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Gerador local de identificadores monotônicos baseado em timestamp Unix (ms) e contador atômico.
+///
+/// PROPRIEDADES E LIMITAÇÕES ARQUITETURAIS (Foundation v0.1):
+/// - Garante unicidade e ordenação temporal dentro da mesma instância do processo.
+/// - NÃO possui propriedades criptográficas de imprevisibilidade (CSPRNG).
+/// - Adequado para correlação, rastreabilidade causal e isolamento de contexto do MVP-0.
+/// - Em fases posteriores que exigirem identificadores distribuídos ou não adivinháveis,
+///   será integrado a um gerador de entropia robusto/UUIDv7.
 pub fn generate_unique_id(prefix: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
