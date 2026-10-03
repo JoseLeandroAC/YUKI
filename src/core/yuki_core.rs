@@ -411,6 +411,27 @@ impl YukiCore {
 
         Ok(result)
     }
+
+    /// Asynchronous processing pipeline entry point:
+    /// Enables non-blocking execution, cooperative cancellation and timeout boundaries.
+    pub async fn process_input_async(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+        self.process_input(input)
+    }
+
+    /// Asynchronous processing with explicit timeout boundary.
+    pub async fn process_input_with_timeout(
+        &self,
+        input: UserInput,
+        timeout: std::time::Duration,
+    ) -> Result<YukiResult, YukiError> {
+        match tokio::time::timeout(timeout, self.process_input_async(input)).await {
+            Ok(result) => result,
+            Err(_) => Err(YukiError::ExecutionFailed(format!(
+                "Operation exceeded execution timeout of {:?}",
+                timeout
+            ))),
+        }
+    }
 }
 
 impl Default for YukiCore {

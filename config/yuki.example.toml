@@ -1,0 +1,22 @@
+# YUKI CONFIGURATION TEMPLATE
+# Copie este arquivo para config/yuki.toml para customizações locais.
+# NUNCA insira chaves de API, senhas ou segredos neste arquivo!
+
+[runtime]
+environment = "development"
+request_timeout_ms = 30000
+graceful_shutdown_timeout_ms = 5000
+
+[logging]
+level = "info"
+format = "text"
+
+[storage]
+database_path = "data/yuki.db"
+sqlite_synchronous = "NORMAL"
+
+[model]
+provider = "mock"
+model_id = "mock-v1"
+temperature = 0.2
+timeout_ms = 15000

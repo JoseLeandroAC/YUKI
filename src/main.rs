@@ -24,7 +24,8 @@ enum Commands {
     Health,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     let core = YukiCore::new();
 
@@ -61,7 +62,7 @@ fn main() {
         }
         None => {
             if cli.prompt.is_empty() {
-                println!("Yuki Foundation v0.1");
+                println!("Yuki MVP-1");
                 println!("Uso: yuki \"<sua mensagem>\" ou yuki health");
                 return;
             }
@@ -69,24 +70,32 @@ fn main() {
             let input_text = cli.prompt.join(" ");
             let user_input = UserInput::new(input_text);
 
-            match core.process_input(user_input) {
-                Ok(result) => match result.status {
-                    ResultStatus::Success => {
-                        println!("{}", result.content);
+            tokio::select! {
+                res = core.process_input_async(user_input) => {
+                    match res {
+                        Ok(result) => match result.status {
+                            ResultStatus::Success => {
+                                println!("{}", result.content);
+                            }
+                            ResultStatus::Denied => {
+                                eprintln!("Acesso negado: {}", result.content);
+                            }
+                            ResultStatus::Failed => {
+                                eprintln!("Erro: {}", result.content);
+                            }
+                            ResultStatus::Unknown => {
+                                println!("Resultado indeterminado (UNKNOWN): {}", result.content);
+                            }
+                        },
+                        Err(err) => {
+                            eprintln!("Erro no processamento da Yuki: {}", err);
+                            std::process::exit(1);
+                        }
                     }
-                    ResultStatus::Denied => {
-                        eprintln!("Acesso negado: {}", result.content);
-                    }
-                    ResultStatus::Failed => {
-                        eprintln!("Erro: {}", result.content);
-                    }
-                    ResultStatus::Unknown => {
-                        println!("Resultado indeterminado (UNKNOWN): {}", result.content);
-                    }
-                },
-                Err(err) => {
-                    eprintln!("Erro no processamento da Yuki: {}", err);
-                    std::process::exit(1);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nExecução cancelada pelo usuário (SIGINT). Encerrando graciosamente.");
+                    std::process::exit(130);
                 }
             }
         }
