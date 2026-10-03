@@ -289,6 +289,12 @@ impl GeminiProviderAdapter {
             )));
         }
 
+        let retry_after_secs = http_resp
+            .headers()
+            .get("retry-after")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+
         let resp_bytes = http_resp.bytes().await.map_err(|e| {
             ModelError::Network(format!("Falha ao ler corpo da resposta HTTP: {}", e))
         })?;
@@ -315,10 +321,15 @@ impl GeminiProviderAdapter {
 
             return match status_code {
                 400 => Err(ModelError::InvalidRequest(error_msg)),
-                401 | 403 => Err(ModelError::Authentication(error_msg)),
-                429 => Err(ModelError::RateLimited {
-                    retry_after_secs: None,
-                }),
+                401 => Err(ModelError::Authentication(error_msg)),
+                403 => Err(ModelError::ProviderAuthorization(error_msg)),
+                429 => {
+                    if error_msg.to_lowercase().contains("quota") {
+                        Err(ModelError::QuotaExceeded(error_msg))
+                    } else {
+                        Err(ModelError::RateLimited { retry_after_secs })
+                    }
+                }
                 500..=599 => Err(ModelError::ProviderUnavailable {
                     status: status_code,
                     message: error_msg,

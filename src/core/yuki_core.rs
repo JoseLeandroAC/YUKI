@@ -271,34 +271,39 @@ impl YukiCore {
                 token
             }
             AuthorizationDecision::RequiresApproval { reason } => {
-                let res = YukiResult::failed(
-                    request_id.clone(),
-                    correlation_id.clone(),
-                    format!("Aprovação externa necessária: {}", reason),
-                );
                 self.event_store.record(AuditEvent::new(
                     EventType::AuthorizationDenied,
-                    correlation_id,
-                    CausationId::new(request_id.to_string()),
-                    serde_json::json!({ "reason": reason }),
-                    "yuki_core",
+                    correlation_id.clone(),
+                    CausationId::new(operation_id.0.clone()),
+                    serde_json::json!({
+                        "operation_id": operation_id.0,
+                        "requires_approval": true,
+                        "reason": reason
+                    }),
+                    "security_controller",
                 ))?;
-                return Ok(res);
+                return Ok(YukiResult::denied(
+                    request_id,
+                    correlation_id,
+                    format!("Ação requer aprovação humana: {}", reason),
+                ));
             }
             AuthorizationDecision::Deny { reason } => {
-                let res = YukiResult::failed(
-                    request_id.clone(),
-                    correlation_id.clone(),
-                    format!("Acesso negado: {}", reason),
-                );
                 self.event_store.record(AuditEvent::new(
                     EventType::AuthorizationDenied,
-                    correlation_id,
-                    CausationId::new(request_id.to_string()),
-                    serde_json::json!({ "reason": reason }),
-                    "yuki_core",
+                    correlation_id.clone(),
+                    CausationId::new(operation_id.0.clone()),
+                    serde_json::json!({
+                        "operation_id": operation_id.0,
+                        "reason": reason
+                    }),
+                    "security_controller",
                 ))?;
-                return Ok(res);
+                return Ok(YukiResult::denied(
+                    request_id,
+                    correlation_id,
+                    format!("Ação rejeitada por segurança: {}", reason),
+                ));
             }
         };
 

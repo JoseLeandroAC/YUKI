@@ -46,10 +46,41 @@ impl SecretRef {
         if !uri.starts_with("secret://") {
             return Err(CredentialError::InvalidReference(uri));
         }
+
+        let alias = sanitized_alias.into();
+        Self::validate_alias(&alias)?;
+
         Ok(Self {
             uri,
-            sanitized_alias: sanitized_alias.into(),
+            sanitized_alias: alias,
         })
+    }
+
+    /// Valida que o alias sanitizado é seguro para auditoria e logs.
+    ///
+    /// REGRAS DE VALIDAÇÃO:
+    /// 1. Não vazio e com tamanho máximo de 64 caracteres.
+    /// 2. Contém apenas caracteres minúsculos, números, '-' ou '_'.
+    /// 3. Não contém esquemas (`://`), barras (`/`), espaços em branco ou bytes sensíveis.
+    fn validate_alias(alias: &str) -> Result<(), CredentialError> {
+        if alias.is_empty() || alias.len() > 64 {
+            return Err(CredentialError::InvalidReference(format!(
+                "Alias de credencial deve ter entre 1 e 64 caracteres: '{}'",
+                alias
+            )));
+        }
+
+        if !alias
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        {
+            return Err(CredentialError::InvalidReference(format!(
+                "Alias de credencial deve conter apenas caracteres minúsculos, números, '-' ou '_': '{}'",
+                alias
+            )));
+        }
+
+        Ok(())
     }
 
     /// Retorna a URI canônica da referência (ex: `secret://env/YUKI_GEMINI_API_KEY`).

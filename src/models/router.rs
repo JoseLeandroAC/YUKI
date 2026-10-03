@@ -7,6 +7,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// Roteador do Model Gateway para despacho configurável e failover opcional (ADR-018).
+///
+/// INVARIANTE CONSTITUCIONAL DE PRIVACIDADE E JURISDIÇÃO (ADR-015, ADR-017):
+/// `Provider Failure != Authorization To Send Data To Another Provider`
+/// Falha do provedor primário NÃO autoriza o envio indiscriminado de dados a terceiros.
+/// O failover é estritamente opt-in, desativado por padrão (`fallback: None`).
+/// Qualquer fallback configurado DEVE ser previamente aprovado e elegível para processar
+/// a mesma categoria de dados e propósito de contexto.
 pub struct ModelRouter {
     primary: Arc<dyn ModelProvider>,
     fallback: Option<Arc<dyn ModelProvider>>,

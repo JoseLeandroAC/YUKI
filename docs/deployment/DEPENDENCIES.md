@@ -24,7 +24,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Features Habilitadas:** `default-tls`, `json`
 - **Propósito:** Cliente HTTP assíncrono para o adaptador de provedor de modelo (`GeminiProviderAdapter`).
 - **Por que é necessária:** Comunicação REST HTTPS com a API do Google Gemini (`generateContent`) com suporte a timeout de conexão, timeout total de requisição e parsing de JSON.
-- **Justificativa do Recurso de TLS:** A feature `default-tls` utiliza o SChannel nativo no Windows (puro Rust FFI com APIs do sistema operacional sem requerer compilador C `gcc.exe` local) e OpenSSL no Linux CI runner. Isso garante compilação determinística e limpa sem dependência de toolchain C externa.
+- **Justificativa do Recurso de TLS:** A feature `default-tls` utiliza a pilha de TLS nativa do sistema operacional através de `native-tls`: no Windows de desenvolvimento, utiliza SChannel (acessado via FFI direto para bibliotecas do SO sem necessidade de compilador C `gcc.exe` no PATH); no Linux (CI, containers OCI e servidores de produção), utiliza OpenSSL (requer `libssl-dev` para compilação e `libssl3` + `ca-certificates` em runtime). Isso viabilizou compilação local limpa no host Windows GNU sem toolchain C externa, mantendo compatibilidade padrão com o ambiente Linux de execução remota.
 - **Isolamento Arquitetural:** O `reqwest` está restrito a `src/models/gemini.rs`. Tipos do `reqwest` (como `Client`, `Response`, `StatusCode`) não vazam para os contratos de domínio ou para o núcleo da Yuki.
 - **Exit Path / Substituição:** Qualquer outro cliente HTTP assíncrono (ex: `hyper`, `surf`, `ureq` ou implementação baseada em sockets TLS brutos).
 
@@ -32,8 +32,8 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Requisito no `Cargo.toml`:** `^1.8` (SemVer: `>= 1.8.0, < 2.0.0`)
 - **Versão Resolvida no `Cargo.lock`:** `1.8.1`
 - **Features Habilitadas:** `derive`
-- **Propósito:** Limpeza criptográfica de memória para segredos transitórios (`SecretMaterial`) no momento do `Drop`.
-- **Por que é necessária:** Garante a eliminação defensiva de resíduos de chaves e tokens de API em buffers de memória sob controle direto da aplicação após o término do lease.
+- **Propósito:** Sobrescrita defensiva de memória para segredos transitórios (`SecretMaterial`) no momento do `Drop`.
+- **Por que é necessária:** Executa a sobrescrita defensiva de buffers de memória diretamente gerenciados pela aplicação (`SecretMaterial`) no momento do descarte (`Drop`), reduzindo a janela de permanência de resíduos de segredos em memória sob controle direto da Yuki.
 - **Isolamento Arquitetural:** O `zeroize` está restrito a `src/security/credentials.rs`.
 - **Exit Path / Substituição:** Limpeza manual de memória via ponteiros voláteis (`std::ptr::write_volatile`).
 

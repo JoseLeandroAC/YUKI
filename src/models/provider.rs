@@ -100,6 +100,11 @@ pub struct CapabilityProposal {
     pub provider_response_id: Option<ProviderResponseId>,
     pub capability_id: CapabilityId,
     pub parameters: serde_json::Value,
+    /// Procedência auditável gerada internamente pela Yuki.
+    ///
+    /// INVARIANTE:
+    /// Este campo NÃO contém tokens de 'thought' ou cadeia oculta de raciocínio (hidden CoT)
+    /// do provedor externo. Ele documenta a validação sintática e procedência para auditoria.
     pub reasoning: String,
 }
 

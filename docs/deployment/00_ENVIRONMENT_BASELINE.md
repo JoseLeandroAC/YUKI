@@ -51,6 +51,7 @@ Em conformidade com a **Regra Operacional de Inventário**, nenhuma tecnologia o
 - **CPU:** 1 vCPU (mínimo)
 - **Memória RAM:** 512 MB (mínimo para execução do runtime)
 - **Disco:** 500 MB livres para binário, logs e banco SQLite local
+- **Dependências de Sistema (Linux):** Para compilação: `pkg-config`, `libssl-dev`. Para runtime/container: `libssl3` e `ca-certificates` (necessários para a pilha `native-tls` / OpenSSL).
 
 ---
 

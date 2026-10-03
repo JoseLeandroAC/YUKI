@@ -85,6 +85,27 @@ fn test_security_06_secret_ref_sanitized_alias_in_audit() {
     assert!(!alias.contains("/"));
 }
 
+#[test]
+fn test_security_06b_secret_ref_rejects_malformed_alias() {
+    let invalid_aliases = [
+        "",                        // Vazio
+        "AIzaSyD-RawSecret12345",  // Caracteres maiúsculos
+        "secret://env/GEMINI_KEY", // Contém esquema e barras
+        "alias with spaces",       // Contém espaços
+        "alias/with/slashes",      // Contém barras
+        "alias@host",              // Caractere inválido
+    ];
+
+    for alias in invalid_aliases {
+        let result = SecretRef::new("secret://env/TEST_KEY", alias);
+        assert!(
+            matches!(result, Err(CredentialError::InvalidReference(_))),
+            "Deveria rejeitar alias malformado: '{}'",
+            alias
+        );
+    }
+}
+
 // 7. Credencial Ausente Retorna CredentialError::NotFound
 #[test]
 fn test_security_07_missing_credential_returns_not_found() {
