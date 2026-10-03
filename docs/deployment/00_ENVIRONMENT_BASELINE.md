@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/00_ENVIRONMENT_BASELINE.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 2)
+**Fase:** MVP-1 (Marco 3)
 **Última Atualização:** 2026-10-03  
 **Verificado Por:** Yuki Architecture Review  
 
@@ -24,6 +24,8 @@ Em conformidade com a **Regra Operacional de Inventário**, nenhuma tecnologia o
 | **Cargo** | `1.98.1` | Distribuído com Rust | Gerenciamento de dependências, builds e suítes de testes | Primária / Obrigatória |
 | **Clippy** | `0.1.98` | Componente Rustup | Análise estática de código com política `-D warnings` | Primária / Obrigatória |
 | **Rustfmt** | `1.8.0` | Componente Rustup | Formatação determinística de código | Primária / Obrigatória |
+| **C Toolchain Local (Windows)** | LLVM-MinGW `22.1.8-20260616` (MSVCRT) | `winget` (`MartinStorsjo.LLVM-MinGW.MSVCRT`) | Compilador C (`gcc`/`clang`) para compilar `sqlite3.c` embutido (`libsqlite3-sys` via `cc-rs`) | Primária / Obrigatória |
+| **C Toolchain CI / Linux** | `gcc` / `build-essential` | Runner Ubuntu / apt | Compilador C para compilar `sqlite3.c` no Linux | Primária / Verificação |
 | **Target de Desenvolvimento Local** | `x86_64-pc-windows-gnu` | MinGW-w64 / rustup | Target local na máquina de desenvolvimento | Transitória (Janela ~3m) |
 | **Linker de Desenvolvimento** | `rust-lld` | Rust bundled | Linkagem rápida de binários no Windows | Otimização |
 | **Target de CI** | `x86_64-unknown-linux-gnu` | Ubuntu Latest / GCC | Target padrão nos runners do GitHub Actions | Primária / Verificação |
@@ -45,13 +47,14 @@ Em conformidade com a **Regra Operacional de Inventário**, nenhuma tecnologia o
 - **Memória RAM:** 4 GB mínimo (8 GB recomendado para compilação rápida)
 - **Disco:** 2 GB livres para cache de `target/` e crates
 - **Git:** Git for Windows (executável no PATH ou via GitHub Desktop)
+- **Compilador C:** `gcc.exe` ou `clang.exe` no PATH (obtido via `winget install MartinStorsjo.LLVM-MinGW.MSVCRT` ou toolchain MinGW compatível) para suportar compilação do SQLite bundled.
 
 ### Produção / Container / CI (Linux)
 - **SO:** Linux Kernel 5.4+ (Debian 12 Bookworm, Ubuntu 22.04/24.04 ou Alpine)
 - **CPU:** 1 vCPU (mínimo)
 - **Memória RAM:** 512 MB (mínimo para execução do runtime)
 - **Disco:** 500 MB livres para binário, logs e banco SQLite local
-- **Dependências de Sistema (Linux):** Para compilação: `pkg-config`, `libssl-dev`. Para runtime/container: `libssl3` e `ca-certificates` (necessários para a pilha `native-tls` / OpenSSL).
+- **Dependências de Sistema (Linux):** Para compilação: `build-essential` (ou `gcc`), `pkg-config`, `libssl-dev`. Para runtime/container: `libssl3` e `ca-certificates` (necessários para a pilha `native-tls` / OpenSSL).
 
 ---
 

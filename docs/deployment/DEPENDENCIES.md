@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/DEPENDENCIES.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 2)
+**Fase:** MVP-1 (Marco 3)
 **Última Atualização:** 2026-10-03  
 **Governança:** Engineering Rule — Regra Operacional de Inventário  
 
@@ -16,9 +16,23 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ## 2. Inventário de Crates do Rust (`Cargo.toml`)
 
-### A. Dependências Adicionadas no MVP-1 (Marco 2)
+### A. Dependências Adicionadas no MVP-1 (Marco 3)
 
-#### 1. `reqwest`
+#### 1. `rusqlite`
+- **Requisito no `Cargo.toml`:** `0.40` (SemVer: `>= 0.40.0, < 0.41.0`)
+- **Versão Resolvida no `Cargo.lock`:** `0.40.2` (com `libsqlite3-sys 0.38.2`)
+- **Features Habilitadas:** `bundled`
+- **Propósito:** Adaptador de persistência local SQLite embarcado (`SqliteAuditStore`) para registro durável de auditoria (`audit_events`) e resultados de verificação (`verification_records`).
+- **Por que é necessária:** Garante persistência append-only em disco com modo WAL (`PRAGMA journal_mode = WAL`), durabilidade proporcional (`PRAGMA synchronous = NORMAL`), checagem preliminar de integridade (`PRAGMA quick_check(1)`), isolamento de concorrência com timeout (`PRAGMA busy_timeout = 5000`), paginação estável e triggers SQL defensivos contra mutação e deleção. A feature `bundled` compila o código-fonte C do SQLite 3 diretamente embutido no binário, eliminando dependência de bibliotecas dinâmicas do sistema operacional (`sqlite3.so` ou `sqlite3.dll`).
+- **Requisitos de Compilação (Toolchain):** Requer compilador C compatível (`gcc` ou `clang`) invocado pelo build script de `libsqlite3-sys` via `cc-rs`. No ambiente de desenvolvimento local Windows GNU, foi provisionada a toolchain portátil `MartinStorsjo.LLVM-MinGW.MSVCRT` (versão `22.1.8-20260616`). No CI/Linux (`ubuntu-latest`), utiliza o `gcc` padrão já presente na imagem base.
+- **Isolamento Arquitetural:** O `rusqlite` e `libsqlite3-sys` estão estritamente contidos no módulo `src/persistence/` (`src/persistence/sqlite.rs`, `src/persistence/migrations.rs`, `src/persistence/schema.rs`). Nenhuma estrutura ou tipo do `rusqlite` vaza para o núcleo da Yuki (`YukiCore`) ou para os contratos de domínio público (`contracts/`).
+- **Exit Path / Substituição:** O port abstrato `AuditQueryStore` e a trait herdada da Foundation `EventStore` permitem substituição transparente por PostgreSQL, DuckDB, LMDB ou arquivo de log estruturado append-only (JSONL/parquet).
+
+---
+
+### B. Dependências Adicionadas no MVP-1 (Marco 2)
+
+#### 2. `reqwest`
 - **Requisito no `Cargo.toml`:** `^0.12` (SemVer: `>= 0.12.0, < 0.13.0`)
 - **Versão Resolvida no `Cargo.lock`:** `0.12.4`
 - **Features Habilitadas:** `default-tls`, `json`
@@ -28,7 +42,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Isolamento Arquitetural:** O `reqwest` está restrito a `src/models/gemini.rs`. Tipos do `reqwest` (como `Client`, `Response`, `StatusCode`) não vazam para os contratos de domínio ou para o núcleo da Yuki.
 - **Exit Path / Substituição:** Qualquer outro cliente HTTP assíncrono (ex: `hyper`, `surf`, `ureq` ou implementação baseada em sockets TLS brutos).
 
-#### 2. `zeroize`
+#### 3. `zeroize`
 - **Requisito no `Cargo.toml`:** `^1.8` (SemVer: `>= 1.8.0, < 2.0.0`)
 - **Versão Resolvida no `Cargo.lock`:** `1.8.1`
 - **Features Habilitadas:** `derive`
@@ -39,9 +53,9 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ---
 
-### B. Dependências Adicionadas no MVP-1 (Marco 1)
+### C. Dependências Adicionadas no MVP-1 (Marco 1)
 
-#### 3. `tokio`
+#### 4. `tokio`
 - **Requisito no `Cargo.toml`:** `^1.43` (SemVer: `>= 1.43.0, < 2.0.0`)
 - **Versão Resolvida no `Cargo.lock`:** `1.43.0`
 - **Features Habilitadas:** `rt-multi-thread`, `macros`, `signal`, `time`
@@ -52,7 +66,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ---
 
-### C. Dependências Transitivas e Restrição de Toolchain Local
+### D. Dependências Transitivas e Restrição de Toolchain Local
 
 #### `LOCAL TOOLCHAIN COMPATIBILITY CONSTRAINT` (Apenas no `Cargo.lock`)
 - **Crates Envolvidos:** `mio` (resolvido em `1.0.3`), `hyper-util` (`0.1.3`), `native-tls` (`0.2.12`), `schannel` (`0.1.23`), e `windows-sys` (`0.52.0` / `0.48.0` com `windows-targets`).
@@ -63,9 +77,9 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ---
 
-### D. Dependências Herdadas da Foundation v0.1 (MVP-0)
+### E. Dependências Herdadas da Foundation v0.1 (MVP-0)
 
-#### 4. `serde`
+#### 5. `serde`
 - **Requisito no `Cargo.toml`:** `^1.0`
 - **Versão Resolvida no `Cargo.lock`:** `1.0.219`
 - **Features Habilitadas:** `derive`
@@ -73,7 +87,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Serialização e deserialização de contratos, identificadores, requisições e eventos.
 - **Exit Path / Substituição:** Framework padrão da indústria no ecossistema Rust; substituição teórica exigiria implementação manual de codecs.
 
-#### 5. `serde_json`
+#### 6. `serde_json`
 - **Requisito no `Cargo.toml`:** `^1.0`
 - **Versão Resolvida no `Cargo.lock`:** `1.0.140`
 - **Features Habilitadas:** Padrão
@@ -81,7 +95,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Representação interoperável de payloads de contexto, argumentos de capacidades e metadados de eventos.
 - **Exit Path / Substituição:** `simd-json` para maior performance ou outro formato binário (MessagePack, CBOR).
 
-#### 6. `thiserror`
+#### 7. `thiserror`
 - **Requisito no `Cargo.toml`:** `^2.0`
 - **Versão Resolvida no `Cargo.lock`:** `2.0.12`
 - **Features Habilitadas:** Padrão
@@ -89,7 +103,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Garante tipagem estrita de erros sem converter falhas em strings livres genéricas.
 - **Exit Path / Substituição:** Implementação manual de `std::fmt::Display` e `std::error::Error`.
 
-#### 7. `chrono`
+#### 8. `chrono`
 - **Requisito no `Cargo.toml`:** `^0.4`
 - **Versão Resolvida no `Cargo.lock`:** `0.4.40`
 - **Features Habilitadas:** `default-features = false`, `features = ["std", "serde"]`
@@ -97,7 +111,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Registro temporal preciso e imutável para eventos de auditoria e tolerância temporal.
 - **Exit Path / Substituição:** `time` crate ou `std::time::SystemTime`.
 
-#### 8. `clap`
+#### 9. `clap`
 - **Requisito no `Cargo.toml`:** `^4.5`
 - **Versão Resolvida no `Cargo.lock`:** `4.5.31`
 - **Features Habilitadas:** `default-features = false`, `features = ["derive", "std", "help", "usage", "error-context"]`
@@ -105,7 +119,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Permite a interação com comandos como `yuki health` e passagem de prompts na linha de comando.
 - **Exit Path / Substituição:** `lexopt` ou parsing manual via `std::env::args`.
 
-#### 9. `tracing`
+#### 10. `tracing`
 - **Requisito no `Cargo.toml`:** `^0.1`
 - **Versão Resolvida no `Cargo.lock`:** `0.1.41`
 - **Features Habilitadas:** Padrão
@@ -113,7 +127,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Diagnóstico e telemetria operacional sem acoplamento a arquivos ou destinos de log específicos.
 - **Exit Path / Substituição:** `log` crate padrão ou sistema de telemetria OpenTelemetry.
 
-#### 10. `tracing-subscriber`
+#### 11. `tracing-subscriber`
 - **Requisito no `Cargo.toml`:** `^0.3`
 - **Versão Resolvida no `Cargo.lock`:** `0.3.19`
 - **Features Habilitadas:** `default-features = false`, `features = ["fmt"]`
@@ -136,8 +150,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ## 4. Dependências Previstas para os Próximos Marcos (Ainda NÃO Adicionadas)
 
-As seguintes dependências estão aprovadas na especificação mas **NÃO** foram adicionadas no Marco 2:
+As seguintes dependências estão catalogadas para avaliação mas **NÃO** foram adicionadas no Marco 3:
 
-- `rusqlite` (Marco 3 — Adaptador de persistência local SQLite)
-- `toml` (Marco 3 — Parser de arquivo de configuração em disco)
-- `sha2` (Marco 3 — Hashing determinístico independente de argumentos)
+- `toml` (Marco 4 — Parser de arquivo de configuração estruturado em disco `config/yuki.toml`)
+- `sha2` (Opcional / Futuro — Hashing criptográfico adicional se requerido por novos adapters)

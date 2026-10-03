@@ -48,6 +48,8 @@ fn test_verification_confirms_success_with_valid_evidence() {
         data: serde_json::json!({ "valid_echo": true, "echoed_message": "sucesso" }),
         observed_at: now_utc(),
         confidence_basis: "confirmed_match".to_string(),
+        operation_id: None,
+        attempt_id: None,
     }];
 
     let result = verifier.verify(&op_id, &execution, &evidences);
@@ -110,6 +112,8 @@ fn test_conflicting_evidence_produces_unknown_conflicting() {
         data: serde_json::json!({ "conflict": true, "details": "sensor reports conflicting state" }),
         observed_at: now_utc(),
         confidence_basis: "sensor_discordance".to_string(),
+        operation_id: None,
+        attempt_id: None,
     }];
 
     let result = verifier.verify(&op_id, &execution, &evidences);

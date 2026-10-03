@@ -344,6 +344,8 @@ impl YukiCore {
                         data: output.clone(),
                         observed_at: now_utc(),
                         confidence_basis: "deterministic_execution_output".to_string(),
+                        operation_id: Some(operation_id.clone()),
+                        attempt_id: Some(attempt_id.clone()),
                     }]
                 } else {
                     Vec::new()
@@ -363,9 +365,14 @@ impl YukiCore {
             "verification_engine",
         ))?;
 
-        let verification = self
-            .verifier
-            .verify(&operation_id, &exec_result, &evidences);
+        let verification_context = crate::verification::VerificationContext::new(
+            &operation_id,
+            &proposal.capability_id,
+            &exec_result,
+            &evidences,
+        );
+
+        let verification = self.verifier.verify_operation(&verification_context);
 
         self.event_store.record(AuditEvent::new(
             EventType::VerificationCompleted,
