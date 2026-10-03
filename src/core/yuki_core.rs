@@ -412,13 +412,20 @@ impl YukiCore {
         Ok(result)
     }
 
-    /// Asynchronous processing pipeline entry point:
-    /// Enables non-blocking execution, cooperative cancellation and timeout boundaries.
+    /// Asynchronous processing pipeline entry point (Marco 1 Compatibility Bridge):
+    /// In Marco 1, establishes an asynchronous boundary around the synchronous pipeline
+    /// without contaminating pure in-memory domain evaluation.
+    /// In subsequent milestones, external I/O (network LLMs, persistent disk storage)
+    /// will be awaited directly.
     pub async fn process_input_async(&self, input: UserInput) -> Result<YukiResult, YukiError> {
         self.process_input(input)
     }
 
-    /// Asynchronous processing with explicit timeout boundary.
+    /// Asynchronous processing with explicit future timeout boundary.
+    ///
+    /// # Durability & Cancellation Semantics:
+    /// Dropping/cancelling this future on timeout terminates the local waiting task.
+    /// It does NOT imply that any external side effect has been cancelled or rolled back.
     pub async fn process_input_with_timeout(
         &self,
         input: UserInput,

@@ -31,6 +31,9 @@ async fn test_async_runtime_with_timeout_succeeds_under_limit() {
     assert!(result.verification_result.is_some());
 }
 
+/// Proves cooperative branch selection and future dropping behavior via tokio::select!.
+/// NOTE: Dropping a future locally cancels the waiting task, but does NOT represent a general
+/// distributed cancellation or rollback guarantee for external side effects.
 #[tokio::test]
 async fn test_async_runtime_cancellation_select() {
     let core = YukiCore::new();

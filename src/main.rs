@@ -41,24 +41,32 @@ async fn main() {
 
             println!("Core: {}", if health.core_ok { "OK" } else { "FAIL" });
             println!("Context: {}", if health.context_ok { "OK" } else { "FAIL" });
-            println!("Model: {}", if health.model_ok { "OK" } else { "FAIL" });
+            println!(
+                "Model Subsystem (Mock): {}",
+                if health.model_ok { "OK" } else { "FAIL" }
+            );
+            println!("External Model Provider: NOT CONFIGURED (Planned: Marco 2)");
             println!(
                 "Capability Registry: {}",
                 if health.registry_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Security: {}",
+                "Security Controller: {}",
                 if health.security_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Execution: {}",
+                "Execution Engine: {}",
                 if health.execution_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Verification: {}",
+                "Verification Engine: {}",
                 if health.verification_ok { "OK" } else { "FAIL" }
             );
-            println!("Audit: {}", if health.audit_ok { "OK" } else { "FAIL" });
+            println!(
+                "Audit Subsystem (In-Memory): {}",
+                if health.audit_ok { "OK" } else { "FAIL" }
+            );
+            println!("Persistent Audit (SQLite): NOT CONFIGURED (Planned: Marco 3)");
         }
         None => {
             if cli.prompt.is_empty() {

@@ -24,9 +24,16 @@ Em conformidade com a **Regra Operacional de Inventário**, nenhuma tecnologia o
 | **Cargo** | `1.98.1` | Distribuído com Rust | Gerenciamento de dependências, builds e suítes de testes | Primária / Obrigatória |
 | **Clippy** | `0.1.98` | Componente Rustup | Análise estática de código com política `-D warnings` | Primária / Obrigatória |
 | **Rustfmt** | `1.8.0` | Componente Rustup | Formatação determinística de código | Primária / Obrigatória |
-| **Target de Desenvolvimento** | `x86_64-pc-windows-gnu` | MinGW-w64 / rustup | Target local na máquina de desenvolvimento | Transitória (Janela ~3m) |
+| **Target de Desenvolvimento Local** | `x86_64-pc-windows-gnu` | MinGW-w64 / rustup | Target local na máquina de desenvolvimento | Transitória (Janela ~3m) |
 | **Linker de Desenvolvimento** | `rust-lld` | Rust bundled | Linkagem rápida de binários no Windows | Otimização |
-| **Target de Produção / CI** | `x86_64-unknown-linux-gnu` | Linux libc / GCC | Target padrão para CI e execução remota / container | Primária / Durável |
+| **Target de CI** | `x86_64-unknown-linux-gnu` | Ubuntu Latest / GCC | Target padrão nos runners do GitHub Actions | Primária / Verificação |
+| **Target de Runtime / Produção** | `x86_64-unknown-linux-gnu` | Linux libc / OCI Container | Execução remota independente da máquina local | Primária / Durável |
+
+### Papéis de Ambiente Distintos
+- **Development Host:** Máquina temporária Windows 11 x86_64 utilizada durante a janela acelerada de desenvolvimento (~3 meses).
+- **Build Target:** Target de compilação ativo (`x86_64-pc-windows-gnu` no host local ou `x86_64-unknown-linux-gnu` no build de container/CI).
+- **CI Target:** Runner limpo `ubuntu-latest` no GitHub Actions executando compilação e testes remotos sem credenciais.
+- **Runtime Target:** Imagem OCI/Docker Linux executando em VPS/VM remota de forma durável e headless. O ambiente de desenvolvimento Windows GNU não é requisito arquitetural da Yuki.
 
 ---
 
