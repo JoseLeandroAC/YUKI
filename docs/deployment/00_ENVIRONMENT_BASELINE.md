@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/00_ENVIRONMENT_BASELINE.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 1)  
+**Fase:** MVP-1 (Marco 2)
 **Última Atualização:** 2026-10-03  
 **Verificado Por:** Yuki Architecture Review  
 
@@ -71,11 +71,11 @@ Nenhum segredo real é registrado neste arquivo. Consulte `.env.example` para re
 
 ## 5. Serviços Externos e Conectividade de Rede
 
-No Marco 1, a Yuki opera com **zero conexões de rede externas**.
+No Marco 2, a suíte de testes de rotina e o CI padrão continuam operando com **zero conexões de rede externas** através de mocks determinísticos (`MockModelProvider`). A conectividade externa com o provedor Google Gemini é opcional, ativada sob demanda e estritamente delimitada por timeouts, retentativas com backoff e limites de payload.
 
-| Serviço | Protocolo | Porta | Endpoint | Necessário no Marco 1? |
+| Serviço | Protocolo | Porta | Endpoint | Necessário no Marco 2? |
 |---|---|---|---|---|
-| **Google Gemini API** | HTTPS / TLS 1.3 | 443 | `generativelanguage.googleapis.com` | **NÃO** (Introduzido no Marco 2) |
+| **Google Gemini API** | HTTPS / TLS 1.3 | 443 | `generativelanguage.googleapis.com` | **OPCIONAL** (Para execução live com credencial; offline em CI padrão) |
 | **GitHub Actions** | HTTPS / Git | 443 | `github.com/JoseLeandroAC/YUKI` | **SIM** (Para validação contínua remota) |
 
 ---

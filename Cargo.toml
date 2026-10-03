@@ -14,6 +14,10 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
+zeroize = { version = "1.8", features = ["derive"] }
+
+
 
 [[bin]]
 name = "yuki"

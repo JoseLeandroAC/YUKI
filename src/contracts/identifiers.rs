@@ -239,3 +239,60 @@ impl fmt::Display for IdempotencyKey {
         write!(f, "{}", self.0)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelRequestId(pub String);
+
+impl ModelRequestId {
+    pub fn new() -> Self {
+        Self(generate_unique_id("mreq"))
+    }
+}
+
+impl Default for ModelRequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ModelRequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProposalId(pub String);
+
+impl ProposalId {
+    pub fn new() -> Self {
+        Self(generate_unique_id("prop"))
+    }
+}
+
+impl Default for ProposalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ProposalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProviderResponseId(pub String);
+
+impl ProviderResponseId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl fmt::Display for ProviderResponseId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

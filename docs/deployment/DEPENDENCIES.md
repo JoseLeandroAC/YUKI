@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/DEPENDENCIES.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 1)  
+**Fase:** MVP-1 (Marco 2)
 **Última Atualização:** 2026-10-03  
 **Governança:** Engineering Rule — Regra Operacional de Inventário  
 
@@ -16,9 +16,32 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ## 2. Inventário de Crates do Rust (`Cargo.toml`)
 
-### A. Dependências Adicionadas no MVP-1 (Marco 1)
+### A. Dependências Adicionadas no MVP-1 (Marco 2)
 
-#### 1. `tokio`
+#### 1. `reqwest`
+- **Requisito no `Cargo.toml`:** `^0.12` (SemVer: `>= 0.12.0, < 0.13.0`)
+- **Versão Resolvida no `Cargo.lock`:** `0.12.4`
+- **Features Habilitadas:** `default-tls`, `json`
+- **Propósito:** Cliente HTTP assíncrono para o adaptador de provedor de modelo (`GeminiProviderAdapter`).
+- **Por que é necessária:** Comunicação REST HTTPS com a API do Google Gemini (`generateContent`) com suporte a timeout de conexão, timeout total de requisição e parsing de JSON.
+- **Justificativa do Recurso de TLS:** A feature `default-tls` utiliza o SChannel nativo no Windows (puro Rust FFI com APIs do sistema operacional sem requerer compilador C `gcc.exe` local) e OpenSSL no Linux CI runner. Isso garante compilação determinística e limpa sem dependência de toolchain C externa.
+- **Isolamento Arquitetural:** O `reqwest` está restrito a `src/models/gemini.rs`. Tipos do `reqwest` (como `Client`, `Response`, `StatusCode`) não vazam para os contratos de domínio ou para o núcleo da Yuki.
+- **Exit Path / Substituição:** Qualquer outro cliente HTTP assíncrono (ex: `hyper`, `surf`, `ureq` ou implementação baseada em sockets TLS brutos).
+
+#### 2. `zeroize`
+- **Requisito no `Cargo.toml`:** `^1.8` (SemVer: `>= 1.8.0, < 2.0.0`)
+- **Versão Resolvida no `Cargo.lock`:** `1.8.1`
+- **Features Habilitadas:** `derive`
+- **Propósito:** Limpeza criptográfica de memória para segredos transitórios (`SecretMaterial`) no momento do `Drop`.
+- **Por que é necessária:** Garante a eliminação defensiva de resíduos de chaves e tokens de API em buffers de memória sob controle direto da aplicação após o término do lease.
+- **Isolamento Arquitetural:** O `zeroize` está restrito a `src/security/credentials.rs`.
+- **Exit Path / Substituição:** Limpeza manual de memória via ponteiros voláteis (`std::ptr::write_volatile`).
+
+---
+
+### B. Dependências Adicionadas no MVP-1 (Marco 1)
+
+#### 3. `tokio`
 - **Requisito no `Cargo.toml`:** `^1.43` (SemVer: `>= 1.43.0, < 2.0.0`)
 - **Versão Resolvida no `Cargo.lock`:** `1.43.0`
 - **Features Habilitadas:** `rt-multi-thread`, `macros`, `signal`, `time`
@@ -29,20 +52,20 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ---
 
-### B. Dependências Transitivas e Restrição de Toolchain Local
+### C. Dependências Transitivas e Restrição de Toolchain Local
 
 #### `LOCAL TOOLCHAIN COMPATIBILITY CONSTRAINT` (Apenas no `Cargo.lock`)
-- **Crates Envolvidos:** `mio` (resolvido em `1.0.3`) e `windows-sys` (resolvido em `0.52.0` com `windows-targets 0.52.6`).
-- **Contexto Técnico:** Na compilação local sob o target `x86_64-pc-windows-gnu` em caminhos de diretório contendo caracteres acentuados (ex: `Miriã`, `JOSÉ`), versões mais recentes do `windows-sys` (`>= 0.60`) geram bibliotecas de importação dinamicamente invocando `dlltool.exe`, o que provoca falha interna de `CreateProcess` no MinGW-w64.
-- **Resolução Adotada:** O `Cargo.lock` trava transitivamente `mio` em `1.0.3` e `windows-sys` em `0.52.0`. Essa versão utiliza bibliotecas estáticas `.a` pré-compiladas em `windows-targets`, eliminando a necessidade de chamar `dlltool.exe`.
+- **Crates Envolvidos:** `mio` (resolvido em `1.0.3`), `hyper-util` (`0.1.3`), `native-tls` (`0.2.12`), `schannel` (`0.1.23`), e `windows-sys` (`0.52.0` / `0.48.0` com `windows-targets`).
+- **Contexto Técnico:** Na compilação local sob o target `x86_64-pc-windows-gnu` em caminhos de diretório contendo caracteres acentuados (ex: `Miriã`, `JOSÉ`), versões mais recentes do `windows-sys` (`>= 0.59`) geram bibliotecas de importação dinamicamente invocando `dlltool.exe`, o que provoca falha interna de `CreateProcess` no MinGW-w64.
+- **Resolução Adotada:** O `Cargo.lock` trava transitivamente as versões do ecossistema de rede em lançamentos que utilizam `windows-sys 0.52.0/0.48.0`. Essas versões utilizam bibliotecas estáticas `.a` pré-compiladas em `windows-targets`, eliminando a necessidade de chamar `dlltool.exe`.
 - **Natureza:** É estritamente uma restrição de compatibilidade transitiva do ambiente de compilação local Windows GNU no lockfile. Esses crates **NÃO** são dependências diretas do `Cargo.toml`.
 - **Condição de Saída:** Compilação em ambiente Linux / container OCI (onde `windows-sys` não é compilado), migração para toolchain MSVC, ou atualização futura com correção no MinGW upstream.
 
 ---
 
-### C. Dependências Herdadas da Foundation v0.1 (MVP-0)
+### D. Dependências Herdadas da Foundation v0.1 (MVP-0)
 
-#### 2. `serde`
+#### 4. `serde`
 - **Requisito no `Cargo.toml`:** `^1.0`
 - **Versão Resolvida no `Cargo.lock`:** `1.0.219`
 - **Features Habilitadas:** `derive`
@@ -50,7 +73,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Serialização e deserialização de contratos, identificadores, requisições e eventos.
 - **Exit Path / Substituição:** Framework padrão da indústria no ecossistema Rust; substituição teórica exigiria implementação manual de codecs.
 
-#### 3. `serde_json`
+#### 5. `serde_json`
 - **Requisito no `Cargo.toml`:** `^1.0`
 - **Versão Resolvida no `Cargo.lock`:** `1.0.140`
 - **Features Habilitadas:** Padrão
@@ -58,7 +81,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Representação interoperável de payloads de contexto, argumentos de capacidades e metadados de eventos.
 - **Exit Path / Substituição:** `simd-json` para maior performance ou outro formato binário (MessagePack, CBOR).
 
-#### 4. `thiserror`
+#### 6. `thiserror`
 - **Requisito no `Cargo.toml`:** `^2.0`
 - **Versão Resolvida no `Cargo.lock`:** `2.0.12`
 - **Features Habilitadas:** Padrão
@@ -66,7 +89,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Garante tipagem estrita de erros sem converter falhas em strings livres genéricas.
 - **Exit Path / Substituição:** Implementação manual de `std::fmt::Display` e `std::error::Error`.
 
-#### 5. `chrono`
+#### 7. `chrono`
 - **Requisito no `Cargo.toml`:** `^0.4`
 - **Versão Resolvida no `Cargo.lock`:** `0.4.40`
 - **Features Habilitadas:** `default-features = false`, `features = ["std", "serde"]`
@@ -74,7 +97,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Registro temporal preciso e imutável para eventos de auditoria e tolerância temporal.
 - **Exit Path / Substituição:** `time` crate ou `std::time::SystemTime`.
 
-#### 6. `clap`
+#### 8. `clap`
 - **Requisito no `Cargo.toml`:** `^4.5`
 - **Versão Resolvida no `Cargo.lock`:** `4.5.31`
 - **Features Habilitadas:** `default-features = false`, `features = ["derive", "std", "help", "usage", "error-context"]`
@@ -82,7 +105,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Permite a interação com comandos como `yuki health` e passagem de prompts na linha de comando.
 - **Exit Path / Substituição:** `lexopt` ou parsing manual via `std::env::args`.
 
-#### 7. `tracing`
+#### 9. `tracing`
 - **Requisito no `Cargo.toml`:** `^0.1`
 - **Versão Resolvida no `Cargo.lock`:** `0.1.41`
 - **Features Habilitadas:** Padrão
@@ -90,7 +113,7 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 - **Por que é necessária:** Diagnóstico e telemetria operacional sem acoplamento a arquivos ou destinos de log específicos.
 - **Exit Path / Substituição:** `log` crate padrão ou sistema de telemetria OpenTelemetry.
 
-#### 8. `tracing-subscriber`
+#### 10. `tracing-subscriber`
 - **Requisito no `Cargo.toml`:** `^0.3`
 - **Versão Resolvida no `Cargo.lock`:** `0.3.19`
 - **Features Habilitadas:** `default-features = false`, `features = ["fmt"]`
@@ -113,10 +136,8 @@ Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem es
 
 ## 4. Dependências Previstas para os Próximos Marcos (Ainda NÃO Adicionadas)
 
-As seguintes dependências estão aprovadas na especificação mas **NÃO** foram adicionadas no Marco 1:
+As seguintes dependências estão aprovadas na especificação mas **NÃO** foram adicionadas no Marco 2:
 
-- `reqwest` (Marco 2 — Cliente HTTP para o Model Gateway)
 - `rusqlite` (Marco 3 — Adaptador de persistência local SQLite)
-- `toml` (Marco 2/3 — Parser de arquivo de configuração)
-- `uuid` (Marco 2/3 — Geração de identificadores únicos universais v4)
-- `sha2` (Marco 2/3 — Hashing determinístico independente de argumentos)
+- `toml` (Marco 3 — Parser de arquivo de configuração em disco)
+- `sha2` (Marco 3 — Hashing determinístico independente de argumentos)
