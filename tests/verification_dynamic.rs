@@ -299,10 +299,47 @@ fn test_execution_timeout_does_not_imply_no_mutation() {
     let context = VerificationContext::new(&op_id, &cap_id, &execution, &evidences);
     let result = verifier.verify_operation(&context);
 
+    // EPISTEMIC INVARIANT: Conflicting evidence prevents assuming failure without mutation!
+    // Execution Failure != Proof Of No External Effect
+    assert_eq!(result.verification_state, VerificationState::Unknown);
     assert_eq!(
-        result.verification_state,
-        VerificationState::VerifiedFailure
+        result.observed_effect_state,
+        ObservedEffectState::Conflicting
     );
-    // Failure basis documents that execution failed
-    assert!(result.verification_basis.contains("falhou"));
+    assert!(result.is_unknown());
+}
+
+#[test]
+fn test_partially_bound_attempt_without_operation_rejected() {
+    let verifier = Verifier::new();
+    let op_id = OperationId::new();
+    let cap_id = CapabilityId::new("system.echo");
+    let attempt_id = AttemptId::new();
+
+    let execution = ExecutionResult {
+        operation_id: op_id.clone(),
+        attempt_id: attempt_id.clone(),
+        state: OperationState::Completed,
+        output: Some(serde_json::json!({ "message": "hello" })),
+        error: None,
+        executed_at: now_utc(),
+    };
+
+    // Evidence bound to attempt but missing operation_id (semantically invalid)
+    let evidence = Evidence::new(
+        "output_sensor",
+        serde_json::json!({ "valid_echo": true, "message": "hello" }),
+        "sensor_report",
+    )
+    .with_attempt(attempt_id);
+
+    let evidences = [evidence];
+    let context = VerificationContext::new(&op_id, &cap_id, &execution, &evidences);
+
+    // Partially bound attempt without operation must be rejected
+    assert_eq!(context.valid_evidences().len(), 0);
+
+    let result = verifier.verify_operation(&context);
+    assert_eq!(result.verification_state, VerificationState::Unknown);
+    assert!(result.is_unknown());
 }

@@ -43,8 +43,9 @@ async fn test_sec_persist_token_absent_from_database_bytes() {
         Arc::new(SecurityController::new()),
         Arc::new(Executor::new()),
         Arc::new(Verifier::new()),
-        store.clone(),
-    );
+        Arc::new(yuki::audit::event_store::InMemoryEventStore::new()),
+    )
+    .with_persistent_audit(store.clone());
 
     let input = UserInput::new("echo: token_leak_test");
 
@@ -226,5 +227,29 @@ async fn test_sec_persist_pre_execution_failure_blocks_dispatch() {
     assert!(
         result.is_err(),
         "Falha de persistência pré-execução DEVE bloquear o despacho da capacidade"
+    );
+}
+
+// 6. Invariant: Persistent store failure in pre-execution blocks capability execution
+#[tokio::test]
+async fn test_sec_persist_pre_execution_persistent_audit_failure_blocks_dispatch() {
+    let path = temp_db_path();
+    let _guard = TempDbCleanup(path.clone());
+
+    // Configure store with tiny payload limit (10 bytes) that will fail when writing audit events
+    let store = Arc::new(
+        SqliteAuditStore::open(&path)
+            .expect("open")
+            .with_max_payload_bytes(10),
+    );
+    let core = YukiCore::new().with_persistent_audit(store);
+
+    let input = UserInput::new("echo: payload_too_large_pre_exec");
+    let result = core.process_input_async(input).await;
+
+    // INVARIANT: Pre-execution persistent audit failure blocks dispatch!
+    assert!(
+        result.is_err(),
+        "Falha no SqliteAuditStore durável na pré-execução DEVE abortar o despacho"
     );
 }

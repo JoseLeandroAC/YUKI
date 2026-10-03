@@ -18,6 +18,7 @@ use crate::models::config::ModelGatewayConfig;
 use crate::models::mock::MockModelProvider;
 use crate::models::proposal_parser::ProposalParser;
 use crate::models::provider::{HealthStatus, ModelProvider, ModelRequest};
+use crate::persistence::sqlite::SqliteAuditStore;
 use crate::security::authorization::SecurityController;
 use crate::verification::verifier::Verifier;
 use std::sync::Arc;
@@ -54,6 +55,7 @@ pub struct YukiCore {
     pub executor: Arc<Executor>,
     pub verifier: Arc<Verifier>,
     pub event_store: Arc<dyn EventStore>,
+    pub persistent_audit: Option<Arc<SqliteAuditStore>>,
 }
 
 impl YukiCore {
@@ -65,6 +67,7 @@ impl YukiCore {
             executor: Arc::new(Executor::new()),
             verifier: Arc::new(Verifier::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
+            persistent_audit: None,
         }
     }
 
@@ -83,7 +86,33 @@ impl YukiCore {
             executor,
             verifier,
             event_store,
+            persistent_audit: None,
         }
+    }
+
+    pub fn with_persistent_audit(mut self, persistent_store: Arc<SqliteAuditStore>) -> Self {
+        self.persistent_audit = Some(persistent_store);
+        self
+    }
+
+    /// Dispatches audit recording to persistent storage asynchronously via spawn_blocking,
+    /// while maintaining in-memory EventStore synchronization.
+    ///
+    /// INVARIANT:
+    /// - If persistent store write fails, returns YukiError::ExecutionFailed immediately,
+    ///   blocking capability execution when invoked in pre-execution phases.
+    async fn record_audit_async(&self, event: AuditEvent) -> Result<(), YukiError> {
+        if let Some(store) = &self.persistent_audit {
+            let store_clone = store.clone();
+            store_clone
+                .record_event_async(event.clone())
+                .await
+                .map_err(|e| {
+                    YukiError::ExecutionFailed(format!("Persistent audit write failure: {}", e))
+                })?;
+        }
+        self.event_store.record(event)?;
+        Ok(())
     }
 
     /// Health diagnostic of all fundamental components
@@ -101,7 +130,21 @@ impl YukiCore {
                 serde_json::json!({"check": "ping"}),
                 "health_system",
             ))
-            .is_ok();
+            .is_ok()
+            && self
+                .persistent_audit
+                .as_ref()
+                .map(|p| {
+                    p.record_event(&AuditEvent::new(
+                        EventType::InputReceived,
+                        CorrelationId::new(),
+                        CausationId::new("health_check"),
+                        serde_json::json!({"check": "persistent_ping"}),
+                        "health_system",
+                    ))
+                    .is_ok()
+                })
+                .unwrap_or(true);
 
         SystemHealth {
             core_ok: true,
@@ -128,7 +171,7 @@ impl YukiCore {
         let correlation_id = CorrelationId::from_request(&request_id);
 
         // 1. Audit Input Received
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::InputReceived,
             correlation_id.clone(),
             CausationId::new(request_id.to_string()),
@@ -137,7 +180,8 @@ impl YukiCore {
                 "timestamp": input.timestamp
             }),
             "yuki_core",
-        ))?;
+        ))
+        .await?;
 
         // 2. Build Context Object (Deterministic and synchronous)
         let context_req = ContextRequest {
@@ -147,7 +191,7 @@ impl YukiCore {
         };
         let context = ContextBuilder::build(&context_req)?;
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::ContextBuilt,
             correlation_id.clone(),
             CausationId::new(request_id.to_string()),
@@ -156,7 +200,8 @@ impl YukiCore {
                 "purpose": context.purpose
             }),
             "context_builder",
-        ))?;
+        ))
+        .await?;
 
         // 3. Model Provider (Cognitive Layer - Asynchronous Boundary)
         let model_req = ModelRequest::new(
@@ -169,7 +214,7 @@ impl YukiCore {
 
         let has_proposal =
             model_resp.capability_proposal.is_some() || model_resp.candidate_proposal.is_some();
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::ModelInvoked,
             correlation_id.clone(),
             CausationId::new(context.context_id.0.clone()),
@@ -178,7 +223,8 @@ impl YukiCore {
                 "has_proposal": has_proposal
             }),
             "yuki_core",
-        ))?;
+        ))
+        .await?;
 
         // 4. Capability Proposal Handling & ProposalParser validation
         let proposal = if let Some(p) = model_resp.capability_proposal {
@@ -201,18 +247,19 @@ impl YukiCore {
                 model_resp.raw_content,
                 None,
             );
-            self.event_store.record(AuditEvent::new(
+            self.record_audit_async(AuditEvent::new(
                 EventType::ResponseProduced,
                 correlation_id,
                 CausationId::new(request_id.to_string()),
                 serde_json::json!({ "status": "DirectText" }),
                 "yuki_core",
-            ))?;
+            ))
+            .await?;
             return Ok(res);
         };
 
         let operation_id = OperationId::new();
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::CapabilityProposed,
             correlation_id.clone(),
             CausationId::new(request_id.to_string()),
@@ -222,7 +269,8 @@ impl YukiCore {
                 "reasoning": proposal.reasoning
             }),
             "model_provider",
-        ))?;
+        ))
+        .await?;
 
         // 5. Security Controller Authorization
         // Invariant: Model output != Authorization! Explicit policy evaluation is required.
@@ -241,7 +289,7 @@ impl YukiCore {
             risk_class: risk_class.clone(),
         };
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::AuthorizationRequested,
             correlation_id.clone(),
             CausationId::new(operation_id.0.clone()),
@@ -250,7 +298,8 @@ impl YukiCore {
                 "capability_id": proposal.capability_id.0
             }),
             "security_controller",
-        ))?;
+        ))
+        .await?;
 
         let auth_decision = self
             .security_controller
@@ -258,7 +307,7 @@ impl YukiCore {
 
         let auth_token = match auth_decision {
             AuthorizationDecision::Allow { token, .. } => {
-                self.event_store.record(AuditEvent::new(
+                self.record_audit_async(AuditEvent::new(
                     EventType::AuthorizationGranted,
                     correlation_id.clone(),
                     CausationId::new(operation_id.0.clone()),
@@ -267,11 +316,12 @@ impl YukiCore {
                         "risk_class": format!("{:?}", risk_class)
                     }),
                     "security_controller",
-                ))?;
+                ))
+                .await?;
                 token
             }
             AuthorizationDecision::RequiresApproval { reason } => {
-                self.event_store.record(AuditEvent::new(
+                self.record_audit_async(AuditEvent::new(
                     EventType::AuthorizationDenied,
                     correlation_id.clone(),
                     CausationId::new(operation_id.0.clone()),
@@ -281,7 +331,8 @@ impl YukiCore {
                         "reason": reason
                     }),
                     "security_controller",
-                ))?;
+                ))
+                .await?;
                 return Ok(YukiResult::denied(
                     request_id,
                     correlation_id,
@@ -289,7 +340,7 @@ impl YukiCore {
                 ));
             }
             AuthorizationDecision::Deny { reason } => {
-                self.event_store.record(AuditEvent::new(
+                self.record_audit_async(AuditEvent::new(
                     EventType::AuthorizationDenied,
                     correlation_id.clone(),
                     CausationId::new(operation_id.0.clone()),
@@ -298,7 +349,8 @@ impl YukiCore {
                         "reason": reason
                     }),
                     "security_controller",
-                ))?;
+                ))
+                .await?;
                 return Ok(YukiResult::denied(
                     request_id,
                     correlation_id,
@@ -317,7 +369,7 @@ impl YukiCore {
             input: proposal.parameters.clone(),
         };
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::OperationDispatched,
             correlation_id.clone(),
             CausationId::new(operation_id.0.clone()),
@@ -326,7 +378,8 @@ impl YukiCore {
                 "attempt_id": attempt_id.0
             }),
             "executor",
-        ))?;
+        ))
+        .await?;
 
         let exec_result = self.executor.execute(
             &exec_req,
@@ -354,7 +407,7 @@ impl YukiCore {
             _ => Vec::new(),
         };
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::EffectObserved,
             correlation_id.clone(),
             CausationId::new(attempt_id.0.clone()),
@@ -363,7 +416,8 @@ impl YukiCore {
                 "evidence_count": evidences.len()
             }),
             "verification_engine",
-        ))?;
+        ))
+        .await?;
 
         let verification_context = crate::verification::VerificationContext::new(
             &operation_id,
@@ -374,7 +428,7 @@ impl YukiCore {
 
         let verification = self.verifier.verify_operation(&verification_context);
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::VerificationCompleted,
             correlation_id.clone(),
             CausationId::new(operation_id.0.clone()),
@@ -383,7 +437,8 @@ impl YukiCore {
                 "effect_state": format!("{:?}", verification.observed_effect_state)
             }),
             "verification_engine",
-        ))?;
+        ))
+        .await?;
 
         // 8. Result Production
         let output_text = if let Some(out) = &exec_result.output {
@@ -428,7 +483,7 @@ impl YukiCore {
             )
         };
 
-        self.event_store.record(AuditEvent::new(
+        self.record_audit_async(AuditEvent::new(
             EventType::ResponseProduced,
             correlation_id,
             CausationId::new(request_id.to_string()),
@@ -436,7 +491,8 @@ impl YukiCore {
                 "status": format!("{:?}", result.status)
             }),
             "yuki_core",
-        ))?;
+        ))
+        .await?;
 
         Ok(result)
     }

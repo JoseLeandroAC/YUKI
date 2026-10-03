@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
 use yuki::contracts::input::UserInput;
 use yuki::contracts::output::ResultStatus;
 use yuki::core::yuki_core::YukiCore;
+use yuki::persistence::sqlite::SqliteAuditStore;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -27,7 +29,23 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let core = YukiCore::new();
+
+    // Resolve persistent database path (ADR-019 / 00_ENVIRONMENT_BASELINE.md)
+    let db_path =
+        std::env::var("YUKI_DATABASE_PATH").unwrap_or_else(|_| "data/yuki.db".to_string());
+    let (core, sqlite_status) = match SqliteAuditStore::open(&db_path) {
+        Ok(store) => {
+            let store = Arc::new(store);
+            (YukiCore::new().with_persistent_audit(store), "OK")
+        }
+        Err(e) => {
+            eprintln!(
+                "Aviso: Falha ao inicializar banco de auditoria durável ('{}'): {}. Operando em modo degradado (in-memory).",
+                db_path, e
+            );
+            (YukiCore::new(), "DEGRADED (In-Memory Fallback)")
+        }
+    };
 
     match cli.command {
         Some(Commands::Health) => {
@@ -66,7 +84,7 @@ async fn main() {
                 "Audit Subsystem (In-Memory): {}",
                 if health.audit_ok { "OK" } else { "FAIL" }
             );
-            println!("Persistent Audit (SQLite): NOT CONFIGURED (Planned: Marco 3)");
+            println!("Persistent Audit (SQLite): {}", sqlite_status);
         }
         None => {
             if cli.prompt.is_empty() {

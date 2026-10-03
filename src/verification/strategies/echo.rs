@@ -40,7 +40,29 @@ impl VerificationStrategy for EchoVerificationStrategy {
             .collect();
         let now = now_utc();
 
-        // 1. If execution itself failed, verification confirms failure
+        // 1. Check for conflicting evidence FIRST
+        // EPISTEMIC RULE (ADR-009): Evidence != Truth; conflicting evidence must produce UNKNOWN/Conflicting
+        let has_conflict = valid_evidences.iter().any(|e| {
+            e.data
+                .get("conflict")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
+
+        if has_conflict {
+            return VerificationResult {
+                operation_id: context.operation_id.clone(),
+                verification_state: VerificationState::Unknown,
+                observed_effect_state: ObservedEffectState::Conflicting,
+                evidence_refs,
+                evaluated_at: now,
+                verification_basis: "Evidências conflitantes encontradas durante a verificação."
+                    .to_string(),
+            };
+        }
+
+        // 2. If execution itself failed and no conflicting evidence exists
+        // INVARIANT: Execution Failure != Proof Of No External Effect
         if context.execution.state == OperationState::Failed {
             return VerificationResult {
                 operation_id: context.operation_id.clone(),
@@ -59,7 +81,7 @@ impl VerificationStrategy for EchoVerificationStrategy {
             };
         }
 
-        // 2. If there are NO validly bound evidences, state is UNKNOWN
+        // 3. If there are NO validly bound evidences, state is UNKNOWN
         // INV-FND-015: UNKNOWN != SUCCESS and UNKNOWN != FAILURE
         if valid_evidences.is_empty() {
             return VerificationResult {
@@ -70,26 +92,6 @@ impl VerificationStrategy for EchoVerificationStrategy {
                 evaluated_at: now,
                 verification_basis:
                     "Ausência de evidências verificáveis; o estado permanece UNKNOWN.".to_string(),
-            };
-        }
-
-        // 3. Check for conflicting evidence
-        let has_conflict = valid_evidences.iter().any(|e| {
-            e.data
-                .get("conflict")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        });
-
-        if has_conflict {
-            return VerificationResult {
-                operation_id: context.operation_id.clone(),
-                verification_state: VerificationState::Unknown,
-                observed_effect_state: ObservedEffectState::Conflicting,
-                evidence_refs,
-                evaluated_at: now,
-                verification_basis: "Evidências conflitantes encontradas durante a verificação."
-                    .to_string(),
             };
         }
 

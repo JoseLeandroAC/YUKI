@@ -331,3 +331,47 @@ async fn test_persistence_async_spawn_blocking_execution() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["async"], true);
 }
+
+#[test]
+fn test_persistence_query_events_propagates_read_errors_never_masks_as_empty() {
+    let path = temp_db_path();
+    let _guard = TempDbCleanup(path.clone());
+
+    let store = SqliteAuditStore::open(&path).expect("open");
+
+    // Record one valid event
+    let event = AuditEvent::new(
+        EventType::InputReceived,
+        CorrelationId::new(),
+        CausationId::new("c1"),
+        serde_json::json!({ "test": true }),
+        "test",
+    );
+    store.record_event(&event).expect("record event");
+
+    // Intentionally drop the audit_events table behind the scenes to simulate a query/table failure
+    {
+        let direct_conn = rusqlite::Connection::open(&path).expect("direct conn");
+        direct_conn
+            .execute_batch("DROP TABLE audit_events;")
+            .expect("drop table");
+    }
+
+    // INVARIANT: query_events MUST propagate Err(PersistenceError::Read(...))
+    // and MUST NEVER silently return Ok(vec![]) / empty dataset on database failure!
+    let result = store.query_events(&AuditFilter::default());
+    assert!(
+        result.is_err(),
+        "query_events DEVE retornar Err quando a tabela de auditoria estiver inacessível"
+    );
+    match result {
+        Err(PersistenceError::Read(err_msg)) => {
+            assert!(
+                err_msg.contains("no such table") || err_msg.contains("audit_events"),
+                "Mensagem de erro deve refletir falha de leitura SQL real: {}",
+                err_msg
+            );
+        }
+        other => panic!("Esperado Err(PersistenceError::Read), obtido: {:?}", other),
+    }
+}

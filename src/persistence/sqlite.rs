@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 use chrono::DateTime;
 use rusqlite::{params, Connection};
 
-use crate::audit::event_store::EventStore;
-use crate::contracts::errors::YukiError;
 use crate::contracts::events::{AuditEvent, EventType};
 use crate::contracts::identifiers::{CausationId, CorrelationId, EventId, OperationId};
 use crate::persistence::errors::PersistenceError;
@@ -36,6 +34,11 @@ impl Default for AuditFilter {
             limit: 100,
         }
     }
+}
+
+/// Fallible persistent write interface for audit events.
+pub trait PersistentAuditWriter: Send + Sync {
+    fn record_event(&self, event: &AuditEvent) -> Result<(), PersistenceError>;
 }
 
 /// Fallible, bounded query interface for persistent audit storage.
@@ -180,7 +183,7 @@ impl SqliteAuditStore {
             .map(|s| s.to_string());
 
         let event_type_str = serde_json::to_string(&event.event_type)
-            .unwrap_or_default()
+            .map_err(|e| PersistenceError::Write(format!("Falha ao serializar event_type: {}", e)))?
             .trim_matches('"')
             .to_string();
 
@@ -227,12 +230,16 @@ impl SqliteAuditStore {
         })?;
 
         let verification_state_str = serde_json::to_string(&record.verification_state)
-            .unwrap_or_default()
+            .map_err(|e| {
+                PersistenceError::Write(format!("Falha ao serializar verification_state: {}", e))
+            })?
             .trim_matches('"')
             .to_string();
 
         let effect_state_str = serde_json::to_string(&record.observed_effect_state)
-            .unwrap_or_default()
+            .map_err(|e| {
+                PersistenceError::Write(format!("Falha ao serializar observed_effect_state: {}", e))
+            })?
             .trim_matches('"')
             .to_string();
 
@@ -283,7 +290,8 @@ impl SqliteAuditStore {
             .conn
             .lock()
             .map_err(|e| PersistenceError::DatabaseUnavailable(e.to_string()))?;
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+            .map_err(|e| PersistenceError::Write(format!("Falha no checkpoint WAL: {}", e)))?;
         Ok(())
     }
 }
@@ -314,7 +322,9 @@ impl AuditQueryStore for SqliteAuditStore {
 
         if let Some(ev_type) = &filter.event_type {
             let s = serde_json::to_string(ev_type)
-                .unwrap_or_default()
+                .map_err(|e| {
+                    PersistenceError::Read(format!("Falha ao serializar filtro event_type: {}", e))
+                })?
                 .trim_matches('"')
                 .to_string();
             query.push_str(" AND event_type = ?");
@@ -445,15 +455,32 @@ impl AuditQueryStore for SqliteAuditStore {
 
             let evaluated_at = DateTime::parse_from_rfc3339(&eval_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| crate::contracts::identifiers::now_utc());
+                .map_err(|e| {
+                    PersistenceError::Read(format!(
+                        "Timestamp inválido no banco ('{}'): {}",
+                        eval_at, e
+                    ))
+                })?;
 
-            let verification_state = serde_json::from_str(&format!("\"{}\"", v_state))
-                .unwrap_or(crate::contracts::verification::VerificationState::Unknown);
+            let verification_state =
+                serde_json::from_str(&format!("\"{}\"", v_state)).map_err(|e| {
+                    PersistenceError::Read(format!(
+                        "Valor inválido de verification_state no banco ('{}'): {}",
+                        v_state, e
+                    ))
+                })?;
 
             let observed_effect_state = serde_json::from_str(&format!("\"{}\"", eff_state))
-                .unwrap_or(crate::contracts::verification::ObservedEffectState::Unknown);
+                .map_err(|e| {
+                    PersistenceError::Read(format!(
+                        "Valor inválido de observed_effect_state no banco ('{}'): {}",
+                        eff_state, e
+                    ))
+                })?;
 
-            let evidence_refs = serde_json::from_str(&refs).unwrap_or_default();
+            let evidence_refs = serde_json::from_str(&refs).map_err(|e| {
+                PersistenceError::Read(format!("Falha ao desserializar evidence_refs: {}", e))
+            })?;
 
             records.push(VerificationRecord {
                 verification_record_id: v_id,
@@ -473,41 +500,8 @@ impl AuditQueryStore for SqliteAuditStore {
     }
 }
 
-impl EventStore for SqliteAuditStore {
-    fn record(&self, event: AuditEvent) -> Result<(), YukiError> {
-        self.record_event(&event).map_err(Into::into)
-    }
-
-    fn get_events(&self, correlation_id: &CorrelationId) -> Vec<AuditEvent> {
-        let filter = AuditFilter {
-            correlation_id: Some(correlation_id.clone()),
-            limit: 1000,
-            ..Default::default()
-        };
-        match self.query_events(&filter) {
-            Ok(events) => events,
-            Err(e) => {
-                tracing::error!(
-                    "Falha ao executar get_events no SqliteAuditStore para correlation_id '{}': {}",
-                    correlation_id.0,
-                    e
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    fn all_events(&self) -> Vec<AuditEvent> {
-        let filter = AuditFilter {
-            limit: 1000,
-            ..Default::default()
-        };
-        match self.query_events(&filter) {
-            Ok(events) => events,
-            Err(e) => {
-                tracing::error!("Falha ao executar all_events no SqliteAuditStore: {}", e);
-                Vec::new()
-            }
-        }
+impl PersistentAuditWriter for SqliteAuditStore {
+    fn record_event(&self, event: &AuditEvent) -> Result<(), PersistenceError> {
+        self.record_event(event)
     }
 }

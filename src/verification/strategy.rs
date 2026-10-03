@@ -32,25 +32,20 @@ impl<'a> VerificationContext<'a> {
     /// Filters evidences that are validly bound to this operation and attempt.
     ///
     /// BINDING INVARIANTS:
-    /// - If `evidence.operation_id == Some(op)` and `op != context.operation_id`, REJECT.
-    /// - If `evidence.attempt_id == Some(att)` and `att != context.execution.attempt_id`, REJECT.
-    /// - Unbound evidence (where both are None) is retained for backward compatibility
-    ///   with legacy Foundation tests.
+    /// - (Some(op), Some(att)): Both operation and attempt must match context.
+    /// - (Some(op), None): Operation matches, attempt unstated.
+    /// - (None, Some(_)): REJECTED. Attempt without operation is semantically invalid.
+    /// - (None, None): Retained for backward compatibility with legacy Foundation v0.1 tests.
     pub fn valid_evidences(&self) -> Vec<&'a Evidence> {
         self.evidences
             .iter()
-            .filter(|e| {
-                if let Some(op) = &e.operation_id {
-                    if op != self.operation_id {
-                        return false;
-                    }
+            .filter(|e| match (&e.operation_id, &e.attempt_id) {
+                (Some(op), Some(att)) => {
+                    op == self.operation_id && att == &self.execution.attempt_id
                 }
-                if let Some(att) = &e.attempt_id {
-                    if att != &self.execution.attempt_id {
-                        return false;
-                    }
-                }
-                true
+                (Some(op), None) => op == self.operation_id,
+                (None, Some(_)) => false,
+                (None, None) => true,
             })
             .collect()
     }
