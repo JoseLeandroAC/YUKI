@@ -14,7 +14,9 @@ use crate::contracts::input::UserInput;
 use crate::contracts::output::YukiResult;
 use crate::contracts::verification::Evidence;
 use crate::execution::executor::Executor;
+use crate::models::config::ModelGatewayConfig;
 use crate::models::mock::MockModelProvider;
+use crate::models::proposal_parser::ProposalParser;
 use crate::models::provider::{HealthStatus, ModelProvider, ModelRequest};
 use crate::security::authorization::SecurityController;
 use crate::verification::verifier::Verifier;
@@ -113,26 +115,35 @@ impl YukiCore {
         }
     }
 
-    /// Core processing pipeline:
-    /// Input -> Context -> Model -> Capability Proposal -> Authorization -> Execution -> Verification -> Result
-    pub fn process_input(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+    /// Asynchronous processing pipeline (Marco 2 Core Orchestration).
+    ///
+    /// Preserves Constitutional Invariants:
+    /// - Capability != Permission != Authorization != Execution
+    /// - Model Output != Command != Authorization
+    /// - Think != Authorize != Execute
+    /// - Data != Instruction
+    /// - External model output is UNTRUSTED DATA
+    pub async fn process_input_async(&self, input: UserInput) -> Result<YukiResult, YukiError> {
         let request_id = input.request_id.clone();
         let correlation_id = CorrelationId::from_request(&request_id);
 
-        // 1. Audit: InputReceived
+        // 1. Audit Input Received
         self.event_store.record(AuditEvent::new(
             EventType::InputReceived,
             correlation_id.clone(),
-            CausationId::new("user_prompt"),
-            serde_json::json!({ "content": input.content }),
+            CausationId::new(request_id.to_string()),
+            serde_json::json!({
+                "content_length": input.content.len(),
+                "timestamp": input.timestamp
+            }),
             "yuki_core",
         ))?;
 
-        // 2. Context Builder
+        // 2. Build Context Object (Deterministic and synchronous)
         let context_req = ContextRequest {
-            purpose: "user_interaction".to_string(),
+            purpose: "user_turn".to_string(),
             user_input: input.content.clone(),
-            source: input.source.clone(),
+            source: "user".to_string(),
         };
         let context = ContextBuilder::build(&context_req)?;
 
@@ -147,46 +158,57 @@ impl YukiCore {
             "context_builder",
         ))?;
 
-        // 3. Model Provider (Cognitive Layer)
-        let model_req = ModelRequest {
-            prompt: input.content.clone(),
-            context_id: context.context_id.clone(),
-            purpose: context.purpose.clone(),
-        };
-        let model_resp = self.model_provider.generate(&model_req)?;
+        // 3. Model Provider (Cognitive Layer - Asynchronous Boundary)
+        let model_req = ModelRequest::new(
+            input.content.clone(),
+            context.context_id.clone(),
+            context.purpose.clone(),
+        );
 
+        let model_resp = self.model_provider.generate(&model_req).await?;
+
+        let has_proposal =
+            model_resp.capability_proposal.is_some() || model_resp.candidate_proposal.is_some();
         self.event_store.record(AuditEvent::new(
             EventType::ModelInvoked,
             correlation_id.clone(),
             CausationId::new(context.context_id.0.clone()),
             serde_json::json!({
                 "provider": self.model_provider.metadata().provider_name,
-                "has_proposal": model_resp.capability_proposal.is_some()
+                "has_proposal": has_proposal
             }),
             "yuki_core",
         ))?;
 
-        // 4. Capability Proposal Handling
-        let proposal = match model_resp.capability_proposal {
-            Some(p) => p,
-            None => {
-                // If model didn't propose any capability, return raw conversational output
-                let res = YukiResult::success(
-                    request_id.clone(),
-                    correlation_id.clone(),
-                    None,
-                    model_resp.raw_content,
-                    None,
-                );
-                self.event_store.record(AuditEvent::new(
-                    EventType::ResponseProduced,
-                    correlation_id,
-                    CausationId::new(request_id.to_string()),
-                    serde_json::json!({ "status": "DirectText" }),
-                    "yuki_core",
-                ))?;
-                return Ok(res);
-            }
+        // 4. Capability Proposal Handling & ProposalParser validation
+        let proposal = if let Some(p) = model_resp.capability_proposal {
+            p
+        } else if let Some(candidate) = model_resp.candidate_proposal {
+            // Validate untrusted model candidate through ProposalParser
+            ProposalParser::parse(
+                candidate,
+                &model_req,
+                &self.capability_registry,
+                &ModelGatewayConfig::default(),
+                model_resp.provider_response_id.clone(),
+            )?
+        } else {
+            // If model didn't propose any capability, return raw conversational output
+            let res = YukiResult::success(
+                request_id.clone(),
+                correlation_id.clone(),
+                None,
+                model_resp.raw_content,
+                None,
+            );
+            self.event_store.record(AuditEvent::new(
+                EventType::ResponseProduced,
+                correlation_id,
+                CausationId::new(request_id.to_string()),
+                serde_json::json!({ "status": "DirectText" }),
+                "yuki_core",
+            ))?;
+            return Ok(res);
         };
 
         let operation_id = OperationId::new();
@@ -203,7 +225,7 @@ impl YukiCore {
         ))?;
 
         // 5. Security Controller Authorization
-        // Note: Model output != Authorization! Explicit policy evaluation is required.
+        // Invariant: Model output != Authorization! Explicit policy evaluation is required.
         let risk_class = self
             .capability_registry
             .get_manifest(&proposal.capability_id)
@@ -216,7 +238,7 @@ impl YukiCore {
             context_id: context.context_id.clone(),
             caller_id: "yuki_core".to_string(),
             input_summary: proposal.parameters.clone(),
-            risk_class,
+            risk_class: risk_class.clone(),
         };
 
         self.event_store.record(AuditEvent::new(
@@ -234,36 +256,19 @@ impl YukiCore {
             .security_controller
             .authorize(&auth_req, &self.capability_registry)?;
 
-        let token = match auth_decision {
+        let auth_token = match auth_decision {
             AuthorizationDecision::Allow { token, .. } => {
                 self.event_store.record(AuditEvent::new(
                     EventType::AuthorizationGranted,
                     correlation_id.clone(),
                     CausationId::new(operation_id.0.clone()),
                     serde_json::json!({
-                        "operation_id": operation_id.0,
-                        "authorized": true
+                        "decision": "Allow",
+                        "risk_class": format!("{:?}", risk_class)
                     }),
                     "security_controller",
                 ))?;
                 token
-            }
-            AuthorizationDecision::Deny { reason } => {
-                self.event_store.record(AuditEvent::new(
-                    EventType::AuthorizationDenied,
-                    correlation_id.clone(),
-                    CausationId::new(operation_id.0.clone()),
-                    serde_json::json!({
-                        "operation_id": operation_id.0,
-                        "reason": reason
-                    }),
-                    "security_controller",
-                ))?;
-                return Ok(YukiResult::denied(
-                    request_id,
-                    correlation_id,
-                    format!("Ação rejeitada por segurança: {}", reason),
-                ));
             }
             AuthorizationDecision::RequiresApproval { reason } => {
                 self.event_store.record(AuditEvent::new(
@@ -283,15 +288,32 @@ impl YukiCore {
                     format!("Ação requer aprovação humana: {}", reason),
                 ));
             }
+            AuthorizationDecision::Deny { reason } => {
+                self.event_store.record(AuditEvent::new(
+                    EventType::AuthorizationDenied,
+                    correlation_id.clone(),
+                    CausationId::new(operation_id.0.clone()),
+                    serde_json::json!({
+                        "operation_id": operation_id.0,
+                        "reason": reason
+                    }),
+                    "security_controller",
+                ))?;
+                return Ok(YukiResult::denied(
+                    request_id,
+                    correlation_id,
+                    format!("Ação rejeitada por segurança: {}", reason),
+                ));
+            }
         };
 
-        // 6. Execution Layer
+        // 6. Capability Execution
         let attempt_id = AttemptId::new();
         let exec_req = ExecutionRequest {
             operation_id: operation_id.clone(),
             attempt_id: attempt_id.clone(),
             capability_id: proposal.capability_id.clone(),
-            authorization_token: token,
+            authorization_token: auth_token,
             input: proposal.parameters.clone(),
         };
 
@@ -322,6 +344,8 @@ impl YukiCore {
                         data: output.clone(),
                         observed_at: now_utc(),
                         confidence_basis: "deterministic_execution_output".to_string(),
+                        operation_id: Some(operation_id.clone()),
+                        attempt_id: Some(attempt_id.clone()),
                     }]
                 } else {
                     Vec::new()
@@ -341,9 +365,14 @@ impl YukiCore {
             "verification_engine",
         ))?;
 
-        let verification = self
-            .verifier
-            .verify(&operation_id, &exec_result, &evidences);
+        let verification_context = crate::verification::VerificationContext::new(
+            &operation_id,
+            &proposal.capability_id,
+            &exec_result,
+            &evidences,
+        );
+
+        let verification = self.verifier.verify_operation(&verification_context);
 
         self.event_store.record(AuditEvent::new(
             EventType::VerificationCompleted,
@@ -410,6 +439,37 @@ impl YukiCore {
         ))?;
 
         Ok(result)
+    }
+
+    /// Processamento síncrono padrão (compatibilidade e preservação da Foundation).
+    pub fn process_input(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(self.process_input_async(input)))
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| YukiError::ModelError(e.to_string()))?;
+                rt.block_on(self.process_input_async(input))
+            }
+        }
+    }
+
+    /// Asynchronous processing with explicit future timeout boundary.
+    pub async fn process_input_with_timeout(
+        &self,
+        input: UserInput,
+        timeout: std::time::Duration,
+    ) -> Result<YukiResult, YukiError> {
+        match tokio::time::timeout(timeout, self.process_input_async(input)).await {
+            Ok(result) => result,
+            Err(_) => Err(YukiError::ExecutionFailed(format!(
+                "Operation exceeded execution timeout of {:?}",
+                timeout
+            ))),
+        }
     }
 }
 

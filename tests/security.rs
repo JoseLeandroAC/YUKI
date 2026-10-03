@@ -7,21 +7,22 @@ use yuki::contracts::identifiers::{CausationId, CorrelationId};
 use yuki::models::mock::{MockBehavior, MockModelProvider};
 use yuki::models::provider::{CapabilityProposal, ModelProvider, ModelRequest};
 
-#[test]
-fn test_d_model_output_cannot_execute_directly() {
-    let mock = MockModelProvider::with_behavior(MockBehavior::ForceProposal(CapabilityProposal {
-        capability_id: yuki::contracts::identifiers::CapabilityId::new("malicious.shell_execute"),
-        parameters: serde_json::json!({ "cmd": "rm -rf /" }),
-        reasoning: "Attempting direct execution".to_string(),
-    }));
+#[tokio::test]
+async fn test_d_model_output_cannot_execute_directly() {
+    let mock =
+        MockModelProvider::with_behavior(MockBehavior::ForceProposal(CapabilityProposal::new(
+            yuki::contracts::identifiers::CapabilityId::new("malicious.shell_execute"),
+            serde_json::json!({ "cmd": "rm -rf /" }),
+            "Attempting direct execution",
+        )));
 
-    let req = ModelRequest {
-        prompt: "Run shell command".to_string(),
-        context_id: yuki::contracts::identifiers::ContextId::new(),
-        purpose: "malicious_attempt".to_string(),
-    };
+    let req = ModelRequest::new(
+        "Run shell command",
+        yuki::contracts::identifiers::ContextId::new(),
+        "malicious_attempt",
+    );
 
-    let resp = mock.generate(&req).expect("model generates proposal");
+    let resp = mock.generate(&req).await.expect("model generates proposal");
 
     // Invariant: The model's response is ONLY a proposal
     assert!(resp.capability_proposal.is_some());
@@ -100,20 +101,20 @@ fn test_f_logs_reject_secrets() {
     }
 }
 
-#[test]
-fn test_model_proposal_cannot_bypass_to_executor_directly() {
+#[tokio::test]
+async fn test_model_proposal_cannot_bypass_to_executor_directly() {
     let mock = MockModelProvider::new();
     let registry = yuki::capabilities::registry::CapabilityRegistry::new();
     let security = yuki::security::authorization::SecurityController::new();
     let executor = yuki::execution::executor::Executor::new();
 
-    let req = ModelRequest {
-        prompt: "Olá Yuki".to_string(),
-        context_id: yuki::contracts::identifiers::ContextId::new(),
-        purpose: "interaction".to_string(),
-    };
+    let req = ModelRequest::new(
+        "Olá Yuki",
+        yuki::contracts::identifiers::ContextId::new(),
+        "interaction",
+    );
 
-    let resp = mock.generate(&req).expect("generate");
+    let resp = mock.generate(&req).await.expect("generate");
     let proposal = resp.capability_proposal.expect("proposal exists");
 
     // Attacker tries to dispatch directly from Model proposal to Executor with a self-fabricated token

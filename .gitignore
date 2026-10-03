@@ -1,3 +1,18 @@
 /target
 **/*.rs.bk
 *.pdb
+
+# Local environment & secrets
+.env
+.env.*
+!.env.example
+
+# Local configuration overrides
+config/yuki.toml
+!config/yuki.example.toml
+
+# Local SQLite databases & WAL logs
+data/
+*.db
+*.db-wal
+*.db-shm

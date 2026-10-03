@@ -24,7 +24,8 @@ enum Commands {
     Health,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     let core = YukiCore::new();
 
@@ -40,28 +41,36 @@ fn main() {
 
             println!("Core: {}", if health.core_ok { "OK" } else { "FAIL" });
             println!("Context: {}", if health.context_ok { "OK" } else { "FAIL" });
-            println!("Model: {}", if health.model_ok { "OK" } else { "FAIL" });
+            println!(
+                "Model Subsystem (Mock): {}",
+                if health.model_ok { "OK" } else { "FAIL" }
+            );
+            println!("External Model Provider: NOT CONFIGURED (Planned: Marco 2)");
             println!(
                 "Capability Registry: {}",
                 if health.registry_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Security: {}",
+                "Security Controller: {}",
                 if health.security_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Execution: {}",
+                "Execution Engine: {}",
                 if health.execution_ok { "OK" } else { "FAIL" }
             );
             println!(
-                "Verification: {}",
+                "Verification Engine: {}",
                 if health.verification_ok { "OK" } else { "FAIL" }
             );
-            println!("Audit: {}", if health.audit_ok { "OK" } else { "FAIL" });
+            println!(
+                "Audit Subsystem (In-Memory): {}",
+                if health.audit_ok { "OK" } else { "FAIL" }
+            );
+            println!("Persistent Audit (SQLite): NOT CONFIGURED (Planned: Marco 3)");
         }
         None => {
             if cli.prompt.is_empty() {
-                println!("Yuki Foundation v0.1");
+                println!("Yuki MVP-1");
                 println!("Uso: yuki \"<sua mensagem>\" ou yuki health");
                 return;
             }
@@ -69,24 +78,32 @@ fn main() {
             let input_text = cli.prompt.join(" ");
             let user_input = UserInput::new(input_text);
 
-            match core.process_input(user_input) {
-                Ok(result) => match result.status {
-                    ResultStatus::Success => {
-                        println!("{}", result.content);
+            tokio::select! {
+                res = core.process_input_async(user_input) => {
+                    match res {
+                        Ok(result) => match result.status {
+                            ResultStatus::Success => {
+                                println!("{}", result.content);
+                            }
+                            ResultStatus::Denied => {
+                                eprintln!("Acesso negado: {}", result.content);
+                            }
+                            ResultStatus::Failed => {
+                                eprintln!("Erro: {}", result.content);
+                            }
+                            ResultStatus::Unknown => {
+                                println!("Resultado indeterminado (UNKNOWN): {}", result.content);
+                            }
+                        },
+                        Err(err) => {
+                            eprintln!("Erro no processamento da Yuki: {}", err);
+                            std::process::exit(1);
+                        }
                     }
-                    ResultStatus::Denied => {
-                        eprintln!("Acesso negado: {}", result.content);
-                    }
-                    ResultStatus::Failed => {
-                        eprintln!("Erro: {}", result.content);
-                    }
-                    ResultStatus::Unknown => {
-                        println!("Resultado indeterminado (UNKNOWN): {}", result.content);
-                    }
-                },
-                Err(err) => {
-                    eprintln!("Erro no processamento da Yuki: {}", err);
-                    std::process::exit(1);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nExecução cancelada pelo usuário (SIGINT). Encerrando graciosamente.");
+                    std::process::exit(130);
                 }
             }
         }

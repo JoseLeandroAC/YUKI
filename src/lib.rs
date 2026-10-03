@@ -5,6 +5,7 @@ pub mod contracts;
 pub mod core;
 pub mod execution;
 pub mod models;
+pub mod persistence;
 pub mod security;
 pub mod verification;
 
