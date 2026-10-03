@@ -38,19 +38,19 @@ O roadmap evita que a implementação cresça de maneira desordenada.
 Estado atual:
 
 Arquitetura
-████████████████████████████████████████  definida
+████████████████████████████████████████  definida (ADRs 006 a 017)
 
 ADRs
-████████████████████████████████████████  definidos
+████████████████████████████████████████  definidos e aceitos
 
 Foundation Contracts
-████████████████████░░░░░░░░░░░░░░░░░░░  definidos
+████████████████████████████████████████  definidos e implementados (`src/contracts/`)
 
-Código
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciado
+Foundation v0.1 / MVP-0 (Código & Testes)
+████████████████████████████████████████  implementada e consolidada (26/26 testes)
 
-Testes
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciado
+Yuki MVP-1 (Provedores LLM Reais, Credential Broker, Tokio)
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  próximo objetivo (planejado)
 
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
@@ -1360,52 +1360,39 @@ Não criar um novo mini-framework para cada funcionalidade.
 
 45. Primeiro grande marco
 
-O primeiro grande marco será:
+O primeiro grande marco:
 
-YUKI FOUNDATION v0.1
+YUKI FOUNDATION v0.1 / MVP-0
 
-Quando alcançado:
+Status: ALCANÇADO, AUDITADO E CONSOLIDADO
 
-[✓] Foundation Contracts
-[✓] Project Structure
-[✓] Minimal Core
-[✓] Context
-[✓] Model Adapter
-[✓] Capability
-[✓] Basic Policy
-[✓] Basic Authorization
-[✓] Execution
-[✓] Verification
-[✓] Tests
-[✓] CI
-
-e pelo menos um:
-
-END-TO-END TEST
-
-funcionando.
+[✓] Foundation Contracts implementados
+[✓] Project Structure em Rust
+[✓] Minimal Core executável
+[✓] Context Builder tipado com proteção a segredos
+[✓] Model Adapter desacoplado (`ModelProvider` & `MockModelProvider`)
+[✓] Capability Registry dinâmico com `system.echo`
+[✓] Basic Policy (`DefaultFoundationPolicy`)
+[✓] Basic Authorization com tokens efêmeros de uso único
+[✓] Execution Layer isolado com consumo obrigatório de token
+[✓] Verification Engine atestando evidências e preservando UNKNOWN
+[✓] Tests automatizados completos (26/26 testes passando)
+[✓] CI & Toolchain limpos (rustfmt, clippy estrito, build release)
+[✓] Vertical Slice End-to-End validado (`test_vertical_slice_echo`)
 
 ---
 
 46. Segundo grande marco
 
-YUKI RUNTIME v0.1
+YUKI MVP-1 (Runtime Inicial com Provedores Reais)
 
-Inclui:
-
-Core
-Context
-Models
-Capabilities
-Security
-Execution
-Integration
-Verification
-Workflow
-Memory
-Knowledge
-
-com uma pequena quantidade de funcionalidades reais.
+Próximo objetivo oficial da Yuki:
+- Integração de runtime assíncrono (Tokio);
+- Primeiro adaptador de modelo real (Google Gemini / Vertex AI);
+- Implementação formal do Credential Broker (ADR-008);
+- Desacoplamento dinâmico de Verification Strategies (ADR-009);
+- Persistência básica para o Event Store (ADR-013);
+- Registro de capacidades adicionais e testes adversariais.
 
 ---
 
@@ -1495,19 +1482,19 @@ Evolution Manager
 
 52. Estado do roadmap
 
-PHASE 0   Repository Foundation       🟡
-PHASE 1   Foundation Contracts        🟡
-PHASE 2   Project Skeleton            🔴
-PHASE 3   Minimal Core                🔴
-PHASE 4   Context                     🔴
-PHASE 5   Model Router                🔴
-PHASE 6   Capability System           🔴
-PHASE 7   Security Boundary           🔴
-PHASE 8   Execution                   🔴
-PHASE 9   Integration Gateway         🔴
-PHASE 10  First Integration            🔴
-PHASE 11  Verification                🔴
-PHASE 12  Vertical Slice              🔴
+PHASE 0   Repository Foundation       ✅
+PHASE 1   Foundation Contracts        ✅
+PHASE 2   Project Skeleton            ✅
+PHASE 3   Minimal Core                ✅
+PHASE 4   Context                     ✅
+PHASE 5   Model Router (Mock)         ✅
+PHASE 6   Capability System (Echo)    ✅
+PHASE 7   Security Boundary           ✅
+PHASE 8   Execution                   ✅
+PHASE 9   Integration Gateway (Local) ✅
+PHASE 10  First Integration (Echo)    ✅
+PHASE 11  Verification (Básica)       ✅
+PHASE 12  Vertical Slice              ✅
 PHASE 13  Durable Workflow            🔴
 PHASE 14  Memory                      🔴
 PHASE 15  Knowledge                   🔴
@@ -1523,9 +1510,9 @@ PHASE 24  Production Hardening        🔴
 
 Legenda:
 
-✅ Concluído
+✅ Concluído na Foundation v0.1 / MVP-0
 🟡 Em andamento
-🔴 Não iniciado
+🔴 Planejado para fases posteriores (MVP-1+)
 
 ---
 

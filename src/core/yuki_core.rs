@@ -360,6 +360,12 @@ impl YukiCore {
         let output_text = if let Some(out) = &exec_result.output {
             if let Some(msg) = out.get("echoed_message").and_then(|v| v.as_str()) {
                 msg.to_string()
+            } else if let Some(msg) = out.get("message").and_then(|v| v.as_str()) {
+                msg.to_string()
+            } else if let Some(msg) = out.get("content").and_then(|v| v.as_str()) {
+                msg.to_string()
+            } else if let Some(s) = out.as_str() {
+                s.to_string()
             } else {
                 out.to_string()
             }

@@ -99,3 +99,39 @@ fn test_f_logs_reject_secrets() {
         Err(other) => panic!("Expected SecurityViolation, got: {:?}", other),
     }
 }
+
+#[test]
+fn test_model_proposal_cannot_bypass_to_executor_directly() {
+    let mock = MockModelProvider::new();
+    let registry = yuki::capabilities::registry::CapabilityRegistry::new();
+    let security = yuki::security::authorization::SecurityController::new();
+    let executor = yuki::execution::executor::Executor::new();
+
+    let req = ModelRequest {
+        prompt: "Olá Yuki".to_string(),
+        context_id: yuki::contracts::identifiers::ContextId::new(),
+        purpose: "interaction".to_string(),
+    };
+
+    let resp = mock.generate(&req).expect("generate");
+    let proposal = resp.capability_proposal.expect("proposal exists");
+
+    // Attacker tries to dispatch directly from Model proposal to Executor with a self-fabricated token
+    let fake_token =
+        yuki::contracts::identifiers::CapabilityToken::new("model_self_authorized_token");
+    let op_id = yuki::contracts::identifiers::OperationId::new();
+
+    let exec_req = yuki::contracts::execution::ExecutionRequest {
+        operation_id: op_id,
+        attempt_id: yuki::contracts::identifiers::AttemptId::new(),
+        capability_id: proposal.capability_id,
+        authorization_token: fake_token,
+        input: proposal.parameters,
+    };
+
+    let result = executor.execute(&exec_req, &registry, &security);
+    assert!(
+        matches!(result, Err(YukiError::UnauthorizedExecution { .. })),
+        "Model output MUST NOT be capable of executing directly without passing through SecurityController authorization"
+    );
+}

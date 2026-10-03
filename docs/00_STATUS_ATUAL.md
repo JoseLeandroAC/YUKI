@@ -1,35 +1,39 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-09-26
-Status geral: Arquitetura definida — início da fase de implementação
+Status geral: Foundation v0.1 / MVP-0 implementada, auditada e testada; base consolidada para MVP-1
 Repositório: "JoseLeandroAC/YUKI"
-Branch de referência: "main"
+Branch de referência: "feature/foundation-v0.1" (incorporada em "main")
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural.
+A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural, bem como a implementação, auditoria e consolidação da **Foundation v0.1 / MVP-0**.
 
-O projeto possui atualmente uma arquitetura conceitual extensa, documentada e versionada em Git, cobrindo infraestrutura, capacidades, integrações, credenciais, segurança, verificação, segurança física, workflows, reconciliação, federação distribuída, agência humana, privacidade, contexto/conhecimento e reutilização de plataformas externas.
+O projeto possui atualmente uma arquitetura conceitual extensa documentada em ADRs e uma primeira célula funcional de software implementada em Rust puro (1.98.1), com testes de integração positivos e negativos protegendo os invariantes fundamentais.
 
 A situação atual pode ser resumida como:
 
 ARQUITETURA
 ████████████████████████████████████████
-DEFINIDA E DOCUMENTADA
+DEFINIDA E DOCUMENTADA (ADRs 006 a 017)
 
-CONTRATOS DE IMPLEMENTAÇÃO
-████████████████░░░░░░░░░░░░░░░░░░░░░░
-EM DEFINIÇÃO
+CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1)
+████████████████████████████████████████
+DEFINIDOS, IMPLEMENTADOS E AUDITADOS
 
-IMPLEMENTAÇÃO DE SOFTWARE
+FOUNDATION v0.1 / MVP-0 (SOFTWARE & PIPELINE VERTICAL SLICE)
+████████████████████████████████████████
+IMPLEMENTADA, AUDITADA E CONSOLIDADA
+
+TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS)
+████████████████████████████████████████
+26/26 TESTES PASSANDO (TESTES A AO I + NEGATIVOS DE VIOLAÇÃO)
+
+PROVEDORES REAIS DE MODELO / RUNTIME ASSÍNCRONO / INTEGRAÇÕES
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-AINDA NÃO INICIADA DE FORMA ESTRUTURAL
-
-TESTES DE INTEGRAÇÃO
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-AINDA NÃO INICIADOS
+PLANEJADOS PARA MVP-1 (NÃO INICIADOS)
 
 PRODUÇÃO
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
@@ -154,29 +158,32 @@ Essa distinção deve permanecer explícita para evitar falsa sensação de prog
 
 5. Estado da implementação
 
-No estado atual do repositório, a Yuki ainda não possui uma implementação estrutural consolidada do runtime.
+A **Foundation v0.1 / MVP-0** da Yuki foi integralmente implementada em Rust puro (1.98.1), testada (26/26 testes aprovados), auditada por duas rodadas técnicas e consolidada na branch `feature/foundation-v0.1`.
 
-Ainda não existe uma base de código que represente integralmente:
+A base de código atual já estabelece estruturalmente os componentes da Foundation:
 
-Yuki Core
-Context
-Capability System
-Security Controller
-Model Router
-Execution Layer
-Integration Gateway
-Verification Engine
-Workflow Engine
-Memory
-Knowledge
-Reconciliation
-Agent System
-Event System
-Infrastructure Runtime
+- **Yuki Core:** orquestrador central do pipeline síncrono do MVP-0;
+- **Contracts:** contratos canônicos tipados para identifiers, input, output, context, capability, authorization, execution, verification e events;
+- **Context Builder:** construção tipada de contexto com minimização e salvaguarda preventiva de segredos;
+- **Model Layer:** abstração desacoplada de provedor cognitivo (`ModelProvider`) e implementação `MockModelProvider`;
+- **Capability System:** registro dinâmico (`CapabilityRegistry`) e implementação de referência segura (`system.echo`);
+- **Security Controller:** barreira de autorização estrita, desacoplada do modelo, emitindo tokens de uso único com expiração e consumo atômico;
+- **Execution Layer:** executor isolado que rejeita qualquer tentativa sem token válido consumível;
+- **Verification Engine:** mecanismo de verificação pós-execução que atesta evidências e preserva o estado `UNKNOWN`;
+- **Audit Store:** barreira de eventos de auditoria estruturados em memória (`InMemoryEventStore`).
 
-Portanto, a próxima fase do projeto não será uma grande refatoração de código existente.
+Componentes avançados e de maior autonomia que permanecem explicitamente planejados para fases posteriores (a partir do MVP-1):
 
-Será a construção da primeira implementação estrutural da Yuki.
+- Provedores LLM reais externos (Google Gemini, Vertex AI) e Model Router dinâmico;
+- Credential Broker e isolamento criptográfico de segredos (ADR-008);
+- Integration Gateway com conectores de rede reais (ADR-007);
+- Verification Strategies dinâmicas desacopladas por capability (ADR-009);
+- Durable Workflow e Sagas compensatórias (ADR-011);
+- Memory semântica e Knowledge Graph (ADR-016);
+- Agent System e supervisão autônoma multi-agente;
+- Reconciliation Engine declarativo (ADR-012);
+- Federação e sincronização de eventos Home/Cloud (ADR-013);
+- Physical World Safety e intertravamentos de hardware (ADR-010).
 
 ---
 
@@ -504,28 +511,36 @@ Uma capacidade só será considerada implementada quando houver implementação 
 │ Princípios                  ✅               │
 │ Arquitetura macro           ✅               │
 │ ADRs 006–017                ✅               │
-│ Contratos de implementação  🟡              │
-│ Foundation                  🔴               │
-│ Core                        🔴               │
-│ Runtime                     🔴               │
-│ Security Runtime            🔴               │
-│ Capability Runtime          🔴               │
-│ Execution                   🔴               │
-│ Verification                🔴               │
-│ Workflow                    🔴               │
+│ Contratos de implementação  ✅               │
+│ Foundation v0.1 / MVP-0     ✅               │
+│ Core (mínimo vertical slice)✅               │
+│ Context Builder (mínimo)    ✅               │
+│ Model Provider (Mock)       ✅               │
+│ Capability Registry (echo)  ✅               │
+│ Security Controller (tokens)✅               │
+│ Execution (isolado)         ✅               │
+│ Verification (básico)       ✅               │
+│ Audit Store (in-memory)     ✅               │
+│ CLI & Diagnostics (health)  ✅               │
+│ Runtime assíncrono / I/O    🔴               │
+│ Provedores LLM Reais        🔴               │
+│ Credential Broker (ADR-008) 🔴               │
+│ Workflow durável            🔴               │
 │ Memory                      🔴               │
+│ Knowledge                   🔴               │
 │ Agents                      🔴               │
-│ Background                  🔴               │
+│ Background Events           🔴               │
 │ Reconciliation              🔴               │
 │ Federation                  🔴               │
-│ Production                  🔴               │
+│ Physical World              🔴               │
+│ Produção                    🔴               │
 └──────────────────────────────────────────────┘
 
 Legenda:
 
-✅ Definido/documentado
+✅ Implementado, auditado e consolidado
 🟡 Em definição
-🔴 Ainda não implementado
+🔴 Planejado para fases posteriores (MVP-1+)
 
 ---
 
@@ -533,18 +548,15 @@ Legenda:
 
 O próximo marco oficial do projeto é:
 
-YUKI FOUNDATION v0.1
+YUKI MVP-1
 
-Objetivos:
-
-1. definir contratos fundamentais;
-2. definir estrutura inicial do código;
-3. escolher a primeira implementação tecnológica sem torná-la constitucional;
-4. implementar o Core mínimo;
-5. implementar o primeiro fluxo end-to-end;
-6. criar testes estruturais;
-7. validar os contratos contra os ADRs;
-8. preparar a base para os agentes de desenvolvimento.
+Objetivos do MVP-1:
+1. introduzir runtime assíncrono (Tokio) para I/O de rede sem bloqueio;
+2. implementar o primeiro Model Adapter externo real (Google Gemini / Vertex AI);
+3. implementar o Credential Broker formal conforme o ADR-008;
+4. desacoplar o Verification Engine via estratégias dinâmicas orientadas pelo manifesto da capability (ADR-009);
+5. implementar backend de persistência durável para o Event Store (ADR-013);
+6. expandir capacidades iniciais seguras e adicionar testes adversariais adicionais.
 
 ---
 
@@ -580,36 +592,51 @@ e não por um único bloco monolítico.
 
 ---
 
-19. Próximo documento
+19. Documentos consolidados da Foundation
 
-O próximo documento a ser criado é:
+A ponte entre arquitetura e código está formalizada e consolidada nos seguintes documentos versionados:
 
-docs/FOUNDATION_CONTRACTS.md
-
-Ele definirá os contratos canônicos dos objetos fundamentais utilizados pela implementação.
-
-Depois dele:
-
-docs/IMPLEMENTATION_ROADMAP.md
-
-Esses documentos serão a ponte entre:
-
-ADRs
-  ↓
-Arquitetura
-  ↓
-Código
+- docs/FOUNDATION_CONTRACTS.md (contratos canônicos consolidados);
+- docs/IMPLEMENTATION_SPEC_FOUNDATION_V0.1.md (especificação operacional cumprida);
+- docs/IMPLEMENTATION_ROADMAP.md (roadmap de engenharia com Foundation concluída).
 
 ---
 
 20. Status
 
-Estado: FOUNDATION STARTING
+Estado: FOUNDATION CONSOLIDATED (READY FOR FREEZE)
 
-Arquitetura: definida
+Arquitetura: definida (ADRs 006–017)
+Implementação: Foundation v0.1 implementada, testada e duplamente auditada
+Código: 26/26 testes passando, clippy limpo, rustfmt verificado
+Próximo passo: Congelamento oficial da baseline Foundation v0.1 e abertura do planejamento do MVP-1.
 
-Implementação: iniciando
+---
 
-Próximo objetivo: Yuki Foundation v0.1
+21. Registro das Auditorias da Foundation v0.1
 
-Regra: preservar a arquitetura enquanto transformamos decisões em software testável.
+A Foundation v0.1 passou por duas rodadas formais de auditoria técnica e de segurança:
+1. **Foundation v0.1 General Audit:** auditoria arquitetural e de segurança com consolidação de código e cobertura de testes negativos de autorização, replay e contenção de segredos.
+2. **Focused Closure Audit:** auditoria pontual sobre segurança de tokens (`validate_token`), acoplamento do `Verifier` e concorrência/robustez do `EventStore`.
+
+Resultados verificados em ambiente reprodutível:
+- `cargo test`: 26/26 aprovados (testes unitários, contratuais, segurança e vertical slice);
+- `cargo check`: aprovado sem erros;
+- `cargo fmt --check`: aprovado sem desvios de formatação;
+- `cargo clippy --all-targets -- -D warnings`: aprovado com zero warnings;
+- `cargo build`: aprovado (perfil debug);
+- `cargo build --release`: aprovado (perfil release).
+
+---
+
+22. Limitações Conhecidas e Deferimentos Explícitos para o MVP-1
+
+As seguintes características são limitações conhecidas ou simplificações deliberadas do MVP-0 e estão formalmente deferidas para o MVP-1:
+1. **Credential Broker:** O isolamento criptográfico integral de segredos e credenciais externas (ADR-008) será introduzido no MVP-1; a Foundation v0.1 utiliza salvaguardas preventivas básicas (`assert_no_secrets`).
+2. **Verification Strategy Dinâmica:** O `Verifier` da Foundation v0.1 contém lógica demonstrativa para validar a capability `system.echo`; no MVP-1 o motor será desacoplado para despacho dinâmico por estratégia orientada ao manifesto (ADR-009).
+3. **Persistência de Eventos:** O `EventStore` da Foundation v0.1 opera em memória (`InMemoryEventStore`); persistência durável em disco (arquivo append-only ou SQLite) é escopo do MVP-1 e ADR-013.
+4. **Identificadores Criptográficos (CSPRNG):** Os identificadores atuais utilizam ordenação monotônica e contador atômico sequencial; geração com alta entropia criptográfica (UUIDv7/CSPRNG) será introduzida para ambientes distribuídos.
+5. **Garbage Collection de Tokens:** A rotina periódica de expurgo de tokens expirados e abandonados no `SecurityController` será implementada no runtime contínuo.
+6. **Runtime Síncrono:** A Foundation v0.1 opera de forma síncrona; o suporte assíncrono (Tokio) será adotado no MVP-1 para chamadas de rede com modelos externos.
+7. **Visibilidade de `validate_token`:** O método `validate_token` é de consulta de leitura e não participa do caminho de execução (o `Executor` utiliza obrigatoriamente `validate_and_consume_token`); sua visibilidade será restrita no MVP-1.
+8. **Lógica de Verificação Específica:** O `Verifier` atual avalia a evidência de `system.echo`, sendo o suporte polimórfico a outras capabilities objeto do MVP-1.

@@ -1,9 +1,9 @@
 Yuki — Foundation Contracts
 
 Version: 0.1
-Status: FOUNDATION DRAFT
+Status: FOUNDATION v0.1 CONSOLIDATED
 Domain: Core / Contracts / Architecture
-Date: 2026-09-26
+Date: 2026-10-03
 
 ---
 
@@ -1440,19 +1440,29 @@ Quando uma alteração modificar uma decisão arquitetural, o ADR correspondente
 
 Version: 0.1
 
-Status: FOUNDATION DRAFT
+Status: FOUNDATION v0.1 CONSOLIDATED
 
-Implementation Status: Not implemented
+Implementation Status:
+- Contratos nucleares da Foundation v0.1 implementados, testados e auditados em Rust (`src/contracts/`):
+  - Identifiers (`RequestId`, `OperationId`, `AttemptId`, `CorrelationId`, `CausationId`, `ContextId`, `EventId`, `EvidenceId`, `CapabilityId`, `CapabilityToken`, `IdempotencyKey`);
+  - Error Model (`YukiError`);
+  - Capability & Manifest (`CapabilityManifest`, `RiskClass`, `SideEffects`, `CapabilityRequest`, `CapabilityResponse`);
+  - Authorization (`AuthorizationRequest`, `AuthorizationDecision`, `PermissionRule`);
+  - Execution (`ExecutionRequest`, `ExecutionResult`, `OperationState`);
+  - Verification (`VerificationResult`, `VerificationState`, `ObservedEffectState`, `Evidence`);
+  - Context (`ContextObject`, `ContextRequest`, `EpistemicState`, `DataClassification`, `Provenance`);
+  - Input & Output (`UserInput`, `YukiResult`, `ResultStatus`);
+  - Audit Events (`AuditEvent`, `EventType`).
+- Contratos de domínios avançados (Workflow durável, Sagas, Memory semântica, Knowledge Graph, Reconciliation Engine e Federação) formalmente definidos conceitualmente e explicitamente deferidos para as fases a partir do MVP-1.
 
-Next Step:
-
-FOUNDATION CONTRACTS
+Current Stage:
+FOUNDATION CONTRACTS IMPLEMENTED & VALIDATED
         ↓
-PROJECT STRUCTURE
+PROJECT STRUCTURE CONSOLIDATED
         ↓
-MINIMAL CORE
+MINIMAL CORE & VERTICAL SLICE PROVEN (26/26 TESTS)
         ↓
-FIRST END-TO-END FLOW
+BASELINE FREEZE VALIDATION (PRE-MVP-1)
 
 ---
 

@@ -121,3 +121,129 @@ fn test_valid_authorization_issues_verifiable_token() {
     let different_cap = CapabilityId::new("other.cap");
     assert!(!security.validate_token(&op_id, &different_cap, token));
 }
+
+#[test]
+fn test_untrusted_caller_is_denied() {
+    let security = SecurityController::new();
+    let registry = CapabilityRegistry::new();
+
+    let request = AuthorizationRequest {
+        operation_id: OperationId::new(),
+        capability_id: CapabilityId::new("system.echo"),
+        context_id: ContextId::new(),
+        caller_id: "untrusted_external_infiltrator".to_string(),
+        input_summary: serde_json::json!({"message": "teste"}),
+        risk_class: RiskClass::Low,
+    };
+
+    let decision = security.authorize(&request, &registry).expect("authorize");
+    match decision {
+        AuthorizationDecision::Deny { reason } => {
+            assert!(reason.contains("Chamador não autorizado"));
+        }
+        _ => panic!("Untrusted caller must be denied, got: {:?}", decision),
+    }
+}
+
+#[test]
+fn test_missing_required_permission_is_denied() {
+    let security = SecurityController::new();
+    let mut registry = CapabilityRegistry::new();
+
+    struct ProtectedCapability;
+    impl yuki::capabilities::registry::CapabilityHandler for ProtectedCapability {
+        fn manifest(&self) -> yuki::contracts::capability::CapabilityManifest {
+            yuki::contracts::capability::CapabilityManifest {
+                id: CapabilityId::new("protected.capability"),
+                version: "0.1.0".to_string(),
+                description: "Protected".to_string(),
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                required_permissions: vec!["permission:special_admin".to_string()],
+                risk_class: RiskClass::Low,
+                side_effects: yuki::contracts::capability::SideEffects::None,
+                network_required: false,
+                filesystem_required: false,
+                secrets_required: false,
+            }
+        }
+        fn execute(
+            &self,
+            _input: &serde_json::Value,
+        ) -> Result<serde_json::Value, yuki::contracts::errors::YukiError> {
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    registry.register(Box::new(ProtectedCapability));
+
+    let request = AuthorizationRequest {
+        operation_id: OperationId::new(),
+        capability_id: CapabilityId::new("protected.capability"),
+        context_id: ContextId::new(),
+        caller_id: "test_runner".to_string(),
+        input_summary: serde_json::json!({}),
+        risk_class: RiskClass::Low,
+    };
+
+    let decision = security.authorize(&request, &registry).expect("authorize");
+    match decision {
+        AuthorizationDecision::Deny { reason } => {
+            assert!(reason.contains("Permissão ausente"));
+        }
+        _ => panic!("Missing permission must be denied, got: {:?}", decision),
+    }
+}
+
+#[test]
+fn test_external_mutation_side_effect_requires_approval() {
+    let security = SecurityController::new();
+    let mut registry = CapabilityRegistry::new();
+
+    struct MutatingCapability;
+    impl yuki::capabilities::registry::CapabilityHandler for MutatingCapability {
+        fn manifest(&self) -> yuki::contracts::capability::CapabilityManifest {
+            yuki::contracts::capability::CapabilityManifest {
+                id: CapabilityId::new("mutating.capability"),
+                version: "0.1.0".to_string(),
+                description: "Mutates state".to_string(),
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                required_permissions: vec!["capability:system.echo".to_string()],
+                risk_class: RiskClass::Low,
+                side_effects: yuki::contracts::capability::SideEffects::ExternalMutation,
+                network_required: false,
+                filesystem_required: false,
+                secrets_required: false,
+            }
+        }
+        fn execute(
+            &self,
+            _input: &serde_json::Value,
+        ) -> Result<serde_json::Value, yuki::contracts::errors::YukiError> {
+            Ok(serde_json::json!({"mutated": true}))
+        }
+    }
+
+    registry.register(Box::new(MutatingCapability));
+
+    let request = AuthorizationRequest {
+        operation_id: OperationId::new(),
+        capability_id: CapabilityId::new("mutating.capability"),
+        context_id: ContextId::new(),
+        caller_id: "test_runner".to_string(),
+        input_summary: serde_json::json!({}),
+        risk_class: RiskClass::Low,
+    };
+
+    let decision = security.authorize(&request, &registry).expect("authorize");
+    match decision {
+        AuthorizationDecision::RequiresApproval { reason } => {
+            assert!(reason.contains("mutação externa"));
+        }
+        _ => panic!(
+            "External mutation must require approval, got: {:?}",
+            decision
+        ),
+    }
+}

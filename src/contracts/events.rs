@@ -47,7 +47,11 @@ impl AuditEvent {
         }
     }
 
-    /// Verifies that no secrets or tokens are stored in the event payload
+    /// Salvaguarda básica e preventiva da Foundation v0.1 para rejeitar eventos
+    /// de auditoria contendo segredos ou credenciais em texto claro.
+    ///
+    /// NOTA ARQUITETURAL: Salvaguarda mínima local da Foundation; o isolamento
+    /// criptográfico integral de segredos pertence ao futuro Credential Broker (ADR-008).
     pub fn assert_no_secrets(&self) -> Result<(), String> {
         let serialized = serde_json::to_string(&self.payload)
             .unwrap_or_default()

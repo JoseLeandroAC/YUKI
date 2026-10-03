@@ -89,3 +89,37 @@ fn test_verification_confirms_failure_when_execution_fails() {
     );
     assert!(result.is_failure());
 }
+
+#[test]
+fn test_conflicting_evidence_produces_unknown_conflicting() {
+    let verifier = Verifier::new();
+    let op_id = OperationId::new();
+
+    let execution = ExecutionResult {
+        operation_id: op_id.clone(),
+        attempt_id: AttemptId::new(),
+        state: OperationState::Completed,
+        output: Some(serde_json::json!({ "echoed_message": "sucesso" })),
+        error: None,
+        executed_at: now_utc(),
+    };
+
+    let evidences = vec![Evidence {
+        evidence_id: EvidenceId::new(),
+        source: "external_sensor".to_string(),
+        data: serde_json::json!({ "conflict": true, "details": "sensor reports conflicting state" }),
+        observed_at: now_utc(),
+        confidence_basis: "sensor_discordance".to_string(),
+    }];
+
+    let result = verifier.verify(&op_id, &execution, &evidences);
+
+    assert_eq!(result.verification_state, VerificationState::Unknown);
+    assert_eq!(
+        result.observed_effect_state,
+        ObservedEffectState::Conflicting
+    );
+    assert!(result.is_unknown());
+    assert!(!result.is_success());
+    assert!(!result.is_failure());
+}

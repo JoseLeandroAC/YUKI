@@ -20,7 +20,8 @@ impl Executor {
         security: &SecurityController,
     ) -> Result<ExecutionResult, YukiError> {
         // Enforce INV-FND-002 & INV-FND-004: Execution requires explicit authorization
-        if !security.validate_token(
+        // and tokens are single-use (consumed upon execution).
+        if !security.validate_and_consume_token(
             &request.operation_id,
             &request.capability_id,
             &request.authorization_token,
