@@ -915,37 +915,40 @@ Isso preserva:
 
 33. Definition of Done — Foundation v0.1
 
-A Foundation estará concluída quando:
+A Foundation v0.1 foi integralmente cumprida e auditada:
 
-- [ ] projeto compila;
-- [ ] testes automatizados executam;
-- [ ] CLI funciona;
-- [ ] Core existe;
-- [ ] contratos fundamentais existem;
-- [ ] Context Builder existe;
-- [ ] ModelProvider abstrato existe;
-- [ ] Mock Provider funciona;
-- [ ] Capability Registry funciona;
-- [ ] "system.echo" funciona;
-- [ ] Authorization existe;
-- [ ] Execution existe;
-- [ ] Verification existe;
-- [ ] eventos estruturados existem;
-- [ ] logs não expõem secrets;
-- [ ] testes de segurança básicos passam;
-- [ ] vertical slice passa;
-- [ ] documentação permanece consistente;
-- [ ] nenhum componente possui autoridade indevida.
+- [x] projeto compila (`cargo check`, `cargo build`, `cargo build --release`);
+- [x] testes automatizados executam (26/26 testes passando em `tests/`);
+- [x] CLI funciona (`src/main.rs` com comandos de prompt e `health`);
+- [x] Core existe (`YukiCore` orquestrando o pipeline de ponta a ponta);
+- [x] contratos fundamentais existem (módulos tipados em `src/contracts/`);
+- [x] Context Builder existe (com minimização e salvaguarda de segredos);
+- [x] ModelProvider abstrato existe (trait em `src/models/provider.rs`);
+- [x] Mock Provider funciona (`MockModelProvider` determinístico);
+- [x] Capability Registry funciona (`CapabilityRegistry` em `src/capabilities/`);
+- [x] "system.echo" funciona (`EchoCapability` e vertical slice comprovado);
+- [x] Authorization existe (`SecurityController` e `DefaultFoundationPolicy`);
+- [x] Execution existe (`Executor` com validação e consumo atômico de tokens);
+- [x] Verification existe (`Verifier` atestando evidências e preservando UNKNOWN);
+- [x] eventos estruturados existem (`AuditEvent` em `src/contracts/events.rs`);
+- [x] logs não expõem secrets (`InMemoryEventStore` com `assert_no_secrets`);
+- [x] testes de segurança básicos passam (rejeição de replay, forjamento e chamada não autorizada);
+- [x] vertical slice passa (`test_vertical_slice_echo` e `test_vertical_slice_custom_repeat`);
+- [x] documentação permanece consistente e auditada;
+- [x] nenhum componente possui autoridade indevida (modelo não executa sem token consumível).
 
 ---
 
 34. Definition of Done — MVP-0
 
-A MVP-0 estará concluída quando for possível executar:
+A MVP-0 foi concluída e validada através de testes automatizados e execução de terminal:
 
-$ yuki "Olá"
+```bash
+$ yuki "Olá Yuki"
+Olá! Estou funcionando.
+```
 
-e a solicitação atravessar o pipeline oficial:
+A solicitação atravessa o pipeline oficial:
 
 User Input
      ↓
@@ -967,7 +970,21 @@ Audit
      ↓
 Response
 
-com testes automatizados demonstrando o fluxo.
+com 26 testes automatizados demonstrando a integridade das fronteiras arquiteturais.
+
+---
+
+34.1. Limitações Conhecidas e Deferimentos para o MVP-1
+
+Em conformidade com a auditoria de encerramento da Foundation v0.1, os seguintes itens estão explicitamente documentados como simplificações do MVP-0 ou deferimentos formais para o MVP-1:
+1. **Credential Broker:** A Foundation v0.1 utiliza heurística preventiva em texto (`assert_no_secrets`). O Credential Broker completo com referências criptográficas e entrega segura (ADR-008) pertence ao MVP-1.
+2. **Verification Strategy Dinâmica:** O `Verifier` atual implementa verificação demonstrativa síncrona para `system.echo`. O despacho polimórfico de estratégias por capability e por evidência (ADR-009) será implementado no MVP-1.
+3. **Persistência de Eventos:** O `InMemoryEventStore` é puramente em memória; a persistência durável append-only em disco será construída no MVP-1 (ADR-013).
+4. **Entropia de Identificadores:** Identificadores e tokens utilizam contadores monotônicos atômicos, suficientes para o processo local em MVP-0, mas sem finalidade criptográfica (CSPRNG/UUIDv7 deferido para MVP-1).
+5. **Garbage Collection de Tokens:** O mapa em memória de tokens do `SecurityController` não possui expurgo de tokens abandonados; o ciclo de vida e eviction serão formalizados no runtime contínuo.
+6. **Runtime Síncrono:** O runtime da Foundation é inteiramente síncrono; a adoção de Tokio para integração com LLMs de rede reais será realizada no MVP-1.
+7. **Visibilidade de `validate_token`:** A API pública `validate_token` é restrita a inspeção de leitura nos testes e não participa do caminho de execução (o `Executor` utiliza obrigatoriamente `validate_and_consume_token`); sua visibilidade será internalizada no MVP-1.
+8. **Acoplamento Semântico do Verifier:** O `Verifier` inspeciona a evidência determinística de echo, sendo a generalização para outras capabilities parte do MVP-1.
 
 ---
 
