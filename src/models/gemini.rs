@@ -197,18 +197,18 @@ impl GeminiProviderAdapter {
             });
         }
 
-        // 3. Mapear declarações de capacidades para tools
+        // 3. Mapear declarações de capacidades para tools com projeção de esquema compatível
         let mut tools = Vec::new();
         if !request.available_capabilities.is_empty() {
-            let declarations = request
-                .available_capabilities
-                .iter()
-                .map(|cap| GeminiFunctionDeclaration {
+            let mut declarations = Vec::new();
+            for cap in &request.available_capabilities {
+                let projected_parameters = project_schema_to_gemini(&cap.parameters_schema)?;
+                declarations.push(GeminiFunctionDeclaration {
                     name: cap.name.clone(),
                     description: cap.description.clone(),
-                    parameters: cap.parameters_schema.clone(),
-                })
-                .collect();
+                    parameters: projected_parameters,
+                });
+            }
             tools.push(GeminiTool {
                 function_declarations: declarations,
             });
@@ -463,4 +463,138 @@ impl ModelProvider for GeminiProviderAdapter {
             )),
         }
     }
+}
+
+/// Projeta um esquema canônico de capacidade para o subconjunto OpenAPI 3.0 aceito pelo Google Gemini.
+///
+/// INVARIANTES ARQUITETURAIS:
+/// 1. Não mutabilidade do manifesto canônico: O esquema canônico de entrada permanece intacto (`&serde_json::Value`).
+/// 2. Fronteira de provedor: `Yuki Schema != Gemini Schema`. Restrições do Gemini pertencem exclusivamente a esta fronteira.
+/// 3. Segurança de execução: A omissão de `additionalProperties` para compatibilidade com o Gemini NÃO afeta a validação
+///    interna da Yuki (`validate_capability_input`), que continua executando contra o manifesto canônico estrito.
+/// 4. Recursividade: Normaliza recursivamente subesquemas em `properties`, `items` e `anyOf`.
+/// 5. Falha fechada (*fail-closed*): Rejeita esquemas não-objeto na raiz e construções não representáveis (ex.: `not`, `patternProperties`).
+pub fn project_schema_to_gemini(
+    schema: &serde_json::Value,
+) -> Result<serde_json::Value, ModelError> {
+    let obj = schema.as_object().ok_or_else(|| {
+        ModelError::InvalidRequest(
+            "Esquema de parâmetros para declaração de função do Gemini deve ser um objeto JSON"
+                .to_string(),
+        )
+    })?;
+
+    // O esquema raiz dos parâmetros de uma FunctionDeclaration DEVE ser type 'object'
+    let root_type = obj.get("type").and_then(|v| v.as_str());
+    if root_type != Some("object") {
+        return Err(ModelError::InvalidRequest(format!(
+            "Esquema raiz de parâmetros de função para Gemini deve possuir type 'object', encontrado: '{:?}'",
+            root_type
+        )));
+    }
+
+    project_schema_node(schema)
+}
+
+fn project_schema_node(schema: &serde_json::Value) -> Result<serde_json::Value, ModelError> {
+    let obj = schema.as_object().ok_or_else(|| {
+        ModelError::InvalidRequest("Nó de esquema inválido: esperado objeto JSON".to_string())
+    })?;
+
+    // Palavras-chave estritamente proibidas / não representáveis com fidelidade semântica
+    const FORBIDDEN_KEYWORDS: &[&str] = &[
+        "not",
+        "patternProperties",
+        "oneOf",
+        "allOf",
+        "dependentRequired",
+        "dependentSchemas",
+    ];
+
+    for &forbidden in FORBIDDEN_KEYWORDS {
+        if obj.contains_key(forbidden) {
+            return Err(ModelError::InvalidRequest(format!(
+                "Esquema contém construção não suportada para projeção do Gemini: '{}'",
+                forbidden
+            )));
+        }
+    }
+
+    let mut projected = serde_json::Map::new();
+
+    for (k, v) in obj {
+        match k.as_str() {
+            // Palavras-chave a serem explicitamente descartadas no wire format do Gemini
+            "additionalProperties" | "$schema" | "$id" | "$comment" | "definitions" | "$defs" => {
+                // Omitir no wire format do Gemini (incompatíveis com google.ai.generativelanguage.v1beta.Schema)
+                continue;
+            }
+
+            // Normalização recursiva de propriedades de objeto
+            "properties" => {
+                let props_obj = v.as_object().ok_or_else(|| {
+                    ModelError::InvalidRequest(
+                        "Campo 'properties' deve ser um objeto JSON mapeando nomes a subesquemas"
+                            .to_string(),
+                    )
+                })?;
+                let mut projected_props = serde_json::Map::new();
+                for (prop_name, prop_schema) in props_obj {
+                    projected_props.insert(prop_name.clone(), project_schema_node(prop_schema)?);
+                }
+                projected.insert(
+                    "properties".to_string(),
+                    serde_json::Value::Object(projected_props),
+                );
+            }
+
+            // Normalização recursiva de array items
+            "items" => {
+                let projected_items = project_schema_node(v)?;
+                projected.insert("items".to_string(), projected_items);
+            }
+
+            // Normalização recursiva de anyOf
+            "anyOf" => {
+                let any_of_arr = v.as_array().ok_or_else(|| {
+                    ModelError::InvalidRequest(
+                        "Campo 'anyOf' deve ser uma lista de esquemas".to_string(),
+                    )
+                })?;
+                let mut projected_any_of = Vec::new();
+                for subschema in any_of_arr {
+                    projected_any_of.push(project_schema_node(subschema)?);
+                }
+                projected.insert(
+                    "anyOf".to_string(),
+                    serde_json::Value::Array(projected_any_of),
+                );
+            }
+
+            // Campos padrão do OpenAPI 3.0 Schema permitidos pelo Gemini
+            "type" | "format" | "title" | "description" | "nullable" | "enum" | "required"
+            | "minItems" | "maxItems" | "minLength" | "maxLength" | "pattern" | "example"
+            | "propertyOrdering" | "default" | "minimum" | "maximum" | "minProperties"
+            | "maxProperties" => {
+                projected.insert(k.clone(), v.clone());
+            }
+
+            // Qualquer outra palavra-chave não reconhecida: fail-closed para evitar rejeições do Gemini
+            other => {
+                return Err(ModelError::InvalidRequest(format!(
+                    "Palavra-chave não reconhecida ou incompatível com o esquema do Gemini: '{}'",
+                    other
+                )));
+            }
+        }
+    }
+
+    // Se o tipo for object e properties estiver ausente, garantir "properties": {}
+    if projected.get("type").and_then(|v| v.as_str()) == Some("object")
+        && !projected.contains_key("properties")
+    {
+        projected.insert("properties".to_string(), serde_json::json!({}));
+    }
+
+    Ok(serde_json::Value::Object(projected))
 }
