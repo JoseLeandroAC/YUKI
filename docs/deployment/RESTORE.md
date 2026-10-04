@@ -1,0 +1,118 @@
+# YUKI — COLD RESTORE PROCEDURE (DISASTER RECOVERY)
+
+**Documento:** `docs/deployment/RESTORE.md`  
+**Status:** ATIVO  
+**Fase:** MVP-1 (Marco 4)  
+**Última Atualização:** 2026-10-04  
+
+---
+
+## 1. Objetivo
+
+Este documento define o procedimento oficial de **Cold Restore** (Restauração a Frio) da Yuki. Ele descreve os passos reproduzíveis para recompor o ambiente de execução e restaurar o estado operacional e de auditoria da Yuki a partir de um repositório limpo, garantindo:
+
+1. **Zero Dependências Secretas ou Externas Ocultas:** A execução depende unicamente dos arquivos versionados no repositório e de uma toolchain Rust ou runtime OCI padrão.
+2. **Imutabilidade e Recuperabilidade da Auditoria:** O banco SQLite `audit.db` pode ser restaurado e inspecionado a frio com integridade estrutural e de esquema, checagem defensiva de corrupção e triggers SQL append-only.
+3. **Comportamento de Inicialização e Falha Segura (Fail-Closed na Execução):**
+   - **Banco Saudável:** Persistência durável ativada (`Persistent Audit (SQLite): OK`).
+   - **Banco Indisponível / Corrompido / Incompatível:** A inicialização do subsistema de persistência falha de forma explícita emitindo aviso no stderr e a runtime inicia em modo degradado in-memory (`Persistent Audit (SQLite): DEGRADED (In-Memory Fallback)`).
+   - **Distinção de Segurança:** *Degraded startup != permissão para executar operações que exigem auditoria durável*. A disponibilidade do processo para diagnósticos não concede elegibilidade para operações que exigem auditoria persistente pré-execução; tais operações falham de forma fechada (*fail-closed*) caso a gravação no armazenamento durável não esteja ativa.
+
+---
+
+## 2. Requisitos Mínimos
+
+### Caminho A: Container OCI (Recomendado para Produção / VPS)
+- Docker Engine 24+ ou Podman 4+
+- Acesso à rede apenas para baixar a imagem base Debian Bookworm durante o build
+
+### Caminho B: Compilação Nativa (Bare Metal / Dev Host)
+- Rust Toolchain 1.98.1+ (rustc, cargo)
+- Compilador C padrão (GCC / Clang) para compilação do SQLite embutido
+- Git
+
+---
+
+## 3. Procedimento de Restauração Passo a Passo
+
+### Passo 1: Obtenção do Código-Fonte
+```bash
+git clone https://github.com/JoseLeandroAC/YUKI.git
+cd YUKI
+git checkout feature/mvp-1-runtime
+```
+
+### Passo 2: Restauração da Base de Auditoria (Se houver backup existente)
+Se estiver restaurando um backup prévio de auditoria durável:
+```bash
+mkdir -p /var/lib/yuki
+cp /path/to/backup/audit.db /var/lib/yuki/audit.db
+chmod 0600 /var/lib/yuki/audit.db
+chown -R 10001:10001 /var/lib/yuki
+```
+
+*Nota:* Se nenhum backup for fornecido, a Yuki inicializa um novo banco de dados aplicando as migrações automáticas `V1__initial_audit_schema.sql`.
+
+---
+
+## 4. Implantação e Execução
+
+### Opção A: Execução via Container OCI (Docker)
+```bash
+# 1. Compilação da imagem isolada multi-stage
+docker build -t yuki:mvp-1 .
+
+# 2. Execução do health-check diagnóstico
+docker run --rm yuki:mvp-1 health
+
+# 3. Execução contínua com persistência de auditoria montada
+docker run -d \
+  --name yuki-runtime \
+  -v /var/lib/yuki:/var/lib/yuki \
+  -e YUKI_ENVIRONMENT=production \
+  -e RUST_LOG=info \
+  yuki:mvp-1
+```
+
+### Opção B: Execução Nativa
+```bash
+# 1. Compilação otimizada em release
+cargo build --release --bin yuki
+
+# 2. Execução do health diagnostic
+./target/release/yuki health
+
+# 3. Execução de validação completa de testes offline
+cargo test --all-targets
+```
+
+---
+
+## 5. Verificação da Integridade Pós-Restauração
+
+Após o cold restore, execute os seguintes passos de validação:
+
+1. **Diagnóstico de Saúde do Sistema:**
+   O comando `yuki health` reporta o estado operacional dos subsistemas:
+   - Status Geral: `Status: OK` (quando todos os subsistemas essenciais e persistência durável estão operacionais) ou `Status: DEGRADED` (quando a persistência opera em fallback in-memory).
+   - Core / Context / Capability Registry: `OK` (`system.echo`, `system.time`, `system.info` registrados).
+   - Model Subsystem (Mock): `OK`.
+   - Persistent Audit (SQLite): `OK` (quando o banco SQLite está acessível e verificado) ou `DEGRADED (In-Memory Fallback)` (se o banco estiver corrompido, inacessível ou incompatível).
+
+2. **Integridade Estrutural e de Esquema do SQLite:**
+   - O schema version registrado na tabela `schema_migrations` deve corresponder a `1`.
+   - Se o banco restaurado for válido e íntegro, o `SqliteAuditStore::open` conclui a verificação de integridade e ativa o armazenamento persistente.
+   - Caso uma base corrompida (`MigrationError::DatabaseCorrupted`) ou de versão futura incompatível (`MigrationError::FutureVersionIncompatible`) seja carregada, o `SqliteAuditStore::open` recusa a abertura da base. O runtime emite um aviso descritivo no stderr e opera em modo degradado in-memory.
+   - **Elegibilidade Operacional vs Disponibilidade de Runtime:** A inicialização degradada preserva a disponibilidade do processo para diagnósticos (`yuki health`), mas *não* autoriza operações de capabilities que dependam de auditoria durável: qualquer tentativa de despacho que requeira persistência durável pré-execução é bloqueada de forma estrita (*fail-closed*).
+
+3. **Verificação de Segredos:**
+   Nenhum arquivo de configuração ou banco de dados contém segredos em texto plano. A variável `YUKI_GEMINI_API_KEY` deve ser injetada estritamente via runtime environment se o adapter externo for utilizado.
+
+---
+
+## 6. Procedimento de Simulação Limpa Validado (Marco 4)
+
+O exercício de Cold Restore foi verificado nas seguintes camadas:
+- **Compilação e Testes Locais:** Recompilação a frio a partir de `Cargo.lock` e `Cargo.toml` com 120 testes passando 100% verde localmente e no CI remoto (Ubuntu).
+- **Recuperação de Persistência:** Preservação e recuperação determinística do banco `audit.db` entre sessões demonstrada pelo teste `test_adv_29_persistence_restart_and_recovery` e execução local do comando `yuki health` com `YUKI_PERSISTENCE_PATH`.
+- **Empacotamento OCI/Docker:** `Dockerfile` e `.dockerignore` implementados e estaticamente auditados (usuário não-root 10001, diretório `/var/lib/yuki` modo 0700, binário `0555`, multi-stage build). A execução de runtime do container Docker não foi executada no host de desenvolvimento por indisponibilidade local do Docker daemon, ficando a validação em runtime do container para o ambiente de CI containerizado / auditoria final de release do MVP-1.

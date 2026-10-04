@@ -1,43 +1,42 @@
 Yuki — Status Atual do Projeto
 
-Última atualização: 2026-09-26
-Status geral: Foundation v0.1 / MVP-0 implementada, auditada e testada; base consolidada para MVP-1
+Última atualização: 2026-10-03
+Status geral: MVP-1 Marco 4 implementado, testado e validado; suíte adversarial completa e empacotamento OCI pronto para auditoria de fechamento
 Repositório: "JoseLeandroAC/YUKI"
-Branch de referência: "feature/foundation-v0.1" (incorporada em "main")
+Branch de trabalho: "feature/mvp-1-runtime" (PR #3 aberto em draft para "main")
+Baseline Foundation: "v0.1.0-foundation" (congelada e preservada em 654c1812f40d6c903e67fd6f86f4b83e06e14b8c)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu sua principal fase inicial de descoberta e definição arquitetural, bem como a implementação, auditoria e consolidação da **Foundation v0.1 / MVP-0**.
-
-O projeto possui atualmente uma arquitetura conceitual extensa documentada em ADRs e uma primeira célula funcional de software implementada em Rust puro (1.98.1), com testes de integração positivos e negativos protegendo os invariantes fundamentais.
+A Yuki concluiu todos os quatro marcos de desenvolvimento do **MVP-1 (Runtime Soberano & Modelo Operacional Mínimo)**:
+- **Marco 1:** Runtime Assíncrono Tokio, Pipeline Assíncrono com Timeout e Cancelamento;
+- **Marco 2:** Credential Broker Nível 1, Model Gateway/Router, Adapter Gemini e Provedor Mock;
+- **Marco 3:** Verificação Dinâmica desacoplada, Registry de Estratégias, Persistência Local Durável SQLite com Migrações;
+- **Marco 4:** Expansão Segura de Capacidades (`system.time`, `system.info`), Validação de Pré-Autorização Fail-Closed, Integridade Estrita de Parâmetros, Suíte Adversarial Completa (34 testes) e Empacotamento OCI/Docker Multi-Stage.
 
 A situação atual pode ser resumida como:
 
 ARQUITETURA
 ████████████████████████████████████████
-DEFINIDA E DOCUMENTADA (ADRs 006 a 017)
+DEFINIDA E DOCUMENTADA (ADRs 006 a 019)
 
 CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1)
 ████████████████████████████████████████
-DEFINIDOS, IMPLEMENTADOS E AUDITADOS
+FROZEN / IMUTÁVEIS (v0.1.0-foundation)
 
-FOUNDATION v0.1 / MVP-0 (SOFTWARE & PIPELINE VERTICAL SLICE)
+MVP-1 (MARCOS 1, 2, 3 E 4)
 ████████████████████████████████████████
-IMPLEMENTADA, AUDITADA E CONSOLIDADA
+IMPLEMENTADOS E VERIFICADOS
 
-TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS)
+TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-26/26 TESTES PASSANDO (TESTES A AO I + NEGATIVOS DE VIOLAÇÃO)
+120/120 TESTES ATIVOS PASSANDO (1 LIVE GEMINI IGNORADO)
 
-PROVEDORES REAIS DE MODELO / RUNTIME ASSÍNCRONO / INTEGRAÇÕES
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-PLANEJADOS PARA MVP-1 (NÃO INICIADOS)
-
-PRODUÇÃO
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-NÃO INICIADA
+EMPACOTAMENTO OCI / DOCKER
+████████████████████████████████████████
+CONCLUÍDO (MULTI-STAGE, HARDENED, NON-ROOT)
 
 ---
 
@@ -604,39 +603,26 @@ A ponte entre arquitetura e código está formalizada e consolidada nos seguinte
 
 20. Status
 
-Estado: FOUNDATION CONSOLIDATED (READY FOR FREEZE)
+Estado: MVP-1 IMPLEMENTATION COMPLETE — READY FOR CLOSURE AUDIT
 
-Arquitetura: definida (ADRs 006–017)
-Implementação: Foundation v0.1 implementada, testada e duplamente auditada
-Código: 26/26 testes passando, clippy limpo, rustfmt verificado
-Próximo passo: Congelamento oficial da baseline Foundation v0.1 e abertura do planejamento do MVP-1.
+Arquitetura: definida e aprovada (ADRs 006–019)
+Implementação: MVP-1 Marcos 1, 2, 3 e 4 totalmente implementados e testados
+Código: 120/120 testes ativos passando (+ 1 teste live Gemini ignorado), clippy limpo (-D warnings), rustfmt verificado
+Próximo passo: Auditoria independente de fechamento do Marco 4 e preparação para congelamento oficial da baseline MVP-1 (v0.2.0-mvp1).
 
 ---
 
-21. Registro das Auditorias da Foundation v0.1
+21. Registro de Validação do MVP-1
 
-A Foundation v0.1 passou por duas rodadas formais de auditoria técnica e de segurança:
-1. **Foundation v0.1 General Audit:** auditoria arquitetural e de segurança com consolidação de código e cobertura de testes negativos de autorização, replay e contenção de segredos.
-2. **Focused Closure Audit:** auditoria pontual sobre segurança de tokens (`validate_token`), acoplamento do `Verifier` e concorrência/robustez do `EventStore`.
+O MVP-1 concluiu seus marcos de desenvolvimento:
+1. **Marco 1:** Runtime assíncrono Tokio, timeouts e cancelamento cooperativo.
+2. **Marco 2:** Credential Broker Nível 1, Model Gateway/Router com fallback resiliente, mock e adapter Gemini seguro.
+3. **Marco 3:** Verificação dinâmica desacoplada e persistência local durável SQLite append-only com schema migrations.
+4. **Marco 4:** Capacidades seguras adicionais (`system.time`, `system.info`), validação de pré-autorização fail-closed, integridade estrita de parâmetros, empacotamento OCI multi-stage e suíte com 34 testes adversariais.
 
-Resultados verificados em ambiente reprodutível:
-- `cargo test`: 26/26 aprovados (testes unitários, contratuais, segurança e vertical slice);
-- `cargo check`: aprovado sem erros;
-- `cargo fmt --check`: aprovado sem desvios de formatação;
+Resultados verificados:
+- `cargo test --all-targets`: 120 ativos aprovados, 1 ignorado (smoke live), 0 falhas;
+- `cargo check --all-targets`: aprovado sem erros;
+- `cargo fmt --all -- --check`: aprovado sem desvios;
 - `cargo clippy --all-targets -- -D warnings`: aprovado com zero warnings;
-- `cargo build`: aprovado (perfil debug);
-- `cargo build --release`: aprovado (perfil release).
-
----
-
-22. Limitações Conhecidas e Deferimentos Explícitos para o MVP-1
-
-As seguintes características são limitações conhecidas ou simplificações deliberadas do MVP-0 e estão formalmente deferidas para o MVP-1:
-1. **Credential Broker:** O isolamento criptográfico integral de segredos e credenciais externas (ADR-008) será introduzido no MVP-1; a Foundation v0.1 utiliza salvaguardas preventivas básicas (`assert_no_secrets`).
-2. **Verification Strategy Dinâmica:** O `Verifier` da Foundation v0.1 contém lógica demonstrativa para validar a capability `system.echo`; no MVP-1 o motor será desacoplado para despacho dinâmico por estratégia orientada ao manifesto (ADR-009).
-3. **Persistência de Eventos:** O `EventStore` da Foundation v0.1 opera em memória (`InMemoryEventStore`); persistência durável em disco (arquivo append-only ou SQLite) é escopo do MVP-1 e ADR-013.
-4. **Identificadores Criptográficos (CSPRNG):** Os identificadores atuais utilizam ordenação monotônica e contador atômico sequencial; geração com alta entropia criptográfica (UUIDv7/CSPRNG) será introduzida para ambientes distribuídos.
-5. **Garbage Collection de Tokens:** A rotina periódica de expurgo de tokens expirados e abandonados no `SecurityController` será implementada no runtime contínuo.
-6. **Runtime Síncrono:** A Foundation v0.1 opera de forma síncrona; o suporte assíncrono (Tokio) será adotado no MVP-1 para chamadas de rede com modelos externos.
-7. **Visibilidade de `validate_token`:** O método `validate_token` é de consulta de leitura e não participa do caminho de execução (o `Executor` utiliza obrigatoriamente `validate_and_consume_token`); sua visibilidade será restrita no MVP-1.
-8. **Lógica de Verificação Específica:** O `Verifier` atual avalia a evidência de `system.echo`, sendo o suporte polimórfico a outras capabilities objeto do MVP-1.
+- `cargo build --release`: aprovado com sucesso.

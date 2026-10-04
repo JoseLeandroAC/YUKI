@@ -28,7 +28,8 @@ impl CapabilityHandler for EchoCapability {
                 "properties": {
                     "message": { "type": "string" }
                 },
-                "required": ["message"]
+                "required": ["message"],
+                "additionalProperties": false
             }),
             output_schema: serde_json::json!({
                 "type": "object",

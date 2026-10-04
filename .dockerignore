@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+docs/
+tests/
+*.md
+*.db
+*.log
+.dockerignore
+Dockerfile

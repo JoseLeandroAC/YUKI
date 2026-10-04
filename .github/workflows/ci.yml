@@ -1,0 +1,150 @@
+name: Yuki CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build & Test Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Typecheck codebase
+        run: cargo check --all-targets
+
+      - name: Run Clippy linter
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run test suite
+        run: cargo test --all-targets
+
+      - name: Build release artifact
+        run: cargo build --release
+
+  docker-validation:
+    name: OCI Runtime Release Gate
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: H1 & H2 - Build OCI image (no secret build inputs)
+        run: |
+          docker build -t yuki:mvp1-ci .
+
+      - name: H3 - Verify container identity (non-root UID/GID 10001)
+        run: |
+          CONTAINER_UID=$(docker run --rm --entrypoint /usr/bin/id yuki:mvp1-ci -u)
+          CONTAINER_GID=$(docker run --rm --entrypoint /usr/bin/id yuki:mvp1-ci -g)
+          echo "Verified runtime identity: UID=$CONTAINER_UID, GID=$CONTAINER_GID"
+          test "$CONTAINER_UID" = "10001"
+          test "$CONTAINER_GID" = "10001"
+
+      - name: H4 - Verify container health command
+        run: |
+          HEALTH_OUT=$(docker run --rm yuki:mvp1-ci health)
+          echo "$HEALTH_OUT"
+          echo "$HEALTH_OUT" | grep -q "Status: OK"
+          echo "$HEALTH_OUT" | grep -q "Core: OK"
+          echo "$HEALTH_OUT" | grep -q "Context: OK"
+          echo "$HEALTH_OUT" | grep -q "Model Subsystem (Mock): OK"
+          echo "$HEALTH_OUT" | grep -q "Capability Registry: OK"
+          echo "$HEALTH_OUT" | grep -q "Security Controller: OK"
+          echo "$HEALTH_OUT" | grep -q "Execution Engine: OK"
+          echo "$HEALTH_OUT" | grep -q "Verification Engine: OK"
+          echo "$HEALTH_OUT" | grep -q "Audit Subsystem (In-Memory): OK"
+          echo "$HEALTH_OUT" | grep -q "Persistent Audit (SQLite): OK"
+
+      - name: H5 & H6 - Verify persistent volume and restart persistence
+        run: |
+          docker volume create yuki-data-vol
+
+          echo "Instance A: Writing initial event..."
+          OUT_A=$(docker run --rm -v yuki-data-vol:/var/lib/yuki yuki:mvp1-ci "echo payload_instance_a")
+          echo "Instance A Output: $OUT_A"
+          test "$OUT_A" = "echo payload_instance_a"
+
+          # Verify SQLite audit.db file was created
+          docker run --rm -v yuki-data-vol:/var/lib/yuki --entrypoint /usr/bin/test yuki:mvp1-ci -f /var/lib/yuki/audit.db
+          SIZE_A=$(docker run --rm -v yuki-data-vol:/var/lib/yuki --entrypoint /usr/bin/stat yuki:mvp1-ci -c %s /var/lib/yuki/audit.db)
+          echo "audit.db size after Instance A: $SIZE_A bytes"
+          test "$SIZE_A" -gt 0
+
+          echo "Instance B: Health check reopening existing database..."
+          HEALTH_B=$(docker run --rm -v yuki-data-vol:/var/lib/yuki yuki:mvp1-ci health)
+          echo "$HEALTH_B"
+          echo "$HEALTH_B" | grep -q "Status: OK"
+          echo "$HEALTH_B" | grep -q "Persistent Audit (SQLite): OK"
+
+          echo "Instance B: Writing second event to existing database..."
+          OUT_B=$(docker run --rm -v yuki-data-vol:/var/lib/yuki yuki:mvp1-ci "echo payload_instance_b")
+          echo "Instance B Output: $OUT_B"
+          test "$OUT_B" = "echo payload_instance_b"
+
+          SIZE_B=$(docker run --rm -v yuki-data-vol:/var/lib/yuki --entrypoint /usr/bin/stat yuki:mvp1-ci -c %s /var/lib/yuki/audit.db)
+          echo "audit.db size after Instance B: $SIZE_B bytes"
+          test "$SIZE_B" -ge "$SIZE_A"
+
+          docker volume rm yuki-data-vol
+
+      - name: H7 - Verify graceful termination
+        run: |
+          HEALTH_CODE=0
+          docker run --rm yuki:mvp1-ci health || HEALTH_CODE=$?
+          echo "Health command exit code: $HEALTH_CODE"
+          test "$HEALTH_CODE" -eq 0
+
+          EXEC_CODE=0
+          docker run --rm yuki:mvp1-ci "echo graceful_exit_test" || EXEC_CODE=$?
+          echo "Execution command exit code: $EXEC_CODE"
+          test "$EXEC_CODE" -eq 0
+
+      - name: H8 - Verify writable-path boundary & read-only root compatibility
+        run: |
+          # 1. Non-root cannot write outside /var/lib/yuki
+          docker run --rm --entrypoint /bin/sh yuki:mvp1-ci -c "touch /test_root 2>/dev/null && exit 1 || exit 0"
+          docker run --rm --entrypoint /bin/sh yuki:mvp1-ci -c "touch /etc/test_etc 2>/dev/null && exit 1 || exit 0"
+
+          # 2. Container runs cleanly with --read-only root filesystem
+          docker volume create yuki-ro-vol
+          docker run --rm --read-only --tmpfs /tmp -v yuki-ro-vol:/var/lib/yuki yuki:mvp1-ci health
+          docker volume rm yuki-ro-vol
+
+      - name: H9 - Scan image history and config for secret leaks
+        run: |
+          # Ensure no credentials or API keys leaked into image history or env
+          HISTORY_LEAKS=$(docker history --no-trunc yuki:mvp1-ci | grep -iE 'ghp_|AIza|SECRET|API_KEY|TOKEN' || true)
+          if [ -n "$HISTORY_LEAKS" ]; then
+            echo "Security Error: Secret pattern found in image history!"
+            exit 1
+          fi
+
+          INSPECT_LEAKS=$(docker inspect yuki:mvp1-ci | grep -iE 'ghp_|AIza|SECRET|API_KEY' | grep -v 'External Model Provider' || true)
+          if [ -n "$INSPECT_LEAKS" ]; then
+            echo "Security Error: Secret pattern found in image inspect!"
+            exit 1
+          fi
+          echo "Secret hygiene scan passed: zero embedded credentials in OCI image."

@@ -32,3 +32,9 @@ pub enum YukiError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 }
+
+impl From<crate::models::errors::ModelError> for YukiError {
+    fn from(err: crate::models::errors::ModelError) -> Self {
+        YukiError::ModelError(err.to_string())
+    }
+}
