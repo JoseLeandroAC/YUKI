@@ -44,21 +44,31 @@ fn test_echo_strategy_success() {
 }
 
 #[test]
-fn test_echo_strategy_failure() {
+fn test_echo_strategy_failure_with_evidence() {
     let verifier = Verifier::new();
     let op_id = OperationId::new();
     let cap_id = CapabilityId::new("system.echo");
+    let attempt_id = AttemptId::new();
 
     let execution = ExecutionResult {
         operation_id: op_id.clone(),
-        attempt_id: AttemptId::new(),
+        attempt_id: attempt_id.clone(),
         state: OperationState::Failed,
         output: None,
         error: Some("Erro simulado de IO".to_string()),
         executed_at: now_utc(),
     };
 
-    let context = VerificationContext::new(&op_id, &cap_id, &execution, &[]);
+    let evidence = Evidence::new(
+        "failure_probe",
+        serde_json::json!({ "confirmed_failure": true }),
+        "probe_report",
+    )
+    .with_operation(op_id.clone())
+    .with_attempt(attempt_id);
+
+    let evidences = [evidence];
+    let context = VerificationContext::new(&op_id, &cap_id, &execution, &evidences);
     let result = verifier.verify_operation(&context);
 
     assert_eq!(
@@ -70,6 +80,32 @@ fn test_echo_strategy_failure() {
         ObservedEffectState::NotObserved
     );
     assert!(result.is_failure());
+}
+
+#[test]
+fn test_echo_strategy_failure_without_evidence_preserves_unknown() {
+    let verifier = Verifier::new();
+    let op_id = OperationId::new();
+    let cap_id = CapabilityId::new("system.echo");
+
+    let execution = ExecutionResult {
+        operation_id: op_id.clone(),
+        attempt_id: AttemptId::new(),
+        state: OperationState::Failed,
+        output: None,
+        error: Some("Timeout no subsistema".to_string()),
+        executed_at: now_utc(),
+    };
+
+    let context = VerificationContext::new(&op_id, &cap_id, &execution, &[]);
+    let result = verifier.verify_operation(&context);
+
+    // EPISTEMIC INVARIANT: Execution failure alone MUST NOT establish absence of external effect!
+    assert_eq!(result.verification_state, VerificationState::Unknown);
+    assert_eq!(result.observed_effect_state, ObservedEffectState::Unknown);
+    assert!(result.is_unknown());
+    assert!(!result.is_failure());
+    assert!(!result.is_success());
 }
 
 #[test]

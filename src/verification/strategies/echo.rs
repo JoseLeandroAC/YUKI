@@ -61,24 +61,57 @@ impl VerificationStrategy for EchoVerificationStrategy {
             };
         }
 
-        // 2. If execution itself failed and no conflicting evidence exists
-        // INVARIANT: Execution Failure != Proof Of No External Effect
+        // 2. Handle execution failure
+        // EPISTEMIC INVARIANT (ADR-009): Execution Failure != Proof Of No External Effect
+        // OperationState::Failed alone MUST NOT establish absence of external effect.
         if context.execution.state == OperationState::Failed {
-            return VerificationResult {
-                operation_id: context.operation_id.clone(),
-                verification_state: VerificationState::VerifiedFailure,
-                observed_effect_state: ObservedEffectState::NotObserved,
-                evidence_refs,
-                evaluated_at: now,
-                verification_basis: format!(
-                    "Execução da operação falhou: {}",
-                    context
-                        .execution
-                        .error
-                        .as_deref()
-                        .unwrap_or("erro desconhecido")
-                ),
-            };
+            // Check if independent reliable evidence explicitly verifies failure and absence of effect.
+            let has_confirmed_failure = valid_evidences.iter().any(|e| {
+                e.data
+                    .get("confirmed_failure")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || e.data
+                        .get("effect_absent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            });
+
+            if has_confirmed_failure {
+                return VerificationResult {
+                    operation_id: context.operation_id.clone(),
+                    verification_state: VerificationState::VerifiedFailure,
+                    observed_effect_state: ObservedEffectState::NotObserved,
+                    evidence_refs,
+                    evaluated_at: now,
+                    verification_basis: format!(
+                        "Execução falhou e evidência independente confirmou ausência de efeito externo: {}",
+                        context
+                            .execution
+                            .error
+                            .as_deref()
+                            .unwrap_or("falha confirmada")
+                    ),
+                };
+            } else {
+                // In the absence of reliable independent evidence confirming absence of effect,
+                // uncertainty must be preserved: execution failed + effect unknown = UNKNOWN.
+                return VerificationResult {
+                    operation_id: context.operation_id.clone(),
+                    verification_state: VerificationState::Unknown,
+                    observed_effect_state: ObservedEffectState::Unknown,
+                    evidence_refs,
+                    evaluated_at: now,
+                    verification_basis: format!(
+                        "Execução da operação falhou ({}), mas não há evidência independente que comprove ausência de efeito externo; estado preservado como UNKNOWN (ADR-009).",
+                        context
+                            .execution
+                            .error
+                            .as_deref()
+                            .unwrap_or("erro desconhecido")
+                    ),
+                };
+            }
         }
 
         // 3. If there are NO validly bound evidences, state is UNKNOWN
