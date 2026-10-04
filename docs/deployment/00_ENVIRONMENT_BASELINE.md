@@ -71,6 +71,8 @@ Nenhum segredo real é registrado neste arquivo. Consulte `.env.example` para re
 | `YUKI_LOG_LEVEL` | `string` | `info` | Nível de emissão de logs (`trace`, `debug`, `info`, `warn`, `error`) |
 | `YUKI_LOG_FORMAT` | `string` | `text` | Formato dos logs (`text` para dev, `json` para produção/container) |
 | `YUKI_DATABASE_PATH` | `path` | `data/yuki.db` | Caminho do arquivo de persistência SQLite do EventStore |
+| `YUKI_PERSISTENCE_PATH` | `path` | *(alias)* | Alias container para `YUKI_DATABASE_PATH` (`/var/lib/yuki/audit.db`) |
+| `YUKI_DATA_DIR` | `path` | `/var/lib/yuki` | Diretório raiz para dados persistentes em runtime container/produção |
 | `YUKI_GEMINI_API_KEY` | `secret` | *(vazio)* | Chave de API externa para o adapter Google Gemini (Marco 2) |
 
 ---

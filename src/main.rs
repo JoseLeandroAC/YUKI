@@ -30,9 +30,18 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
-    // Resolve persistent database path (ADR-019 / 00_ENVIRONMENT_BASELINE.md)
-    let db_path =
-        std::env::var("YUKI_DATABASE_PATH").unwrap_or_else(|_| "data/yuki.db".to_string());
+    // Resolve persistent database path (ADR-019 / CONFIGURATION.md / 00_ENVIRONMENT_BASELINE.md)
+    let db_path = std::env::var("YUKI_DATABASE_PATH")
+        .or_else(|_| std::env::var("YUKI_PERSISTENCE_PATH"))
+        .or_else(|_| {
+            std::env::var("YUKI_DATA_DIR").map(|d| {
+                std::path::Path::new(&d)
+                    .join("audit.db")
+                    .to_string_lossy()
+                    .to_string()
+            })
+        })
+        .unwrap_or_else(|_| "data/yuki.db".to_string());
     let (core, sqlite_status) = match SqliteAuditStore::open(&db_path) {
         Ok(store) => {
             let store = Arc::new(store);
@@ -63,7 +72,14 @@ async fn main() {
                 "Model Subsystem (Mock): {}",
                 if health.model_ok { "OK" } else { "FAIL" }
             );
-            println!("External Model Provider: NOT CONFIGURED (Planned: Marco 2)");
+            println!(
+                "External Model Provider: {}",
+                if std::env::var("YUKI_GEMINI_API_KEY").is_ok() {
+                    "CONFIGURED (Gemini available)"
+                } else {
+                    "NOT CONFIGURED (Operating with Mock)"
+                }
+            );
             println!(
                 "Capability Registry: {}",
                 if health.registry_ok { "OK" } else { "FAIL" }

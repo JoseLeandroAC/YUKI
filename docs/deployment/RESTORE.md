@@ -106,7 +106,7 @@ Após o cold restore, execute os seguintes passos de validação:
 
 ## 6. Procedimento de Simulação Limpa Validado (Marco 4)
 
-O exercício de Cold Restore foi simulado com sucesso:
-- Recompilação a frio a partir de `Cargo.lock` e `Cargo.toml` sem acesso a crates adicionais.
-- Execução limpa de 120 testes automatizados passando 100% verde.
-- Preservação e recuperação determinística do banco `audit.db` entre sessões demonstrada pelo teste `test_adv_29_persistence_restart_and_recovery`.
+O exercício de Cold Restore foi verificado nas seguintes camadas:
+- **Compilação e Testes Locais:** Recompilação a frio a partir de `Cargo.lock` e `Cargo.toml` com 120 testes passando 100% verde localmente e no CI remoto (Ubuntu).
+- **Recuperação de Persistência:** Preservação e recuperação determinística do banco `audit.db` entre sessões demonstrada pelo teste `test_adv_29_persistence_restart_and_recovery` e execução local do comando `yuki health` com `YUKI_PERSISTENCE_PATH`.
+- **Empacotamento OCI/Docker:** `Dockerfile` e `.dockerignore` implementados e estaticamente auditados (usuário não-root 10001, diretório `/var/lib/yuki` modo 0700, binário `0555`, multi-stage build). A execução de runtime do container Docker não foi executada no host de desenvolvimento por indisponibilidade local do Docker daemon, ficando a validação em runtime do container para o ambiente de CI containerizado / auditoria final de release do MVP-1.

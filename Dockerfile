@@ -51,6 +51,7 @@ USER yuki:yuki
 WORKDIR /var/lib/yuki
 
 ENV YUKI_DATA_DIR=/var/lib/yuki \
+    YUKI_DATABASE_PATH=/var/lib/yuki/audit.db \
     YUKI_PERSISTENCE_PATH=/var/lib/yuki/audit.db \
     YUKI_ENVIRONMENT=production \
     RUST_LOG=info
