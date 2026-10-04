@@ -1,6 +1,8 @@
 use crate::models::config::ModelGatewayConfig;
 use crate::models::errors::ModelError;
-use crate::models::gemini::GeminiProviderAdapter;
+use crate::models::gemini::{
+    sanitize_gemini_api_version, sanitize_gemini_model_id, GeminiProviderAdapter,
+};
 use crate::models::mock::MockModelProvider;
 use crate::models::provider::ModelProvider;
 use crate::security::credentials::{EnvSecretStore, SecretRef};
@@ -26,11 +28,19 @@ pub fn resolve_model_provider_from_env() -> Result<Arc<dyn ModelProvider>, Model
         "gemini" => {
             let mut config = ModelGatewayConfig::default();
 
-            // Override opcional de model_id via ambiente
+            // Override opcional de model_id via ambiente com sanitização
             if let Ok(model_id) = std::env::var("YUKI_MODEL_ID") {
                 let trimmed = model_id.trim();
                 if !trimmed.is_empty() {
-                    config.model_id = trimmed.to_string();
+                    config.model_id = sanitize_gemini_model_id(trimmed);
+                }
+            }
+
+            // Override opcional de api_version via ambiente com sanitização
+            if let Ok(api_version) = std::env::var("YUKI_API_VERSION") {
+                let trimmed = api_version.trim();
+                if !trimmed.is_empty() {
+                    config.api_version = sanitize_gemini_api_version(trimmed);
                 }
             }
 

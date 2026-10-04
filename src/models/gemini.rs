@@ -105,7 +105,7 @@ struct GeminiGenerateResponse {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct GeminiErrorDetail {
-    code: Option<u16>,
+    code: Option<serde_json::Value>,
     message: Option<String>,
     status: Option<String>,
 }
@@ -251,10 +251,10 @@ impl GeminiProviderAdapter {
             )));
         }
 
-        let endpoint = format!(
-            "{}/v1beta/models/{}:generateContent",
-            self.base_url.trim_end_matches('/'),
-            self.config.model_id
+        let endpoint = build_gemini_endpoint(
+            &self.base_url,
+            &self.config.api_version,
+            &self.config.model_id,
         );
 
         // 6. Construir e disparar requisição HTTP
@@ -307,22 +307,18 @@ impl GeminiProviderAdapter {
             )));
         }
 
-        // Tratamento de falhas HTTP
+        // Tratamento de falhas HTTP com preservação de diagnóstico sanitizado (ADR-018)
         if !status.is_success() {
-            let error_msg =
-                if let Ok(envelope) = serde_json::from_slice::<GeminiErrorEnvelope>(&resp_bytes) {
-                    envelope
-                        .error
-                        .and_then(|d| d.message)
-                        .unwrap_or_else(|| format!("HTTP {}", status_code))
-                } else {
-                    format!("HTTP {}", status_code)
-                };
+            let error_msg = parse_gemini_error_message(&resp_bytes, status_code);
 
             return match status_code {
                 400 => Err(ModelError::InvalidRequest(error_msg)),
                 401 => Err(ModelError::Authentication(error_msg)),
                 403 => Err(ModelError::ProviderAuthorization(error_msg)),
+                404 => Err(ModelError::InvalidRequest(format!(
+                    "Recurso ou modelo não encontrado no provedor (HTTP 404): {}",
+                    error_msg
+                ))),
                 429 => {
                     if error_msg.to_lowercase().contains("quota") {
                         Err(ModelError::QuotaExceeded(error_msg))
@@ -335,8 +331,8 @@ impl GeminiProviderAdapter {
                     message: error_msg,
                 }),
                 _ => Err(ModelError::Internal(format!(
-                    "Status HTTP inesperado: {}",
-                    status_code
+                    "Status HTTP inesperado {}: {}",
+                    status_code, error_msg
                 ))),
             };
         }
@@ -446,8 +442,8 @@ impl ModelProvider for GeminiProviderAdapter {
     fn metadata(&self) -> ModelMetadata {
         ModelMetadata {
             provider_name: "GoogleGemini".to_string(),
-            model_name: self.config.model_id.clone(),
-            version: "v1beta".to_string(),
+            model_name: sanitize_gemini_model_id(&self.config.model_id),
+            version: sanitize_gemini_api_version(&self.config.api_version),
         }
     }
 
@@ -597,4 +593,123 @@ fn project_schema_node(schema: &serde_json::Value) -> Result<serde_json::Value, 
     }
 
     Ok(serde_json::Value::Object(projected))
+}
+
+/// Sanitiza e normaliza o identificador do modelo Gemini.
+///
+/// Trata variações operacionais:
+/// - Espaços em branco nas extremidades.
+/// - Aspas envolventes (ex: `"gemini-2.5-flash"` ou `'gemini-2.5-flash'`).
+/// - Barras iniciais (ex: `"/models/gemini-2.5-flash"`).
+/// - Prefixo redundante `"models/"` (ex: `"models/gemini-2.5-flash"` -> `"gemini-2.5-flash"`).
+pub fn sanitize_gemini_model_id(raw: &str) -> String {
+    let mut s = raw.trim();
+    if ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+        && s.len() >= 2
+    {
+        s = s[1..s.len() - 1].trim();
+    }
+    s = s.trim_start_matches('/');
+    s = s.strip_prefix("models/").unwrap_or(s);
+    s.trim().to_string()
+}
+
+/// Sanitiza e normaliza a versão da API REST do Gemini.
+///
+/// Remove barras e espaços (ex: `"/v1beta/"` -> `"v1beta"`).
+pub fn sanitize_gemini_api_version(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        "v1beta".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Constrói o endpoint REST canônico para o método `generateContent`.
+///
+/// Garante que o caminho seja sempre `{base_url}/{api_version}/models/{model_name}:generateContent`,
+/// sem duplicação de `models/models/` ou barras duplicadas.
+pub fn build_gemini_endpoint(base_url: &str, api_version: &str, model_id: &str) -> String {
+    let clean_base = base_url.trim_end_matches('/');
+    let clean_version = sanitize_gemini_api_version(api_version);
+    let clean_model = sanitize_gemini_model_id(model_id);
+    format!(
+        "{}/{}/models/{}:generateContent",
+        clean_base, clean_version, clean_model
+    )
+}
+
+/// Sanitiza qualquer indício de segredos (ex: chaves API padrão Google `AIza...`) de mensagens de erro.
+pub fn scrub_potential_secrets(s: &str) -> String {
+    let mut result = s.to_string();
+    while let Some(idx) = result.find("AIza") {
+        let end = result[idx..]
+            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .map(|i| idx + i)
+            .unwrap_or(result.len());
+        if end - idx >= 20 {
+            result.replace_range(idx..end, "[REDACTED_KEY]");
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+/// Extrai e formata mensagens de erro retornadas pelo provedor Gemini com observabilidade sanitizada (ADR-018).
+pub fn parse_gemini_error_message(resp_bytes: &[u8], status_code: u16) -> String {
+    if let Ok(envelope) = serde_json::from_slice::<GeminiErrorEnvelope>(resp_bytes) {
+        if let Some(detail) = envelope.error {
+            let mut parts = Vec::new();
+            if let Some(st) = detail.status {
+                let st_trimmed = st.trim();
+                if !st_trimmed.is_empty() {
+                    parts.push(st_trimmed.to_string());
+                }
+            }
+            if let Some(code) = detail.code {
+                match code {
+                    serde_json::Value::Number(n) => {
+                        let code_str = n.to_string();
+                        if !parts.contains(&code_str) && code_str != status_code.to_string() {
+                            parts.push(format!("código {}", code_str));
+                        }
+                    }
+                    serde_json::Value::String(s) => {
+                        let s_trimmed = s.trim();
+                        if !s_trimmed.is_empty() && !parts.contains(&s_trimmed.to_string()) {
+                            parts.push(s_trimmed.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(msg) = detail.message {
+                let trimmed = msg.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+
+            if !parts.is_empty() {
+                return scrub_potential_secrets(&parts.join(": "));
+            }
+        }
+    }
+
+    // Fallback para respostas não-JSON (ex: HTML/proxy de gateway)
+    if let Ok(text) = std::str::from_utf8(resp_bytes) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            let scrubbed = scrub_potential_secrets(trimmed);
+            return if scrubbed.len() > 300 {
+                format!("{}...", &scrubbed[..300])
+            } else {
+                scrubbed
+            };
+        }
+    }
+
+    format!("HTTP {}", status_code)
 }

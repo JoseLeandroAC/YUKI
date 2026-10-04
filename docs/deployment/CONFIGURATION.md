@@ -49,7 +49,8 @@ Variáveis de Ambiente do Sistema Operacional (`YUKI_*`)
 
 ### Seção `[model]`
 - `provider`: Provedor ativo (`"mock"` ou `"gemini"`). Padrão: `"mock"`. Controlado via `YUKI_MODEL_PROVIDER`.
-- `model_id`: Identificador do modelo upstream (ex: `"gemini-2.5-flash"`). Padrão compilado: `"gemini-2.5-flash"`. Controlado via `YUKI_MODEL_ID`.
+- `model_id`: Identificador do modelo upstream (ex: `"gemini-2.5-flash"`). Padrão compilado: `"gemini-2.5-flash"`. Controlado via `YUKI_MODEL_ID`. Sanitiza automaticamente prefixos redundantes (`models/`) e aspas.
+- `api_version`: Versão da API REST upstream (ex: `"v1beta"`, `"v1"`). Padrão compilado: `"v1beta"`. Controlado via `YUKI_API_VERSION`.
 - `temperature`: Parâmetro de aleatoriedade de amostragem. Padrão: `0.2`.
 - `timeout_ms`: Timeout específico para a chamada HTTP do provedor. Padrão: `30000` (30s). Controlado via `YUKI_REQUEST_TIMEOUT_MS`.
 
@@ -67,4 +68,5 @@ Variáveis de Ambiente do Sistema Operacional (`YUKI_*`)
 | `storage.sqlite_synchronous` | `YUKI_SQLITE_SYNCHRONOUS` | `NORMAL` |
 | `model.provider` | `YUKI_MODEL_PROVIDER` | `gemini` |
 | `model.model_id` | `YUKI_MODEL_ID` | `gemini-2.5-flash` |
+| `model.api_version` | `YUKI_API_VERSION` | `v1beta` |
 | *(Segredo Externo)* | `YUKI_GEMINI_API_KEY` | *(Material bruto do segredo)* |

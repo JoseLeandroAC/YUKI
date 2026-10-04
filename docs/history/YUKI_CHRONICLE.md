@@ -189,3 +189,50 @@ O princípio constitucional fundamental foi reafirmado:
 ##### Lição de Engenharia
 > *«Testes de componentes com mocks e validações locais de seleção de provedor comprovam a integridade interna da arquitetura, mas não atestam a compatibilidade estrita do contrato com a API remota. A fronteira com o mundo real revela verdades que o ambiente isolado não pode simular. Preserve a integridade do seu domínio; adapte apenas a fronteira.»*
 
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Segundo Teste Live ao Gemini — Eliminação do Erro de Schema Confirmada, Detecção de HTTP 404 e Falha de Observabilidade no Gateway
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Segundo teste real executado pelo Owner conectando o runtime compilado (`HEAD b60fdd923000aea9af6f09b99ef6648345d99466`) à API do Google Gemini.
+- **Classificação Histórica**: **SECOND LIVE GEMINI TEST — SCHEMA REJECTION ELIMINATED, UPSTREAM HTTP 404 DETECTED & GATEWAY OBSERVABILITY GAP RESOLVED**.
+  *Nota Histórica Estrita*: Este evento NÃO constitui o "First Verified Live Gemini Turn", pois nenhuma resposta de modelo foi produzida ainda. Trata-se, contudo, de mais um marco empírico de progresso real na fronteira entre a Yuki e a infraestrutura externa.
+
+##### O que se pretendia
+Após a projeção dos esquemas de capacidade para o subconjunto OpenAPI do Gemini (eliminando `additionalProperties`), o Owner recompilou a branch e executou novamente o comando conversacional real da Yuki.
+
+##### O que aconteceu (Fatos Empíricos)
+1. **Confirmação Empírica da Eliminação de `additionalProperties`**: O erro anterior de rejeição de schema (`Unknown name "additionalProperties"`) **NÃO** voltou a ocorrer. O tradutor de fronteira cumpriu seu papel com precisão.
+2. **Novo Ponto de Parada**: A requisição avançou no pipeline do Google Gemini, mas retornou `HTTP 404`.
+3. **Lacuna de Observabilidade Revelada no Gateway**: A mensagem exibida no terminal foi:
+   ```text
+   Model error: Erro interno no gateway de modelos: Status HTTP inesperado: 404
+   ```
+   O runtime classificou o 404 como um erro genérico interno (`ModelError::Internal`), descartando completamente o corpo de resposta JSON retornado pelo Google Gemini, impossibilitando diagnosticar de imediato o motivo exato apontado pelo upstream.
+
+##### A Investigação Arquitetural e a Causa Raiz
+A investigação técnica revelou duas causas entrelaçadas:
+1. **Descarte de Mensagens de Diagnóstico em Status Não Mapeados**:
+   No método `execute_single_turn` de `src/models/gemini.rs`, o bloco de tratamento de falhas HTTP avaliava status 400, 401, 403, 429 e 5xx. Para qualquer outro código (incluindo 404), o fluxo caía no branch coringa `_ => Err(ModelError::Internal(format!("Status HTTP inesperado: {}", status_code)))`. A variável `error_msg` contendo o payload detalhado do Google (`{"error": {"code": 404, "message": "...", "status": "NOT_FOUND"}}`) era simplesmente descartada.
+2. **Vulnerabilidade a Prefixos Redundantes e Fragilidade de Deserialização**:
+   - A construção do endpoint concatenava diretamente `self.config.model_id` em `format!("{}/v1beta/models/{}:generateContent", ...)`. Se o operador fornecesse um identificador com o prefixo `models/` (padrão comum em SDKs e documentações do Google, ex: `models/gemini-2.5-flash`), a URL resultante tornava-se `.../models/models/gemini-2.5-flash:generateContent`, gerando erro 404 de recurso não encontrado.
+   - A estrutura interna `GeminiErrorDetail` definia `code: Option<u16>`, que falhava a desserialização JSON caso o Google retornasse o código de erro como string (ex: `"invalid_request"` ou `"not_found"`), provocando fallback para a string crua `"HTTP 404"`.
+
+##### A Decisão Arquitetural e a Solução
+1. **Preservação Integral da Observabilidade Sanitizada**:
+   - Implementou-se `parse_gemini_error_message`, que extrai `status`, `code` (seja número ou texto) e `message` da resposta do Gemini, preservando diagnósticos reais mesmo para respostas não-JSON (gateways intermediários/proxies) até um teto seguro.
+   - Implementou-se `scrub_potential_secrets`, garantindo que nenhum fragmento acidental de token de autenticação possa vazar nas mensagens de erro.
+   - O status `404` foi mapeado explicitamente para `ModelError::InvalidRequest(format!("Recurso ou modelo não encontrado no provedor (HTTP 404): {}", error_msg))`.
+   - O caso padrão coringa `_` passou a preservar o diagnóstico completo: `ModelError::Internal(format!("Status HTTP inesperado {}: {}", status_code, error_msg))`.
+2. **Normalização e Sanitização do Identificador de Modelo e Versão da API**:
+   - Criaram-se as funções `sanitize_gemini_model_id` e `sanitize_gemini_api_version`, e `build_gemini_endpoint`. Qualquer prefixo `models/`, aspas ou barras espúrias em `YUKI_MODEL_ID` são normalizados deterministicamente.
+   - Adicionou-se o parâmetro configurável `api_version` (padrão `"v1beta"`), permitindo override via `YUKI_API_VERSION`.
+3. **Cobertura Automatizada com Servidor Mock Local**:
+   - Criou-se a suíte `tests/gemini_endpoint_observability.rs` (10 testes), com servidores TCP locais mockados em loopback provando que respostas 404 reais preservam o diagnóstico textual exato do upstream sem cair em erros genéricos opacos.
+
+##### Lição de Engenharia
+> *«Em integrações com serviços externos, a observabilidade não pode ser tratada como detalhe secundário. Descartar o corpo de um erro HTTP transforma um diagnóstico claro do provedor em um enigma opaco para o operador. Nunca silencie o upstream; sanitize os segredos, preserve a mensagem e exponha o erro com tipagem rigorosa.»*
+
+

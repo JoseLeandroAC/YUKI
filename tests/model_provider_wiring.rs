@@ -125,6 +125,43 @@ fn test_bootstrap_model_id_override() {
 }
 
 #[test]
+fn test_bootstrap_model_id_with_models_prefix_sanitized() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("YUKI_MODEL_PROVIDER", "gemini");
+    std::env::set_var("YUKI_MODEL_ID", "models/gemini-2.5-flash");
+
+    let provider = resolve_model_provider_from_env()
+        .expect("Gemini provider resolution with models/ prefix must succeed");
+    let meta = provider.metadata();
+
+    assert_eq!(meta.provider_name, "GoogleGemini");
+    assert_eq!(
+        meta.model_name, "gemini-2.5-flash",
+        "models/ prefix must be sanitized out from model_name"
+    );
+
+    std::env::remove_var("YUKI_MODEL_PROVIDER");
+    std::env::remove_var("YUKI_MODEL_ID");
+}
+
+#[test]
+fn test_bootstrap_api_version_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::set_var("YUKI_MODEL_PROVIDER", "gemini");
+    std::env::set_var("YUKI_API_VERSION", "v1");
+
+    let provider = resolve_model_provider_from_env()
+        .expect("Gemini provider resolution with api_version override must succeed");
+    let meta = provider.metadata();
+
+    assert_eq!(meta.provider_name, "GoogleGemini");
+    assert_eq!(meta.version, "v1", "API version override must be reflected");
+
+    std::env::remove_var("YUKI_MODEL_PROVIDER");
+    std::env::remove_var("YUKI_API_VERSION");
+}
+
+#[test]
 fn test_core_integration_reflects_selected_provider_metadata_and_health() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("YUKI_MODEL_PROVIDER", "gemini");

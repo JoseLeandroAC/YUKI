@@ -29,6 +29,8 @@ pub struct ModelGatewayConfig {
     pub max_proposal_size_bytes: usize,
     /// Identificador do modelo padrão a ser invocado.
     pub model_id: String,
+    /// Versão da API REST do provedor (ex: "v1beta", "v1").
+    pub api_version: String,
     /// Alias operacional sanitizado para auditoria da credencial utilizada.
     pub sanitized_credential_alias: String,
 }
@@ -47,6 +49,7 @@ impl Default for ModelGatewayConfig {
             max_proposal_depth: 5,
             max_proposal_size_bytes: 64 * 1024, // 64 KB
             model_id: "gemini-2.5-flash".to_string(),
+            api_version: "v1beta".to_string(),
             sanitized_credential_alias: "cred_gemini_primary".to_string(),
         }
     }
