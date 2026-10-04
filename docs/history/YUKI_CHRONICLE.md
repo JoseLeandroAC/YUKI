@@ -235,4 +235,68 @@ A investigação técnica revelou duas causas entrelaçadas:
 ##### Lição de Engenharia
 > *«Em integrações com serviços externos, a observabilidade não pode ser tratada como detalhe secundário. Descartar o corpo de um erro HTTP transforma um diagnóstico claro do provedor em um enigma opaco para o operador. Nunca silencie o upstream; sanitize os segredos, preserve a mensagem e exponha o erro com tipagem rigorosa.»*
 
+##### Correção Retrospectiva e Esclarecimento Factual da Causa do 404
+Após a implementação da observabilidade aprimorada no commit `75f9f683d7d6069f7ce2c845c8bb6073dd023919`, o Owner executou novamente o runtime apontando para o modelo padrão da época (`gemini-2.5-flash`). A nova camada de diagnóstico capturou e exibiu com fidelidade a mensagem real do Google:
+```text
+HTTP 404: NOT_FOUND: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements. We recommend you to use the Interactions API.
+```
+
+Fatos empíricos confirmados:
+1. A observabilidade do gateway funcionou perfeitamente, demonstrando de pronto sua utilidade.
+2. A hipótese preliminar de duplicação sintática `models/models/...` foi refutada como causa daquele erro 404 específico (embora a sanitização permaneça no código como defesa arquitetural válida contra entradas malformadas).
+3. A causa real e factual do 404 foi a indisponibilidade/depreciação de `gemini-2.5-flash` para novos usuários pela infraestrutura da Google, exigindo a atualização da Yuki para `gemini-3.8-flash`.
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Terceiro Teste Live ao Gemini — Primeira Execução de Capability Dirigida por Modelo em Produção e Descoberta do Loop de Continuação de Ferramentas
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Terceiro teste real executado pelo Owner utilizando o modelo `gemini-3.8-flash` via CLI da Yuki.
+- **Prompt Submetido**: *"Yuki, por favor se apresente e diga qual e o seu proposito fundamental em uma frase"*
+- **Classificação Histórica**: **FIRST VERIFIED LIVE GEMINI-DRIVEN CAPABILITY EXECUTION THROUGH YUKI**.  
+  *Distinção Histórica Estrita*: Este evento comprova empiricamente a primeira cadeia completa em que um modelo LLM externo remoto propôs autonomamente uma capability que foi autorizada pelo Security Controller, executada pelo Execution Engine, verificada pelo Verification Engine e auditada pelo Audit Subsystem. NÃO é classificado como "Primeiro Turno Conversacional Completo do Gemini", pois o runtime retornou a saída bruta da ferramenta em vez de sintetizar uma resposta conversacional final em linguagem natural ao operador.
+
+##### O que se pretendia
+Com a atualização para o modelo `gemini-3.8-flash` e a observabilidade ativa, o Owner submeteu um prompt natural solicitando a apresentação da Yuki e seu propósito fundamental.
+
+##### O que aconteceu (Fatos Empíricos)
+1. **Conexão e Compreensão do Modelo**: O Google Gemini recebeu o prompt e os esquemas sanitizados das ferramentas (`system.echo`, `system.time`, `system.info`).
+2. **Proposta de Capability Autônoma**: O modelo deduziu que para responder adequadamente sobre si mesma e seu ambiente precisava consultar o contexto da máquina, emitindo autonomamente uma proposta de chamada para `system.info` com argumentos `{}`.
+3. **Cadeia Constitucional de Execução e Verificação**:
+   - `Model Output != Command`: A proposta do modelo foi tratada como mera intenção não-confiável.
+   - O Security Controller avaliou a proposta sob as políticas ativas e autorizou formalmente a execução de `system.info`.
+   - O Execution Engine despachou e executou a capacidade no ambiente local.
+   - O Verification Engine atestou a integridade e conformidade dos dados produzidos.
+   - O Audit Subsystem persistiu o registro durável do ciclo de execução.
+4. **Desfecho Observado**: O runtime retornou ao terminal do operador o JSON bruto verificado:
+   ```json
+   {"arch":"x86_64","os":"windows","yuki_version":"0.1.0"}
+   ```
+5. **Lacuna Arquitetural Descoberta**: O runtime encerrou o turno imediatamente após a execução da ferramenta. A Yuki não possuía um loop multi-turn de continuação para devolver o resultado da ferramenta (`Tool Result`) ao modelo e obter a resposta em linguagem natural esperada pelo usuário.
+
+##### A Investigação Arquitetural e a Solução (Governed Bounded Tool Continuation Loop)
+A análise arquitetural identificou que o método `YukiCore::process_input_async` operava sob um paradigma unistep (single-turn). Ao executar uma capability proposta pelo modelo, o resultado da execução era considerado a resposta terminal do turno.
+
+Em uma arquitetura de assistente autônomo governado, a execução de ferramenta é um passo intermediário de percepção e ação:
+1. **Invariantes Constitucionais Reafirmadas**:
+   - `Tool Result = Data` (Dados externos não confiáveis, jamais instrução ou autoridade).
+   - O modelo não adquire "controle de fluxo" ao receber o resultado da ferramenta.
+   - Se o modelo propor uma nova ferramenta após receber o resultado anterior, essa nova proposta DEVE passar por nova e independente avaliação do `SecurityController` (*Every tool execution requires fresh authorization*).
+2. **Limite Rígido e Determinístico de Iterações (*Fail-Closed Boundary*)**:
+   - Implementou-se `max_tool_iterations` (padrão `5`, configurável via `YUKI_MAX_TOOL_ITERATIONS` e `config/yuki.toml`).
+   - Se o modelo entrar em recursão infinita ou ultrapassar o orçamento de iterações, o loop aborta imediatamente com erro explícito tipado (`ModelError::InvalidRequest`), sem execução silenciosa.
+3. **Conformidade com o Protocolo Gemini 3 Multi-Turn**:
+   - No protocolo Google Gemini (em especial na família Gemini 3), chamadas de função com `thoughtSignature` exigem a retransmissão obrigatória da assinatura no histórico conversacional; a omissão gera erro HTTP 400.
+   - O resultado da ferramenta é entregue no papel `user` com a estrutura `functionResponse`, encapsulando os dados em `{"output": ...}` conforme a especificação protobuf `google.protobuf.Struct`.
+4. **Atualização do Modelo Padrão**:
+   - O modelo padrão da Yuki foi atualizado em código e documentação para `gemini-3.8-flash`.
+5. **Cobertura de Testes**:
+   - Implementou-se a suíte `tests/model_tool_continuation.rs` (9 testes) cobrindo todos os cenários: continuação unistep, zero ferramentas (texto direto), multistep sequencial (ex.: `system.info` seguido de `system.time`), esgotamento do orçamento de iterações com encerramento fail-closed, bloqueio pelo Security Controller no meio do loop, e integridade da serialização wire com servidor mock local.
+
+##### Lição de Engenharia
+> *«A ferramenta executada produz dados para alimentar o raciocínio do modelo, não o encerramento da conversa. Porém, ao reintroduzir os dados de uma ferramenta no diálogo, a integridade da governança deve ser mantida: o modelo nunca adquire autorização automática para a próxima ação. Cada proposta subsequente recomeça o ciclo constitucional de autorização, execução, verificação e auditoria.»*
+
+
 

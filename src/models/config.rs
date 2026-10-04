@@ -33,6 +33,8 @@ pub struct ModelGatewayConfig {
     pub api_version: String,
     /// Alias operacional sanitizado para auditoria da credencial utilizada.
     pub sanitized_credential_alias: String,
+    /// Limite máximo de iterações do ciclo de ferramentas (tool continuation loop).
+    pub max_tool_iterations: u32,
 }
 
 impl Default for ModelGatewayConfig {
@@ -48,9 +50,10 @@ impl Default for ModelGatewayConfig {
             max_output_tokens: 2048,
             max_proposal_depth: 5,
             max_proposal_size_bytes: 64 * 1024, // 64 KB
-            model_id: "gemini-2.5-flash".to_string(),
+            model_id: "gemini-3.8-flash".to_string(),
             api_version: "v1beta".to_string(),
             sanitized_credential_alias: "cred_gemini_primary".to_string(),
+            max_tool_iterations: 5,
         }
     }
 }

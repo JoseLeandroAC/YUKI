@@ -53,7 +53,7 @@ fn test_bootstrap_explicit_gemini_wires_adapter() {
     let meta = provider.metadata();
 
     assert_eq!(meta.provider_name, "GoogleGemini");
-    assert_eq!(meta.model_name, "gemini-2.5-flash"); // default model id
+    assert_eq!(meta.model_name, "gemini-3.8-flash"); // default model id
     assert_eq!(meta.version, "v1beta");
     assert_eq!(provider.health(), HealthStatus::Healthy);
 

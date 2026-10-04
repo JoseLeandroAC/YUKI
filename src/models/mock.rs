@@ -54,6 +54,20 @@ impl MockModelProvider {
     /// Lógica síncrona de geração de resposta determinística.
     pub fn generate_sync(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         let req_id = request.request_id.clone();
+
+        // Se a última mensagem for um ToolResult, o mock simula a síntese/resposta final do modelo
+        if let Some(crate::models::provider::ModelMessage::ToolResult { content, .. }) =
+            request.messages.last()
+        {
+            let text = format_tool_content(content);
+            return Ok(ModelResponse::text(
+                req_id,
+                "MockProvider",
+                "yuki-mock-reasoner-v0.1",
+                text,
+            ));
+        }
+
         match &self.behavior {
             MockBehavior::SimulateError(err) => Err(err.clone()),
             MockBehavior::MalformedResponse => Err(ModelError::MalformedResponse(
@@ -99,6 +113,7 @@ impl MockModelProvider {
                 candidate_proposal: Some(RawProposalCandidate {
                     capability_name: proposal.capability_id.0.clone(),
                     arguments: proposal.parameters.clone(),
+                    opaque_signature: None,
                 }),
                 usage: None,
                 finish_reason: "TOOL_CALL".to_string(),
@@ -118,6 +133,7 @@ impl MockModelProvider {
                             "message": "Olá! Estou funcionando."
                         }),
                         reasoning: "Saudação do usuário recebida; respondendo com confirmação de funcionamento.".to_string(),
+                        opaque_signature: None,
                     };
                     Ok(ModelResponse {
                         request_id: req_id,
@@ -129,6 +145,7 @@ impl MockModelProvider {
                         candidate_proposal: Some(RawProposalCandidate {
                             capability_name: proposal.capability_id.0.clone(),
                             arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
                         }),
                         usage: None,
                         finish_reason: "TOOL_CALL".to_string(),
@@ -154,6 +171,7 @@ impl MockModelProvider {
                             "message": msg
                         }),
                         reasoning: "Usuário solicitou repetição de mensagem.".to_string(),
+                        opaque_signature: None,
                     };
 
                     Ok(ModelResponse {
@@ -165,6 +183,7 @@ impl MockModelProvider {
                         candidate_proposal: Some(RawProposalCandidate {
                             capability_name: proposal.capability_id.0.clone(),
                             arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
                         }),
                         usage: None,
                         finish_reason: "TOOL_CALL".to_string(),
@@ -178,6 +197,7 @@ impl MockModelProvider {
                         capability_id: CapabilityId::new("system.time"),
                         parameters: serde_json::json!({}),
                         reasoning: "Usuário solicitou leitura de data/hora do sistema.".to_string(),
+                        opaque_signature: None,
                     };
                     Ok(ModelResponse {
                         request_id: req_id,
@@ -188,6 +208,7 @@ impl MockModelProvider {
                         candidate_proposal: Some(RawProposalCandidate {
                             capability_name: proposal.capability_id.0.clone(),
                             arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
                         }),
                         usage: None,
                         finish_reason: "TOOL_CALL".to_string(),
@@ -205,6 +226,7 @@ impl MockModelProvider {
                         parameters: serde_json::json!({}),
                         reasoning: "Usuário solicitou informações estáticas da plataforma."
                             .to_string(),
+                        opaque_signature: None,
                     };
                     Ok(ModelResponse {
                         request_id: req_id,
@@ -216,6 +238,7 @@ impl MockModelProvider {
                         candidate_proposal: Some(RawProposalCandidate {
                             capability_name: proposal.capability_id.0.clone(),
                             arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
                         }),
                         usage: None,
                         finish_reason: "TOOL_CALL".to_string(),
@@ -231,6 +254,7 @@ impl MockModelProvider {
                             "message": trimmed
                         }),
                         reasoning: "Entrada genérica em MVP-0 roteada deterministicamente para system.echo.".to_string(),
+                        opaque_signature: None,
                     };
 
                     Ok(ModelResponse {
@@ -242,6 +266,7 @@ impl MockModelProvider {
                         candidate_proposal: Some(RawProposalCandidate {
                             capability_name: proposal.capability_id.0.clone(),
                             arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
                         }),
                         usage: None,
                         finish_reason: "TOOL_CALL".to_string(),
@@ -251,6 +276,23 @@ impl MockModelProvider {
             }
         }
     }
+}
+
+/// Extrai representação textual amigável da saída da capacidade para síntese no mock.
+fn format_tool_content(output: &serde_json::Value) -> String {
+    if let Some(s) = output.as_str() {
+        return s.to_string();
+    }
+    if let Some(map) = output.as_object() {
+        if map.len() == 1 {
+            if let Some(val) = map.values().next() {
+                if let Some(s) = val.as_str() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    serde_json::to_string(output).unwrap_or_else(|_| output.to_string())
 }
 
 impl Default for MockModelProvider {

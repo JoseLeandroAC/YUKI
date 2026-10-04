@@ -51,6 +51,13 @@ pub fn resolve_model_provider_from_env() -> Result<Arc<dyn ModelProvider>, Model
                 }
             }
 
+            // Override opcional de iterações máximas de ferramentas via ambiente
+            if let Ok(iterations_str) = std::env::var("YUKI_MAX_TOOL_ITERATIONS") {
+                if let Ok(iterations) = iterations_str.trim().parse::<u32>() {
+                    config.max_tool_iterations = iterations;
+                }
+            }
+
             // Constrói SecretRef de forma agnóstica sem manipular SecretMaterial
             let secret_ref = SecretRef::new(
                 "secret://env/YUKI_GEMINI_API_KEY",

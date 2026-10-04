@@ -9,6 +9,9 @@ use yuki::persistence::errors::PersistenceError;
 use yuki::persistence::schema::VerificationRecord;
 use yuki::persistence::sqlite::{AuditFilter, AuditQueryStore, SqliteAuditStore};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static SQLITE_TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn temp_db_path() -> PathBuf {
     let unique = uuid_v4_simple();
     std::env::temp_dir().join(format!("yuki_test_{}.db", unique))
@@ -20,7 +23,9 @@ fn uuid_v4_simple() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{:x}", nanos)
+    let count = SQLITE_TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    format!("{}_{}_{:x}", pid, count, nanos)
 }
 
 struct TempDbCleanup(PathBuf);

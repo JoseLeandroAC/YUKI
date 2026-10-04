@@ -18,8 +18,18 @@ use std::sync::Arc;
 struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
     function_call: Option<GeminiFunctionCall>,
+    #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
+    #[serde(rename = "thoughtSignature", skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +79,8 @@ struct GeminiCandidatePart {
     text: Option<String>,
     #[serde(rename = "functionCall")]
     function_call: Option<GeminiFunctionCall>,
+    #[serde(rename = "thoughtSignature", alias = "thought_signature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,18 +184,91 @@ impl GeminiProviderAdapter {
         // 2. Mapear mensagens do domínio para wire format
         let mut contents = Vec::new();
         for msg in &request.messages {
-            let role_str = match msg.role {
-                crate::models::provider::MessageRole::User => "user",
-                crate::models::provider::MessageRole::Model => "model",
-                crate::models::provider::MessageRole::System => "user", // Gemini v1beta mapeia system no system_instruction
-            };
-            contents.push(GeminiContent {
-                role: role_str.to_string(),
-                parts: vec![GeminiPart {
-                    text: Some(msg.content.clone()),
-                    function_call: None,
-                }],
-            });
+            match msg {
+                crate::models::provider::ModelMessage::User { content } => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(content.clone()),
+                            function_call: None,
+                            function_response: None,
+                            thought_signature: None,
+                        }],
+                    });
+                }
+                crate::models::provider::ModelMessage::Model { content } => {
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(content.clone()),
+                            function_call: None,
+                            function_response: None,
+                            thought_signature: None,
+                        }],
+                    });
+                }
+                crate::models::provider::ModelMessage::System { content } => {
+                    // System turn in history maps to user in Gemini content sequence
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(content.clone()),
+                            function_call: None,
+                            function_response: None,
+                            thought_signature: None,
+                        }],
+                    });
+                }
+                crate::models::provider::ModelMessage::AssistantWithToolCall {
+                    content,
+                    capability_name,
+                    arguments,
+                    opaque_signature,
+                } => {
+                    let mut parts = Vec::new();
+                    if let Some(txt) = content {
+                        if !txt.trim().is_empty() {
+                            parts.push(GeminiPart {
+                                text: Some(txt.clone()),
+                                function_call: None,
+                                function_response: None,
+                                thought_signature: None,
+                            });
+                        }
+                    }
+                    parts.push(GeminiPart {
+                        text: None,
+                        function_call: Some(GeminiFunctionCall {
+                            name: capability_name.clone(),
+                            args: arguments.clone(),
+                        }),
+                        function_response: None,
+                        thought_signature: opaque_signature.clone(),
+                    });
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts,
+                    });
+                }
+                crate::models::provider::ModelMessage::ToolResult {
+                    capability_name,
+                    content,
+                } => {
+                    let response_obj = serde_json::json!({ "output": content });
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: None,
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: capability_name.clone(),
+                                response: response_obj,
+                            }),
+                            thought_signature: None,
+                        }],
+                    });
+                }
+            }
         }
 
         // Se messages estava vazio mas prompt estava preenchido, assegura ao menos 1 turno
@@ -193,6 +278,8 @@ impl GeminiProviderAdapter {
                 parts: vec![GeminiPart {
                     text: Some(request.prompt.clone()),
                     function_call: None,
+                    function_response: None,
+                    thought_signature: None,
                 }],
             });
         }
@@ -223,6 +310,8 @@ impl GeminiProviderAdapter {
                 parts: vec![GeminiPart {
                     text: Some(inst.clone()),
                     function_call: None,
+                    function_response: None,
+                    thought_signature: None,
                 }],
             });
 
@@ -384,6 +473,7 @@ impl GeminiProviderAdapter {
                 raw_proposal = Some(RawProposalCandidate {
                     capability_name: fc.name,
                     arguments: fc.args,
+                    opaque_signature: part.thought_signature.clone(),
                 });
             }
         }
