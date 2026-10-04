@@ -3,7 +3,7 @@
 **Documento:** `docs/deployment/RESTORE.md`  
 **Status:** ATIVO  
 **Fase:** MVP-1 (Marco 4)  
-**Última Atualização:** 2026-10-03  
+**Última Atualização:** 2026-10-04  
 
 ---
 
@@ -12,8 +12,11 @@
 Este documento define o procedimento oficial de **Cold Restore** (Restauração a Frio) da Yuki. Ele descreve os passos reproduzíveis para recompor o ambiente de execução e restaurar o estado operacional e de auditoria da Yuki a partir de um repositório limpo, garantindo:
 
 1. **Zero Dependências Secretas ou Externas Ocultas:** A execução depende unicamente dos arquivos versionados no repositório e de uma toolchain Rust ou runtime OCI padrão.
-2. **Imutabilidade e Recuperabilidade da Auditoria:** O banco SQLite `audit.db` pode ser restaurado e inspecionado a frio com integridade criptográfica e verificação de esquema.
-3. **Fail-Closed Guarantee:** Caso o banco restaurado esteja corrompido ou pertença a uma versão futura incompatível, a Yuki recusa-se a operar silenciosamente e falha de forma segura.
+2. **Imutabilidade e Recuperabilidade da Auditoria:** O banco SQLite `audit.db` pode ser restaurado e inspecionado a frio com integridade estrutural e de esquema, checagem defensiva de corrupção e triggers SQL append-only.
+3. **Comportamento de Inicialização e Falha Segura (Fail-Closed na Execução):**
+   - **Banco Saudável:** Persistência durável ativada (`Persistent Audit (SQLite): OK`).
+   - **Banco Indisponível / Corrompido / Incompatível:** A inicialização do subsistema de persistência falha de forma explícita emitindo aviso no stderr e a runtime inicia em modo degradado in-memory (`Persistent Audit (SQLite): DEGRADED (In-Memory Fallback)`).
+   - **Distinção de Segurança:** *Degraded startup != permissão para executar operações que exigem auditoria durável*. A disponibilidade do processo para diagnósticos não concede elegibilidade para operações que exigem auditoria persistente pré-execução; tais operações falham de forma fechada (*fail-closed*) caso a gravação no armazenamento durável não esteja ativa.
 
 ---
 
@@ -90,14 +93,17 @@ cargo test --all-targets
 Após o cold restore, execute os seguintes passos de validação:
 
 1. **Diagnóstico de Saúde do Sistema:**
-   O comando `yuki health` deve reportar todos os subsistemas operacionais:
-   - Model Provider (Mock ou Gemini): `Healthy`
-   - Capability Registry: `Healthy` (`system.echo`, `system.time`, `system.info` registrados)
-   - Persistent Audit Store: `Healthy` (escrita e leitura do SQLite ativas)
+   O comando `yuki health` reporta o estado operacional dos subsistemas:
+   - Status Geral: `Status: OK` (quando todos os subsistemas essenciais e persistência durável estão operacionais) ou `Status: DEGRADED` (quando a persistência opera em fallback in-memory).
+   - Core / Context / Capability Registry: `OK` (`system.echo`, `system.time`, `system.info` registrados).
+   - Model Subsystem (Mock): `OK`.
+   - Persistent Audit (SQLite): `OK` (quando o banco SQLite está acessível e verificado) ou `DEGRADED (In-Memory Fallback)` (se o banco estiver corrompido, inacessível ou incompatível).
 
-2. **Integridade de Esquema do SQLite:**
-   O schema version registrado na tabela `schema_migrations` deve corresponder a `1`.
-   Caso uma base corrompida seja carregada, o `MigrationManager` retornará `MigrationError::DatabaseCorrupted` e interromperá a inicialização.
+2. **Integridade Estrutural e de Esquema do SQLite:**
+   - O schema version registrado na tabela `schema_migrations` deve corresponder a `1`.
+   - Se o banco restaurado for válido e íntegro, o `SqliteAuditStore::open` conclui a verificação de integridade e ativa o armazenamento persistente.
+   - Caso uma base corrompida (`MigrationError::DatabaseCorrupted`) ou de versão futura incompatível (`MigrationError::FutureVersionIncompatible`) seja carregada, o `SqliteAuditStore::open` recusa a abertura da base. O runtime emite um aviso descritivo no stderr e opera em modo degradado in-memory.
+   - **Elegibilidade Operacional vs Disponibilidade de Runtime:** A inicialização degradada preserva a disponibilidade do processo para diagnósticos (`yuki health`), mas *não* autoriza operações de capabilities que dependam de auditoria durável: qualquer tentativa de despacho que requeira persistência durável pré-execução é bloqueada de forma estrita (*fail-closed*).
 
 3. **Verificação de Segredos:**
    Nenhum arquivo de configuração ou banco de dados contém segredos em texto plano. A variável `YUKI_GEMINI_API_KEY` deve ser injetada estritamente via runtime environment se o adapter externo for utilizado.
