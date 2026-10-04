@@ -128,3 +128,64 @@ A partir deste incidente, fica estabelecido com caráter mandatório:
 
 ##### Lição de Segurança
 > *«Secrets must never be embedded directly into command URLs, temporary scripts, or preserved transcripts. A segurança de credenciais não se aplica apenas ao código do produto, mas a toda a cadeia de ferramentas operacionais de engenharia.»*
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Primeira Requisição Live ao Gemini — Provedor Atingido, Rejeição de Contrato de Ferramentas (additionalProperties)
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Primeiro teste real executado pelo Owner conectando o runtime compilado à API do Google Gemini com credencial real.
+- **Classificação Histórica**: **FIRST VERIFIED LIVE GEMINI REQUEST THROUGH YUKI — PROVIDER REACHED, CONTRACT REJECTED**.
+  *Nota Histórica Estrita*: Este evento NÃO constitui o "First Verified Live Gemini Turn", uma vez que o modelo externo rejeitou a requisição no gateway antes de gerar uma resposta conversacional. Representa, porém, uma evidência empírica de extremo valor: a comprovação de que o wiring local funcionou perfeitamente e alcançou o endpoint remoto do Gemini.
+
+##### O que se pretendia
+Com a resolução de bootstrap concluída e o comando `yuki health` reportando com fidelidade e sem rede:
+```text
+Status: OK
+Model Subsystem (GoogleGemini): OK
+Selected Model Provider: GoogleGemini (model: gemini-2.5-flash, version: v1beta)
+Model Provider Health: OK
+```
+O Owner disparou a primeira requisição conversacional real contra a API do Google Gemini através da CLI da Yuki, com a variável de sessão `YUKI_GEMINI_API_KEY` devidamente configurada.
+
+##### O que aconteceu
+1. O runtime não fez fallback para o Mock.
+2. A requisição HTTP real foi disparada com sucesso contra o endpoint `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`.
+3. O endpoint da Google retornou HTTP 400 (Bad Request) com o erro:
+   ```text
+   Model error: Requisição inválida para o provedor:
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[0].parameters': Cannot find field.
+
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[1].parameters': Cannot find field.
+
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[2].parameters': Cannot find field.
+   ```
+4. A execução encerrou de forma determinística com código 1 (*fail-closed*), reportando o erro tipado ao usuário sem corromper a persistência nem mascarar o resultado.
+
+##### A Investigação Arquitetural e a Causa Raiz
+A investigação técnica revelou o descompasso na fronteira do provedor:
+- Os manifestos canônicos de entrada das capabilities da Yuki (`system.echo`, `system.time`, `system.info`) utilizam JSON Schema padrão com a restrição de segurança `"additionalProperties": false`. Essa propriedade é utilizada pela validação interna e confiável da Yuki (`validate_capability_input`) para assegurar que propriedades injetadas ou inesperadas sejam rejeitadas antes da autorização e execução de capabilities.
+- No entanto, a representação de esquema de parâmetros de ferramentas da API Google Gemini (`tools[].function_declarations[].parameters`) mapeia internamente para a mensagem protobuf `google.ai.generativelanguage.v1beta.Schema`.
+- O subconjunto OpenAPI 3.0 suportado pelo parser protobuf do Gemini v1beta não define o campo `additionalProperties`. Ao encontrar esse campo em cada uma das três capacidades projetadas, o deserializador do Google rejeitou a totalidade do payload.
+
+##### A Decisão Arquitetural e a Solução
+O princípio constitucional fundamental foi reafirmado:
+> *«O manifesto canônico de capacidades da Yuki JAMAIS deve ser enfraquecido ou remodelado apenas para se amoldar a restrições sintáticas de um provedor LLM específico. Restrições de provedor pertencem estritamente à fronteira do provedor (Yuki Schema != Gemini Schema).»*
+
+1. **Preservação Integral dos Manifestos Canônicos**: Os manifestos de `system.echo`, `system.time` e `system.info` mantêm `"additionalProperties": false` intacto.
+2. **Preservação da Validação Estrita na Execução**: A validação prévia à autorização (`validate_capability_input`) continua executando estritamente contra o esquema canônico da Yuki. Propostas que contenham propriedades inesperadas continuam sendo barradas (*Model-visible schema != Execution validation schema*).
+3. **Projeção de Esquema Específica do Gemini (`project_schema_to_gemini`)**: Implementou-se um tradutor de fronteira no `GeminiProviderAdapter` que normaliza recursivamente os esquemas das capacidades antes da serialização para a API:
+   - Omite palavras-chave incompatíveis com o protobuf do Gemini (`additionalProperties`, `$schema`, etc.);
+   - Recursa em objetos aninhados, arrays (`items`) e uniões (`anyOf`);
+   - Opera em modo *fail-closed* diante de construções incompatíveis (`not`, `patternProperties`);
+   - Garante a presença de `properties: {}` para objetos vazios.
+4. **Cobertura Automatizada de Regressão**: Criou-se a suíte `tests/gemini_schema_projection.rs` demonstrando que o payload corrigido elimina as 3 ocorrências de `additionalProperties` sem que qualquer manifesto interno seja mutado.
+
+##### Lição de Engenharia
+> *«Testes de componentes com mocks e validações locais de seleção de provedor comprovam a integridade interna da arquitetura, mas não atestam a compatibilidade estrita do contrato com a API remota. A fronteira com o mundo real revela verdades que o ambiente isolado não pode simular. Preserve a integridade do seu domínio; adapte apenas a fronteira.»*
+
