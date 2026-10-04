@@ -89,18 +89,23 @@ async fn main() {
 
             println!("Core: {}", if health.core_ok { "OK" } else { "FAIL" });
             println!("Context: {}", if health.context_ok { "OK" } else { "FAIL" });
+            let model_status_str = match &model_health {
+                HealthStatus::Healthy => "OK".to_string(),
+                HealthStatus::Degraded(reason) => format!("DEGRADED ({})", reason),
+                HealthStatus::Unhealthy(reason) => format!("FAIL ({})", reason),
+            };
+
+            let subsystem_name = if model_meta.provider_name.contains("Mock") {
+                "Model Subsystem (Mock)".to_string()
+            } else {
+                format!("Model Subsystem ({})", model_meta.provider_name)
+            };
+            println!("{}: {}", subsystem_name, model_status_str);
             println!(
                 "Selected Model Provider: {} (model: {}, version: {})",
                 model_meta.provider_name, model_meta.model_name, model_meta.version
             );
-            println!(
-                "Model Provider Health: {}",
-                match model_health {
-                    HealthStatus::Healthy => "OK".to_string(),
-                    HealthStatus::Degraded(reason) => format!("DEGRADED ({})", reason),
-                    HealthStatus::Unhealthy(reason) => format!("FAIL ({})", reason),
-                }
-            );
+            println!("Model Provider Health: {}", model_status_str);
             println!(
                 "Capability Registry: {}",
                 if health.registry_ok { "OK" } else { "FAIL" }
