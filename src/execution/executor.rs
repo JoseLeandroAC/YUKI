@@ -21,15 +21,13 @@ impl Executor {
     ) -> Result<ExecutionResult, YukiError> {
         // Enforce INV-FND-002 & INV-FND-004: Execution requires explicit authorization
         // and tokens are single-use (consumed upon execution).
-        if !security.validate_and_consume_token(
+        // Enforce parameter integrity: parameters authorized == parameters executed.
+        security.validate_and_consume_token_with_input(
             &request.operation_id,
             &request.capability_id,
             &request.authorization_token,
-        ) {
-            return Err(YukiError::UnauthorizedExecution {
-                op_id: request.operation_id.to_string(),
-            });
-        }
+            &request.input,
+        )?;
 
         let handler = registry
             .get_handler(&request.capability_id)

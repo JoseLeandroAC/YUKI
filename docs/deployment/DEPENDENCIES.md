@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/DEPENDENCIES.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 3)
+**Fase:** MVP-1 (Marco 4)
 **Última Atualização:** 2026-10-03  
 **Governança:** Engineering Rule — Regra Operacional de Inventário  
 
@@ -11,6 +11,8 @@
 ## 1. Diretriz de Governança
 
 Nenhuma dependência externa pode ser introduzida no arquivo `Cargo.toml` sem estar catalogada neste documento com justificativa técnica estrita, análise de criticidade e rota de substituição / saída (*Exit Path*), em conformidade com o ADR-017 (External Platform Reuse & Vendor Independence).
+
+> **Nota do Marco 4:** O Marco 4 foi implementado com **ZERO novas dependências** no `Cargo.toml`. Todas as novas capacidades (`system.time`, `system.info`), o validador de pré-autorização, os checks de integridade de parâmetros, a suíte de 34 testes adversariais e os arquivos de empacotamento OCI utilizam exclusivamente a biblioteca padrão do Rust (`std`) e as dependências já aprovadas nos Marcos anteriores.
 
 ---
 

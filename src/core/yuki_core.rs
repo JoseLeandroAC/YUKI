@@ -95,6 +95,11 @@ impl YukiCore {
         self
     }
 
+    pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
+        self.model_provider = provider;
+        self
+    }
+
     /// Dispatches audit recording to persistent storage asynchronously via spawn_blocking,
     /// while maintaining in-memory EventStore synchronization.
     ///
@@ -204,11 +209,22 @@ impl YukiCore {
         .await?;
 
         // 3. Model Provider (Cognitive Layer - Asynchronous Boundary)
-        let model_req = ModelRequest::new(
+        let mut model_req = ModelRequest::new(
             input.content.clone(),
             context.context_id.clone(),
             context.purpose.clone(),
         );
+        // Capability Projection: Project eligible registered capabilities into provider-neutral declarations
+        model_req.available_capabilities = self
+            .capability_registry
+            .list_capabilities()
+            .into_iter()
+            .map(|m| crate::models::provider::CapabilityDeclaration {
+                name: m.id.0,
+                description: m.description,
+                parameters_schema: m.input_schema,
+            })
+            .collect();
 
         let model_resp = self.model_provider.generate(&model_req).await?;
 
@@ -271,6 +287,31 @@ impl YukiCore {
             "model_provider",
         ))
         .await?;
+
+        // 4.1. Pre-Authorization Input Contract Validation (ADR-007, ADR-018)
+        let manifest = self
+            .capability_registry
+            .get_manifest(&proposal.capability_id)
+            .ok_or_else(|| YukiError::CapabilityNotFound(proposal.capability_id.to_string()))?;
+
+        if let Err(e) = crate::capabilities::validation::validate_capability_input(
+            &manifest.input_schema,
+            &proposal.parameters,
+        ) {
+            self.record_audit_async(AuditEvent::new(
+                EventType::AuthorizationDenied,
+                correlation_id.clone(),
+                CausationId::new(operation_id.0.clone()),
+                serde_json::json!({
+                    "operation_id": operation_id.0,
+                    "capability_id": proposal.capability_id.0,
+                    "reason": format!("Pre-authorization input contract validation failed: {}", e),
+                }),
+                "security_controller",
+            ))
+            .await?;
+            return Err(e);
+        }
 
         // 5. Security Controller Authorization
         // Invariant: Model output != Authorization! Explicit policy evaluation is required.
@@ -440,19 +481,9 @@ impl YukiCore {
         ))
         .await?;
 
-        // 8. Result Production
+        // 8. Result Production (Capability-Neutral Output Representation)
         let output_text = if let Some(out) = &exec_result.output {
-            if let Some(msg) = out.get("echoed_message").and_then(|v| v.as_str()) {
-                msg.to_string()
-            } else if let Some(msg) = out.get("message").and_then(|v| v.as_str()) {
-                msg.to_string()
-            } else if let Some(msg) = out.get("content").and_then(|v| v.as_str()) {
-                msg.to_string()
-            } else if let Some(s) = out.as_str() {
-                s.to_string()
-            } else {
-                out.to_string()
-            }
+            format_execution_output(out)
         } else if let Some(err) = &exec_result.error {
             format!("Erro na execução: {}", err)
         } else {
@@ -533,4 +564,21 @@ impl Default for YukiCore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Extrai representação textual amigável da saída da capacidade de forma agnóstica e desacoplada.
+fn format_execution_output(output: &serde_json::Value) -> String {
+    if let Some(s) = output.as_str() {
+        return s.to_string();
+    }
+    if let Some(map) = output.as_object() {
+        if map.len() == 1 {
+            if let Some(val) = map.values().next() {
+                if let Some(s) = val.as_str() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    serde_json::to_string(output).unwrap_or_else(|_| output.to_string())
 }

@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::contracts::identifiers::CapabilityId;
 use crate::verification::strategies::echo::EchoVerificationStrategy;
+use crate::verification::strategies::info::InfoVerificationStrategy;
+use crate::verification::strategies::time::TimeVerificationStrategy;
 use crate::verification::strategy::VerificationStrategy;
 
 /// Trusted registry of verification strategies owned by Yuki's control plane (ADR-009).
@@ -26,11 +28,21 @@ impl VerificationStrategyRegistry {
 
         // 1. Register default trusted strategies
         registry.register_strategy(Arc::new(EchoVerificationStrategy::new()));
+        registry.register_strategy(Arc::new(TimeVerificationStrategy::new()));
+        registry.register_strategy(Arc::new(InfoVerificationStrategy::new()));
 
         // 2. Register trusted capability-to-strategy bindings
         registry.bind_capability(
             CapabilityId::new("system.echo"),
             EchoVerificationStrategy::STRATEGY_ID,
+        );
+        registry.bind_capability(
+            CapabilityId::new("system.time"),
+            TimeVerificationStrategy::STRATEGY_ID,
+        );
+        registry.bind_capability(
+            CapabilityId::new("system.info"),
+            InfoVerificationStrategy::STRATEGY_ID,
         );
 
         registry

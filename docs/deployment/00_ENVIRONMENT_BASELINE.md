@@ -2,7 +2,7 @@
 
 **Documento:** `docs/deployment/00_ENVIRONMENT_BASELINE.md`  
 **Status:** ATIVO  
-**Fase:** MVP-1 (Marco 3)
+**Fase:** MVP-1 (Marco 4)
 **Última Atualização:** 2026-10-03  
 **Verificado Por:** Yuki Architecture Review  
 
@@ -26,6 +26,8 @@ Em conformidade com a **Regra Operacional de Inventário**, nenhuma tecnologia o
 | **Rustfmt** | `1.8.0` | Componente Rustup | Formatação determinística de código | Primária / Obrigatória |
 | **C Toolchain Local (Windows)** | LLVM-MinGW `22.1.8-20260616` (MSVCRT) | `winget` (`MartinStorsjo.LLVM-MinGW.MSVCRT`) | Compilador C (`gcc`/`clang`) para compilar `sqlite3.c` embutido (`libsqlite3-sys` via `cc-rs`) | Primária / Obrigatória |
 | **C Toolchain CI / Linux** | `gcc` / `build-essential` | Runner Ubuntu / apt | Compilador C para compilar `sqlite3.c` no Linux | Primária / Verificação |
+| **OCI / Docker Builder** | `rust:1.98-bookworm` | Docker Hub Oficial | Multi-stage builder para binário release em Linux | Primária / Empacotamento |
+| **OCI / Docker Runtime** | `debian:bookworm-slim` | Docker Hub Oficial | Imagem base mínima não-root (`yuki:yuki` 10001) para produção | Primária / Empacotamento |
 | **Target de Desenvolvimento Local** | `x86_64-pc-windows-gnu` | MinGW-w64 / rustup | Target local na máquina de desenvolvimento | Transitória (Janela ~3m) |
 | **Linker de Desenvolvimento** | `rust-lld` | Rust bundled | Linkagem rápida de binários no Windows | Otimização |
 | **Target de CI** | `x86_64-unknown-linux-gnu` | Ubuntu Latest / GCC | Target padrão nos runners do GitHub Actions | Primária / Verificação |

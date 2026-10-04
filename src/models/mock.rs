@@ -170,6 +170,57 @@ impl MockModelProvider {
                         finish_reason: "TOOL_CALL".to_string(),
                         provider_response_id: None,
                     })
+                } else if lower.contains("hora") || lower.contains("time") {
+                    let proposal = CapabilityProposal {
+                        proposal_id: ProposalId::new(),
+                        model_request_id: req_id.clone(),
+                        provider_response_id: None,
+                        capability_id: CapabilityId::new("system.time"),
+                        parameters: serde_json::json!({}),
+                        reasoning: "Usuário solicitou leitura de data/hora do sistema.".to_string(),
+                    };
+                    Ok(ModelResponse {
+                        request_id: req_id,
+                        provider: "MockProvider".to_string(),
+                        model: "yuki-mock-reasoner-v0.1".to_string(),
+                        raw_content: "Proponho consulta ao horário UTC do sistema.".to_string(),
+                        capability_proposal: Some(proposal.clone()),
+                        candidate_proposal: Some(RawProposalCandidate {
+                            capability_name: proposal.capability_id.0.clone(),
+                            arguments: proposal.parameters.clone(),
+                        }),
+                        usage: None,
+                        finish_reason: "TOOL_CALL".to_string(),
+                        provider_response_id: None,
+                    })
+                } else if lower.contains("info")
+                    || lower.contains("sistema")
+                    || lower.contains("ambiente")
+                {
+                    let proposal = CapabilityProposal {
+                        proposal_id: ProposalId::new(),
+                        model_request_id: req_id.clone(),
+                        provider_response_id: None,
+                        capability_id: CapabilityId::new("system.info"),
+                        parameters: serde_json::json!({}),
+                        reasoning: "Usuário solicitou informações estáticas da plataforma."
+                            .to_string(),
+                    };
+                    Ok(ModelResponse {
+                        request_id: req_id,
+                        provider: "MockProvider".to_string(),
+                        model: "yuki-mock-reasoner-v0.1".to_string(),
+                        raw_content: "Proponho consulta às informações minimizadas do sistema."
+                            .to_string(),
+                        capability_proposal: Some(proposal.clone()),
+                        candidate_proposal: Some(RawProposalCandidate {
+                            capability_name: proposal.capability_id.0.clone(),
+                            arguments: proposal.parameters.clone(),
+                        }),
+                        usage: None,
+                        finish_reason: "TOOL_CALL".to_string(),
+                        provider_response_id: None,
+                    })
                 } else {
                     let proposal = CapabilityProposal {
                         proposal_id: ProposalId::new(),

@@ -49,8 +49,8 @@ Foundation Contracts
 Foundation v0.1 / MVP-0 (Código & Testes)
 ████████████████████████████████████████  implementada e consolidada (26/26 testes)
 
-Yuki MVP-1 (Provedores LLM Reais, Credential Broker, Tokio)
-░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  próximo objetivo (planejado)
+Yuki MVP-1 (Runtime Assíncrono, Credential Broker, Persistência Local, Capacidades & Suíte Adversarial)
+████████████████████████████████████████  implementado e validado (Marcos 1 a 4: 120 testes)
 
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
