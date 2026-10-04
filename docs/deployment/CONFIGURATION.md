@@ -47,11 +47,11 @@ Variáveis de Ambiente do Sistema Operacional (`YUKI_*`)
 - `database_path`: Caminho do arquivo SQLite do EventStore. Padrão: `"data/yuki.db"`.
 - `sqlite_synchronous`: Modo de sincronização do SQLite (`"NORMAL"` ou `"FULL"`). Padrão: `"NORMAL"`.
 
-### Seção `[model]` (Previsto para Marco 2)
-- `provider`: Provedor ativo (`"mock"` ou `"gemini"`). Padrão: `"mock"`.
-- `model_id`: Identificador do modelo upstream (ex: `"gemini-2.5-flash"`). Padrão: `"mock-v1"`.
+### Seção `[model]`
+- `provider`: Provedor ativo (`"mock"` ou `"gemini"`). Padrão: `"mock"`. Controlado via `YUKI_MODEL_PROVIDER`.
+- `model_id`: Identificador do modelo upstream (ex: `"gemini-2.5-flash"`). Padrão compilado: `"gemini-2.5-flash"`. Controlado via `YUKI_MODEL_ID`.
 - `temperature`: Parâmetro de aleatoriedade de amostragem. Padrão: `0.2`.
-- `timeout_ms`: Timeout específico para a chamada HTTP do provedor. Padrão: `15000` (15s).
+- `timeout_ms`: Timeout específico para a chamada HTTP do provedor. Padrão: `30000` (30s). Controlado via `YUKI_REQUEST_TIMEOUT_MS`.
 
 ---
 

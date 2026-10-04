@@ -452,6 +452,15 @@ impl ModelProvider for GeminiProviderAdapter {
     }
 
     fn health(&self) -> HealthStatus {
-        HealthStatus::Healthy
+        match self.credential_broker.acquire(&self.secret_ref) {
+            Ok(lease) => {
+                drop(lease);
+                HealthStatus::Healthy
+            }
+            Err(err) => HealthStatus::Degraded(format!(
+                "Falha na resolução local da credencial para '{}': {}",
+                self.config.sanitized_credential_alias, err
+            )),
+        }
     }
 }
