@@ -178,6 +178,10 @@ pub struct ResearchFetchResult {
     pub extracted_text: String,
     pub content_hash_sha256: String,
     pub truncated: bool,
+    #[serde(default)]
+    pub bytes_observed: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub confidence_state: SourceKind,
 }
 
@@ -208,6 +212,124 @@ impl Default for ResearchBudget {
             fetch_timeout_ms: 15_000,
             total_timeout_ms: 45_000,
         }
+    }
+}
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Rastreador governado de consumo do envelope de orçamento de Research por turno (ADR-020).
+///
+/// Compartilhado entre SearchProvider e ContentFetchProvider para impor o teto global de turno.
+#[derive(Debug)]
+pub struct ResearchBudgetTracker {
+    budget: ResearchBudget,
+    searches_executed: AtomicUsize,
+    fetches_executed: AtomicUsize,
+    total_bytes_consumed: AtomicUsize,
+    turn_started_at: Mutex<Option<Instant>>,
+}
+
+impl ResearchBudgetTracker {
+    pub fn new(budget: ResearchBudget) -> Self {
+        Self {
+            budget,
+            searches_executed: AtomicUsize::new(0),
+            fetches_executed: AtomicUsize::new(0),
+            total_bytes_consumed: AtomicUsize::new(0),
+            turn_started_at: Mutex::new(None),
+        }
+    }
+
+    pub fn budget(&self) -> &ResearchBudget {
+        &self.budget
+    }
+
+    pub fn searches_count(&self) -> usize {
+        self.searches_executed.load(Ordering::SeqCst)
+    }
+
+    pub fn fetches_count(&self) -> usize {
+        self.fetches_executed.load(Ordering::SeqCst)
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes_consumed.load(Ordering::SeqCst)
+    }
+
+    fn check_total_timeout(&self) -> Result<(), YukiError> {
+        let mut start_guard = self.turn_started_at.lock().unwrap();
+        let now = Instant::now();
+        let start = match *start_guard {
+            Some(t) => t,
+            None => {
+                *start_guard = Some(now);
+                now
+            }
+        };
+
+        let elapsed = now.duration_since(start).as_millis() as u64;
+        if elapsed > self.budget.total_timeout_ms {
+            return Err(YukiError::ExecutionFailed(format!(
+                "Orçamento de tempo global de pesquisa esgotado para este turno ({}ms excedeu {}ms)",
+                elapsed, self.budget.total_timeout_ms
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn check_and_increment_search(&self) -> Result<(), YukiError> {
+        self.check_total_timeout()?;
+        let current = self.searches_executed.load(Ordering::SeqCst);
+        if current >= self.budget.max_searches as usize {
+            return Err(YukiError::ExecutionFailed(format!(
+                "Orçamento de pesquisas esgotado para este turno (máximo: {})",
+                self.budget.max_searches
+            )));
+        }
+        self.searches_executed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn check_and_increment_fetch(&self) -> Result<(), YukiError> {
+        self.check_total_timeout()?;
+        let current = self.fetches_executed.load(Ordering::SeqCst);
+        if current >= self.budget.max_fetches as usize {
+            return Err(YukiError::ExecutionFailed(format!(
+                "Orçamento de leituras de páginas (fetch) esgotado para este turno (máximo: {})",
+                self.budget.max_fetches
+            )));
+        }
+        self.fetches_executed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn record_bytes(&self, bytes: usize) -> Result<(), YukiError> {
+        let current = self.total_bytes_consumed.load(Ordering::SeqCst);
+        let new_total = current.saturating_add(bytes);
+        if new_total > self.budget.max_total_bytes {
+            return Err(YukiError::ExecutionFailed(format!(
+                "Orçamento cumulativo de dados de pesquisa excedido ({} bytes excedeu teto de {} bytes)",
+                new_total, self.budget.max_total_bytes
+            )));
+        }
+        self.total_bytes_consumed.store(new_total, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn reset_turn(&self) {
+        self.searches_executed.store(0, Ordering::SeqCst);
+        self.fetches_executed.store(0, Ordering::SeqCst);
+        self.total_bytes_consumed.store(0, Ordering::SeqCst);
+        let mut start_guard = self.turn_started_at.lock().unwrap();
+        *start_guard = None;
+    }
+}
+
+impl Default for ResearchBudgetTracker {
+    fn default() -> Self {
+        Self::new(ResearchBudget::default())
     }
 }
 

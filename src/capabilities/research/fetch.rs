@@ -1,5 +1,5 @@
 use crate::capabilities::registry::CapabilityHandler;
-use crate::capabilities::research::manifest::fetch_manifest;
+use crate::capabilities::research::manifest::fetch_manifest_for_provider;
 use crate::capabilities::research::provider::{ContentFetchProvider, MockFetchProvider};
 use crate::contracts::capability::CapabilityManifest;
 use crate::contracts::errors::YukiError;
@@ -15,6 +15,10 @@ impl FetchCapability {
     pub fn new(provider: Arc<dyn ContentFetchProvider>) -> Self {
         Self { provider }
     }
+
+    pub fn provider(&self) -> &Arc<dyn ContentFetchProvider> {
+        &self.provider
+    }
 }
 
 impl Default for FetchCapability {
@@ -25,7 +29,7 @@ impl Default for FetchCapability {
 
 impl CapabilityHandler for FetchCapability {
     fn manifest(&self) -> CapabilityManifest {
-        fetch_manifest()
+        fetch_manifest_for_provider(self.provider.is_live())
     }
 
     fn execute(&self, input: &serde_json::Value) -> Result<serde_json::Value, YukiError> {

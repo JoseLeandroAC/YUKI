@@ -1,10 +1,10 @@
 # ADR-020 — Research v1: Governed Web Retrieval, Vendor Abstraction & Cloud-Ready Boundaries
 
-**Versão:** 1.2  
-**Status:** ACCEPTED / IN IMPLEMENTATION (Marco 1 e 2 Concluídos)  
+**Versão:** 1.3  
+**Status:** ACCEPTED / IMPLEMENTED (Marcos 1, 2 e 3 Concluídos)  
 **Domínio:** 15 — Integrations / Cognitive Capabilities / Information Retrieval  
 **Data:** 2026-10-10  
-**Decisão:** Accepted (Marco 1: Contratos & Mocks; Marco 2: Brave Search Adapter, Egress Security & SHA-256 via sha2)  
+**Decisão:** Accepted (Marco 1: Contratos & Mocks; Marco 2: Brave Search Adapter & Egress Security; Marco 3: Governed Web Fetch, SSRF Defense, Socket Pinning & HTML Sanitization)  
 
 ---
 
@@ -107,6 +107,37 @@ O Marco 2 consolidou a implementação do provedor real de busca na web com as s
 5. **Migração Criptográfica de Integridade (`sha2` crate):**
    - Substituição da implementação local por dependência oficial da comunidade Rust (`sha2 = "0.10"`).
    - Testes com vetores oficiais NIST validam equivalência exata do algoritmo FIPS 180-4.
+
+### 3.4. Implementação Concreta do Marco 3 (Governed Web Fetch, SSRF Defense & Content Provenance)
+O Marco 3 consolidou o provedor de recuperação governada de páginas web (`HttpContentFetchProvider`) com os seguintes pilares de defesa:
+1. **`HttpContentFetchProvider` e Abstração de Transporte (`FetchTransport`):**
+   - Implementação de `ContentFetchProvider` conectando o motor nativo de requisição HTTP (`NetworkFetchTransport`) via `reqwest` com runtime assíncrono isolado em thread dedicada.
+   - Injeção desacoplada de `MockFetchTransport` para suíte de testes 100% determinística e offline.
+2. **Defesa Positiva Anti-SSRF e Validação Exaustiva de IPs:**
+   - Validação prévia de URL (`validate_and_parse_fetch_url`): esquema restrito (`http`/`https`), rejeição de credenciais embutidas (`user:pass@host`), rejeição de portas não padrão (apenas 80/443 autorizadas), detecção e bloqueio de representações anômalas de IP (hexadecimal, octal, dword) e sufixos de domínio reservados (`.localhost`, `.local`, `.internal`, `.lan`, etc.).
+   - Política positiva de IPs globalmente roteáveis (`is_globally_routable_ip`): bloqueio rigoroso de todos os blocos IPv4 privados e reservados (RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Carrier-Grade NAT (RFC 6598: `100.64.0.0/10`), Loopback (`127.0.0.0/8`), Link-Local e Cloud Metadata (`169.254.0.0/16`, especificamente `169.254.169.254`), faixas de documentação/teste e broadcast/multicast.
+   - Bloqueio exaustivo de IPv6: loopback (`::1/128`), ULA privado (`fc00::/7`), link-local (`fe80::/10`), multicast (`ff00::/8`) e, criticamente, desencapsulamento e validação estrita de endereços IPv4 mapeados em IPv6 (**IPv4-Mapped IPv6** `::ffff:0:0/96`).
+3. **Prevenção de DNS Rebinding e Amarração Estrita de Socket (*Connection Pinning*):**
+   - Resolução prévia de DNS inspecionando **todos** os endereços IP retornados pelo servidor DNS. Se qualquer endereço pertencer a uma faixa privada ou proibida, a requisição falha fechada imediatamente (*fail-closed*).
+   - O endereço IP público validado é amarrado (*pinned*) à conexão TLS/TCP via `reqwest::ClientBuilder::resolve(host, pinned_addr)`, garantindo que o resolver do sistema não re-resolva o domínio para um IP privado durante o ciclo de vida da requisição.
+4. **Loop de Redirecionamento Supervisionado (*Supervised Redirects*):**
+   - Desativação completa de redirecionamentos automáticos opacos da biblioteca HTTP (`redirect::Policy::none()`).
+   - Avaliação explícita de saltos de redirecionamento (máximo de 3 saltos). Cada salto passa pelo ciclo completo de validação sintática, resolução DNS, inspeção de IP e pinning de socket.
+   - Proibição incondicional de downgrade de segurança de `https://` para `http://`.
+5. **Limites de Streaming e Defesa Contra Bombas de Descompressão (*Decompression Bombs*):**
+   - Limite máximo de streaming comprimido: 256 KiB.
+   - Limite máximo de corpo descomprimido: 1 MiB (1.048.576 bytes).
+   - Limite de texto útil extraído retornado para o modelo: 30.000 caracteres, com flag explícita `truncated = true`.
+6. **Higiene e Extração Segura de Conteúdo HTML (*Data != Instruction*):**
+   - Extração do metadado `<title>`.
+   - Remoção completa de blocos perigosos e executáveis: `<script>`, `<style>`, `<noscript>`, `<svg>`, `<canvas>`, `<iframe>`, `<form>`, `<input>`, `<object>`, `<embed>`.
+   - Conversão de elementos estruturais (`<p>`, `<div>`, títulos, itens de lista) em quebras de linha legíveis.
+   - Decodificação de entidades HTML sem expansão recursiva.
+   - O texto resultante é classificado ontologicamente como dado bruto passivo de terceiros (`SourceKind::DirectSource`).
+7. **Permissão Independente de Egress e Envelopes Compartilhados:**
+   - Permissão dedicada `egress:web_fetch`, pertencente à classe `RiskClass::High`, rigorosamente dissociada de `egress:web_search`.
+   - Ausente da política padrão `DefaultFoundationPolicy` (*fail-closed*).
+   - Compartilhamento unificado do orçamento de turno via `ResearchBudgetTracker` entre busca (máx 3) e leitura (máx 3), com limite global de 45 segundos e teto cumulativo de bytes, resetado deterministicamente a cada novo turno conversacional.
 
 ---
 

@@ -40,6 +40,14 @@ impl CapabilityRegistry {
         self
     }
 
+    pub fn with_fetch_provider(
+        mut self,
+        provider: Arc<dyn crate::capabilities::research::ContentFetchProvider>,
+    ) -> Self {
+        self.register(Box::new(FetchCapability::new(provider)));
+        self
+    }
+
     pub fn register(&mut self, handler: Box<dyn CapabilityHandler>) {
         let id = handler.manifest().id.0;
         self.handlers.insert(id, handler);

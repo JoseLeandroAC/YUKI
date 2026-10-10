@@ -448,3 +448,71 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
   - `cargo clippy --all-targets -- -D warnings`: 0 warnings e 0 erros.
   - `cargo build --release`: compilação limpa e otimizada.
 
+---
+
+#### [Event Time: 2026-10-10 | Record Creation Time: 2026-10-10]
+### Conclusão do Marco 3 da Yuki Research v1 — Governed Web Fetch, Defesa Anti-SSRF em Profundidade e Proveniência de Conteúdo
+
+- **Event Time**: 10 de outubro de 2026
+- **Record Creation Time**: 10 de outubro de 2026
+- **Milestone Relacionado**: Branch `feature/research-v1` (ADR-020 revisado)
+- **Classificação Formal**: **`MARCO 3 IMPLEMENTADO — TESTADO OFFLINE — LIVE PENDENTE`**
+- **Natureza do Evento**: Implementação da leitura governada de páginas web (`research.fetch`) via `HttpContentFetchProvider`, perímetro defensivo anti-SSRF em profundidade, prevenção de DNS rebinding por socket pinning, sanitização de HTML contra injeção indireta de prompt e controle de envelope de orçamento compartilhado por turno.
+
+##### 1. Auditoria e Reconciliação com o Marco 2
+- **Auditoria do BraveSearchProvider**: Identificou-se que o contador de buscas executadas era anteriormente privado e não compartilhado com o fetch. O isolamento de thread e runtime Tokio por requisição mostrou-se resiliente contra deadlocks e timeouts sob teste de carga.
+- **Envelope Unificado de Orçamento (`ResearchBudgetTracker`)**: Unificou-se a governança de consumo de turno em `src/contracts/research.rs`. Busca e leitura compartilham deterministicamente o mesmo envelope (3 buscas, 3 fetches, 45 segundos de timeout global e teto cumulativo de bytes), resetado no início de cada novo turno pelo `YukiCore`.
+- **Enriquecimento do Contrato de Fetch**: Adicionados os campos `bytes_observed: usize` e `source_id: Option<String>` ao `ResearchFetchResult`, consolidando a cadeia de custódia e proveniência de dados.
+
+##### 2. Arquitetura Defensiva Anti-SSRF e Socket Pinning (`src/capabilities/research/ssrf.rs`)
+- **Validação Sintática e Semântica de URL**:
+  - Aceitação exclusiva dos esquemas `http` e `https`.
+  - Rejeição absoluta de credenciais embutidas (`http://user:pass@host/`).
+  - Bloqueio estrito de portas anômalas (autorizadas unicamente as portas 80 e 443).
+  - Rejeição de representações anômalas ou ofuscadas de IP (hexadecimal, octal, dword) e sufixos de domínio reservados/internos (`.localhost`, `.local`, `.internal`, `.lan`, etc.).
+- **Política Positiva de IPs Globalmente Roteáveis**:
+  - Bloqueio exaustivo de faixas IPv4: RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), RFC 6598 CGNAT (`100.64.0.0/10`), Loopback (`127.0.0.0/8`), Link-Local e Cloud Metadata (`169.254.0.0/16` incluindo `169.254.169.254`), faixas de documentação/teste e broadcast/multicast.
+  - Bloqueio exaustivo de IPv6: loopback (`::1/128`), ULA privado (`fc00::/7`), link-local (`fe80::/10`), multicast (`ff00::/8`).
+  - **Defesa Crítica Contra Evasão IPv4-Mapped IPv6**: Desencapsulamento estrito do bloco `::ffff:0:0/96`, validando os 32 bits embutidos contra todas as regras de IPv4.
+- **Defesa Contra DNS Rebinding e Socket Pinning**:
+  - Resolução DNS desacoplada via trait `DnsResolver` (`SystemDnsResolver` e `MockDnsResolver`).
+  - Inspeção obrigatória de **todos** os endereços IP retornados. Se qualquer IP for privado ou proibido, a operação inteira falha fechada (*fail-closed*).
+  - Amarração de socket (*connection pinning*): o IP público aprovado é vinculado ao destino da conexão TCP/TLS via `reqwest::ClientBuilder::resolve(host, pinned_addr)`, neutralizando ataques de DNS rebinding em conexões subsequentes.
+
+##### 3. Loop de Redirecionamento Supervisionado
+- Redirecionamentos automáticos nativos completamente desativados (`redirect::Policy::none()`).
+- Avaliação explícita de saltos de redirecionamento (máximo de 3 saltos).
+- Cada URL de redirecionamento passa por validação per-hop de esquema, porta, DNS e IP antes da emissão da requisição.
+- Proibição absoluta de downgrade de segurança de `https://` para `http://`.
+
+##### 4. Limites de Streaming e Higiene HTML (`src/capabilities/research/html_extract.rs`)
+- **Limites de Streaming**:
+  - Teto de streaming comprimido: 256 KiB.
+  - Teto de streaming descomprimido: 1 MiB (1.048.576 bytes).
+  - Teto de texto retornado à Yuki: 30.000 caracteres, com flag explícita `truncated = true`.
+- **Higiene e Sanitização de Conteúdo**:
+  - Extração limpa do título `<title>`.
+  - Remoção de blocos executáveis e de layout: `<script>`, `<style>`, `<noscript>`, `<svg>`, `<canvas>`, `<iframe>`, `<form>`, `<input>`, `<object>`, `<embed>`.
+  - Conversão de elementos estruturais em quebras de linha limpas.
+  - Decodificação não recursiva de entidades HTML (imunidade contra entity bombs).
+  - Invariante ontológico fundamental: o texto extraído é tratado como dado bruto não confiável de terceiros (`Data != Instruction`), impedindo que comandos embutidos em páginas web alcancem autorização ou execução.
+
+##### 5. Modelo de Permissões e Segurança de Egress
+- **Permissão Dedicada**: Criada a permissão `egress:web_fetch`, pertencente à classe `RiskClass::High`, completamente independente de `egress:web_search`.
+- **Fail-Closed sob Política Padrão**: A permissão `egress:web_fetch` está ausente da política padrão do sistema (`DefaultFoundationPolicy`), exigindo autorização explícita do operador para modo live.
+- **Variável de Ambiente de Controle**: Leitura real depende de `YUKI_RESEARCH_LIVE_ENABLED=true`.
+
+##### 6. Bateria de Testes e Validação
+- **Suíte Dedicada (`tests/capability_research_fetch.rs`)**:
+  - 34 testes determinísticos offline cobrindo todos os requisitos: seleção de provedores, fail-closed de live mode, permissões no manifest, negação pelo Security Controller, validação de URL, esquemas proibidos, credenciais embutidas, loopback, faixas IPv4/IPv6 privadas, IPv4-mapped IPv6, cloud metadata, DNS misto fail-closed, defesa contra DNS rebinding, socket pinning, redirecionamento para rede interna, limite de saltos de redirecionamento, timeouts, cancelamento de recursos, limites de streaming comprimido e descomprimido, sanitização de HTML (scripts, estilos, iframes), injeção indireta de prompt como dado passivo, rejeição de tipos de conteúdo binários, tratamento de erros HTTP (404, 429, 500), extração estrutural, cálculo de hash SHA-256, flag de truncamento, metadados de proveniência, orçamento compartilhado de turno, loop de continuação governada, regressão zero de Brave search e MVP-1, e portabilidade Linux/Docker.
+  - 1 teste live opt-in (`test_fetch_live_opt_in_smoke_test`) marcado com `#[ignore]` para execução deliberada pelo operador.
+- **Portões de Qualidade Aprovados**:
+  - `cargo test`: 240 testes unitários e de integração verdes no workspace (4 testes live ignorados).
+  - `cargo fmt --check`: 100% de aderência ao padrão da linguagem Rust.
+  - `cargo clippy --all-targets -- -D warnings`: 0 warnings e 0 erros.
+  - `cargo build --release`: compilação limpa e bem-sucedida.
+- **Preservação Rígida dos Baselines**:
+  - `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) mantidos integralmente preservados.
+  - Nenhuma release tag ou release GitHub criada.
+
+

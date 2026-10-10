@@ -23,6 +23,11 @@ pub trait SearchProvider: Send + Sync {
 /// Trait abstrato para provedores de recuperação de conteúdo de páginas.
 pub trait ContentFetchProvider: Send + Sync {
     fn fetch(&self, input: &ResearchFetchInput) -> Result<ResearchFetchResult, YukiError>;
+
+    /// Indica se o provedor opera em modo live (com saída de rede para serviços externos).
+    fn is_live(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================
@@ -222,6 +227,7 @@ impl ContentFetchProvider for MockFetchProvider {
         };
 
         let content_hash_sha256 = compute_sha256(extracted_text.as_bytes());
+        let bytes_observed = extracted_text.len();
 
         Ok(ResearchFetchResult {
             url: input.url.clone(),
@@ -234,6 +240,8 @@ impl ContentFetchProvider for MockFetchProvider {
             extracted_text,
             content_hash_sha256,
             truncated,
+            bytes_observed,
+            source_id: Some("src:fetch:1".to_string()),
             confidence_state: SourceKind::DirectSource,
         })
     }

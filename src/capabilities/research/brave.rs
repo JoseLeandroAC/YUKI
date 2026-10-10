@@ -1,12 +1,11 @@
 use crate::capabilities::research::provider::SearchProvider;
 use crate::contracts::errors::YukiError;
 use crate::contracts::research::{
-    now_iso8601, ResearchBudget, ResearchSearchInput, ResearchSearchResult, SearchResultItem,
-    SourceKind,
+    now_iso8601, ResearchBudget, ResearchBudgetTracker, ResearchSearchInput, ResearchSearchResult,
+    SearchResultItem, SourceKind,
 };
 use crate::security::credentials::{CredentialBroker, SecretRef};
 use serde::Deserialize;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +50,7 @@ pub struct BraveSearchConfig {
     pub country: Option<String>,
     pub max_response_bytes: usize,
     pub budget: ResearchBudget,
+    pub budget_tracker: Option<Arc<ResearchBudgetTracker>>,
 }
 
 impl BraveSearchConfig {
@@ -70,6 +70,7 @@ impl BraveSearchConfig {
             country: Some("BR".to_string()),
             max_response_bytes: 512 * 1024, // 512 KiB teto defensivo
             budget: ResearchBudget::default(),
+            budget_tracker: None,
         }
     }
 
@@ -126,6 +127,12 @@ impl BraveSearchConfig {
         self
     }
 
+    pub fn with_budget_tracker(mut self, tracker: Arc<ResearchBudgetTracker>) -> Self {
+        self.budget = tracker.budget().clone();
+        self.budget_tracker = Some(tracker);
+        self
+    }
+
     pub fn with_max_response_bytes(mut self, max_bytes: usize) -> Self {
         self.max_response_bytes = max_bytes;
         self
@@ -146,12 +153,12 @@ impl Default for BraveSearchConfig {
 /// 3. Redirecionamentos desativados (`Policy::none()`).
 /// 4. Credencial nunca injetada em URLs nem em mensagens de erro ou logs (Zeroize em SecretMaterial).
 /// 5. Respostas truncadas e tratadas estritamente como dados brutos não confiáveis (`Data != Instruction`).
-/// 6. Orçamento delimitado por turno (`ResearchBudget`).
+/// 6. Orçamento delimitado por turno (`ResearchBudgetTracker`).
 pub struct BraveSearchProvider {
     config: BraveSearchConfig,
     credential_broker: Arc<dyn CredentialBroker>,
     client: reqwest::Client,
-    searches_executed: AtomicUsize,
+    budget_tracker: Arc<ResearchBudgetTracker>,
 }
 
 impl BraveSearchProvider {
@@ -171,17 +178,22 @@ impl BraveSearchProvider {
                 ))
             })?;
 
+        let budget_tracker = config
+            .budget_tracker
+            .clone()
+            .unwrap_or_else(|| Arc::new(ResearchBudgetTracker::new(config.budget.clone())));
+
         Ok(Self {
             config,
             credential_broker,
             client,
-            searches_executed: AtomicUsize::new(0),
+            budget_tracker,
         })
     }
 
     /// Retorna o número de buscas executadas por esta instância.
     pub fn searches_executed(&self) -> usize {
-        self.searches_executed.load(Ordering::SeqCst)
+        self.budget_tracker.searches_count()
     }
 
     /// Helper para execução assíncrona desacoplada de contextos síncronos/Tokio.
@@ -226,13 +238,7 @@ impl SearchProvider for BraveSearchProvider {
         }
 
         // 2. Verificação de orçamento de buscas por turno (ADR-020)
-        let current_count = self.searches_executed.load(Ordering::SeqCst);
-        if current_count >= self.config.budget.max_searches as usize {
-            return Err(YukiError::ExecutionFailed(format!(
-                "Orçamento de pesquisas esgotado para este turno (máximo: {})",
-                self.config.budget.max_searches
-            )));
-        }
+        self.budget_tracker.check_and_increment_search()?;
 
         // 3. Resolução segura de credencial via CredentialBroker
         let lease = self
@@ -431,8 +437,6 @@ impl SearchProvider for BraveSearchProvider {
                 }
             }
         }
-
-        self.searches_executed.fetch_add(1, Ordering::SeqCst);
 
         Ok(ResearchSearchResult {
             query: input.query.clone(),

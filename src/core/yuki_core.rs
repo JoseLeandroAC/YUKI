@@ -56,6 +56,7 @@ pub struct YukiCore {
     pub event_store: Arc<dyn EventStore>,
     pub persistent_audit: Option<Arc<SqliteAuditStore>>,
     pub model_config: ModelGatewayConfig,
+    pub research_budget_tracker: Option<Arc<crate::contracts::research::ResearchBudgetTracker>>,
 }
 
 impl YukiCore {
@@ -69,6 +70,7 @@ impl YukiCore {
             event_store: Arc::new(InMemoryEventStore::new()),
             persistent_audit: None,
             model_config: ModelGatewayConfig::default(),
+            research_budget_tracker: None,
         }
     }
 
@@ -89,11 +91,20 @@ impl YukiCore {
             event_store,
             persistent_audit: None,
             model_config: ModelGatewayConfig::default(),
+            research_budget_tracker: None,
         }
     }
 
     pub fn with_persistent_audit(mut self, persistent_store: Arc<SqliteAuditStore>) -> Self {
         self.persistent_audit = Some(persistent_store);
+        self
+    }
+
+    pub fn with_research_budget_tracker(
+        mut self,
+        tracker: Arc<crate::contracts::research::ResearchBudgetTracker>,
+    ) -> Self {
+        self.research_budget_tracker = Some(tracker);
         self
     }
 
@@ -193,6 +204,10 @@ impl YukiCore {
         let correlation_id = CorrelationId::from_request(&request_id);
 
         // 1. Audit Input Received
+        if let Some(tracker) = &self.research_budget_tracker {
+            tracker.reset_turn();
+        }
+
         self.record_audit_async(AuditEvent::new(
             EventType::InputReceived,
             correlation_id.clone(),

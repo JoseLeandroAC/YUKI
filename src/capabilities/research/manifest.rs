@@ -84,10 +84,24 @@ pub fn search_manifest_for_provider(live_network: bool) -> CapabilityManifest {
 
 /// Constrói o manifesto canônico para a capability `research.fetch` (ADR-020).
 pub fn fetch_manifest() -> CapabilityManifest {
+    fetch_manifest_for_provider(false)
+}
+
+/// Constrói o manifesto para `research.fetch` diferenciando provedores offline vs live (ADR-020).
+pub fn fetch_manifest_for_provider(live_network: bool) -> CapabilityManifest {
+    let mut required_permissions = vec!["capability:research.fetch".to_string()];
+    if live_network {
+        required_permissions.push("egress:web_fetch".to_string());
+    }
+
     CapabilityManifest {
         id: CapabilityId::new("research.fetch"),
         version: "0.1.0".to_string(),
-        description: "Recupera conteúdo textual limpo e sanitizado de uma URL pública com hash SHA-256 e integridade.".to_string(),
+        description: if live_network {
+            "Recupera conteúdo textual limpo e sanitizado de uma URL pública na web (modo live com validação SSRF e pinning).".to_string()
+        } else {
+            "Recupera conteúdo textual limpo e sanitizado de uma URL pública com hash SHA-256 e integridade (modo offline/mock).".to_string()
+        },
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["url"],
@@ -132,13 +146,19 @@ pub fn fetch_manifest() -> CapabilityManifest {
                 "extracted_text": { "type": "string" },
                 "content_hash_sha256": { "type": "string" },
                 "truncated": { "type": "boolean" },
+                "bytes_observed": { "type": "integer" },
+                "source_id": { "type": ["string", "null"] },
                 "confidence_state": { "type": "string" }
             }
         }),
-        required_permissions: vec!["capability:research.fetch".to_string()],
-        risk_class: RiskClass::Low,
+        required_permissions,
+        risk_class: if live_network {
+            RiskClass::High
+        } else {
+            RiskClass::Low
+        },
         side_effects: SideEffects::None,
-        network_required: false, // Em Marco 1: Provedor Mock estritamente offline
+        network_required: live_network,
         filesystem_required: false,
         secrets_required: false,
     }
