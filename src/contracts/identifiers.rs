@@ -296,3 +296,45 @@ impl fmt::Display for ProviderResponseId {
         write!(f, "{}", self.0)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnId(pub String);
+
+impl TurnId {
+    pub fn new() -> Self {
+        Self(generate_unique_id("turn"))
+    }
+}
+
+impl Default for TurnId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for TurnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ObservationId(pub String);
+
+impl ObservationId {
+    pub fn new() -> Self {
+        Self(generate_unique_id("obs"))
+    }
+}
+
+impl Default for ObservationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ObservationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

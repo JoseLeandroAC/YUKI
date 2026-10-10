@@ -7,7 +7,7 @@ use crate::contracts::errors::YukiError;
 use crate::contracts::events::{AuditEvent, EventType};
 use crate::contracts::execution::{ExecutionRequest, OperationState};
 use crate::contracts::identifiers::{
-    now_utc, AttemptId, CapabilityId, CausationId, CorrelationId, EvidenceId, OperationId,
+    now_utc, AttemptId, CapabilityId, CausationId, CorrelationId, EvidenceId, OperationId, TurnId,
 };
 use crate::contracts::input::UserInput;
 use crate::contracts::output::YukiResult;
@@ -200,6 +200,7 @@ impl YukiCore {
     /// - Data != Instruction
     /// - External model output is UNTRUSTED DATA
     pub async fn process_input_async(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+        let turn_id = TurnId::new();
         let turn_budget = self
             .research_budget_tracker
             .as_ref()
@@ -212,12 +213,30 @@ impl YukiCore {
                 Arc::new(crate::contracts::research::ResearchBudgetTracker::default())
             });
 
+        let session_id = input.request_id.0.clone();
+        let timeout_ms = turn_budget.budget().total_timeout_ms;
+        let turn_context = Arc::new(crate::contracts::research::ResearchTurnContext::new(
+            turn_id.clone(),
+            session_id,
+            turn_budget.clone(),
+            timeout_ms,
+        ));
+
+        let this = self;
         crate::contracts::research::CURRENT_TURN_BUDGET
-            .scope(turn_budget, self.process_input_internal(input))
+            .scope(turn_budget, async move {
+                crate::contracts::research::CURRENT_TURN_CONTEXT
+                    .scope(turn_context, this.process_input_internal(input, turn_id))
+                    .await
+            })
             .await
     }
 
-    async fn process_input_internal(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+    async fn process_input_internal(
+        &self,
+        input: UserInput,
+        turn_id: TurnId,
+    ) -> Result<YukiResult, YukiError> {
         let request_id = input.request_id.clone();
         let correlation_id = CorrelationId::from_request(&request_id);
 
@@ -278,6 +297,9 @@ impl YukiCore {
         let mut last_verification: Option<crate::contracts::verification::VerificationResult> =
             None;
 
+        let mut source_registry =
+            crate::capabilities::research::registry::ObservedSourceRegistry::new(turn_id.clone());
+
         // Governed Bounded Tool Continuation Loop (ADR-018)
         loop {
             let model_resp = self.model_provider.generate(&model_req).await?;
@@ -310,19 +332,91 @@ impl YukiCore {
                     model_resp.provider_response_id.clone(),
                 )?
             } else {
-                // If model didn't propose any capability, return raw conversational output
-                let res = YukiResult::success(
+                // If model didn't propose any capability, check for research synthesis or return raw conversational output
+                let synthesis = if !source_registry.observations().is_empty()
+                    || !crate::capabilities::research::synthesis::SynthesisValidator::extract_citations(&model_resp.raw_content).is_empty()
+                {
+                    let syn = crate::capabilities::research::synthesis::SynthesisValidator::validate(
+                        &model_resp.raw_content,
+                        &source_registry,
+                    );
+
+                    for verified in &syn.citations {
+                        self.record_audit_async(AuditEvent::new(
+                            EventType::CitationResolved,
+                            correlation_id.clone(),
+                            CausationId::new(request_id.to_string()),
+                            serde_json::json!({
+                                "cite_id": verified.cite_id,
+                                "observation_id": verified.observation_id.0,
+                                "source_kind": format!("{:?}", verified.source_kind),
+                                "content_hash_sha256": verified.content_hash_sha256,
+                            }),
+                            "synthesis_validator",
+                        ))
+                        .await?;
+                    }
+
+                    for rejected in &syn.unresolved_citations {
+                        self.record_audit_async(AuditEvent::new(
+                            EventType::CitationRejected,
+                            correlation_id.clone(),
+                            CausationId::new(request_id.to_string()),
+                            serde_json::json!({
+                                "cite_id": rejected,
+                                "reason": "unresolved_in_turn_registry",
+                            }),
+                            "synthesis_validator",
+                        ))
+                        .await?;
+                    }
+
+                    self.record_audit_async(AuditEvent::new(
+                        EventType::SynthesisCompleted,
+                        correlation_id.clone(),
+                        CausationId::new(request_id.to_string()),
+                        serde_json::json!({
+                            "status": format!("{:?}", syn.status),
+                            "verified_count": syn.citations.len(),
+                            "unresolved_count": syn.unresolved_citations.len(),
+                            "limitations_count": syn.limitations.len(),
+                        }),
+                        "synthesis_validator",
+                    ))
+                    .await?;
+
+                    Some(syn)
+                } else {
+                    None
+                };
+
+                let final_content = if let Some(ref syn) = synthesis {
+                    syn.answer_text.clone()
+                } else {
+                    model_resp.raw_content
+                };
+
+                let mut res = YukiResult::success(
                     request_id.clone(),
                     correlation_id.clone(),
                     last_operation_id,
-                    model_resp.raw_content,
+                    final_content,
                     last_verification,
                 );
+
+                if let Some(syn) = synthesis {
+                    res = res.with_synthesis(syn);
+                }
+
                 self.record_audit_async(AuditEvent::new(
                     EventType::ResponseProduced,
                     correlation_id,
                     CausationId::new(request_id.to_string()),
-                    serde_json::json!({ "status": "DirectText", "iterations": iterations }),
+                    serde_json::json!({
+                        "status": "DirectText",
+                        "iterations": iterations,
+                        "has_synthesis": res.synthesis.is_some(),
+                    }),
                     "yuki_core",
                 ))
                 .await?;
@@ -597,13 +691,114 @@ impl YukiCore {
             }
 
             // Verified Success: Record operational evidence and feed result to continuation turn
-            last_operation_id = Some(operation_id);
+            last_operation_id = Some(operation_id.clone());
             last_verification = Some(verification);
 
             let tool_data = exec_result
                 .output
                 .clone()
                 .unwrap_or(serde_json::Value::Null);
+
+            // Marco 4: Governed Source & Evidence Registration
+            if proposal.capability_id.0 == "research.search" {
+                if let Ok(search_res) = serde_json::from_value::<
+                    crate::contracts::research::ResearchSearchResult,
+                >(tool_data.clone())
+                {
+                    let old_obs_len = source_registry.observations().len();
+                    match source_registry.register_search_result(&search_res, "research.search") {
+                        Ok(new_evidences) => {
+                            for obs in &source_registry.observations()[old_obs_len..] {
+                                self.record_audit_async(AuditEvent::new(
+                                    EventType::SourceObserved,
+                                    correlation_id.clone(),
+                                    CausationId::new(operation_id.0.clone()),
+                                    serde_json::json!({
+                                        "observation_id": obs.observation_id.0,
+                                        "cite_id": obs.cite_id,
+                                        "source_kind": format!("{:?}", obs.source_kind),
+                                        "final_url": obs.final_url,
+                                        "content_hash_sha256": obs.content_hash_sha256,
+                                        "turn_id": obs.turn_id.0,
+                                    }),
+                                    "yuki_core",
+                                ))
+                                .await?;
+                            }
+                            for ev in new_evidences {
+                                self.record_audit_async(AuditEvent::new(
+                                    EventType::EvidenceRegistered,
+                                    correlation_id.clone(),
+                                    CausationId::new(operation_id.0.clone()),
+                                    serde_json::json!({
+                                        "evidence_id": ev.evidence_id.0,
+                                        "observation_id": ev.observation_id.0,
+                                        "cite_id": ev.cite_id,
+                                        "source_kind": format!("{:?}", ev.source_kind),
+                                        "turn_id": turn_id.0,
+                                    }),
+                                    "yuki_core",
+                                ))
+                                .await?;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Falha ao registrar observação de busca no registro de fontes: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            } else if proposal.capability_id.0 == "research.fetch" {
+                if let Ok(fetch_res) = serde_json::from_value::<
+                    crate::contracts::research::ResearchFetchResult,
+                >(tool_data.clone())
+                {
+                    let old_obs_len = source_registry.observations().len();
+                    match source_registry.register_fetch_result(&fetch_res, "research.fetch") {
+                        Ok(new_evidence) => {
+                            for obs in &source_registry.observations()[old_obs_len..] {
+                                self.record_audit_async(AuditEvent::new(
+                                    EventType::SourceObserved,
+                                    correlation_id.clone(),
+                                    CausationId::new(operation_id.0.clone()),
+                                    serde_json::json!({
+                                        "observation_id": obs.observation_id.0,
+                                        "cite_id": obs.cite_id,
+                                        "source_kind": format!("{:?}", obs.source_kind),
+                                        "final_url": obs.final_url,
+                                        "content_hash_sha256": obs.content_hash_sha256,
+                                        "turn_id": obs.turn_id.0,
+                                    }),
+                                    "yuki_core",
+                                ))
+                                .await?;
+                            }
+                            self.record_audit_async(AuditEvent::new(
+                                EventType::EvidenceRegistered,
+                                correlation_id.clone(),
+                                CausationId::new(operation_id.0.clone()),
+                                serde_json::json!({
+                                    "evidence_id": new_evidence.evidence_id.0,
+                                    "observation_id": new_evidence.observation_id.0,
+                                    "cite_id": new_evidence.cite_id,
+                                    "source_kind": format!("{:?}", new_evidence.source_kind),
+                                    "turn_id": turn_id.0,
+                                }),
+                                "yuki_core",
+                            ))
+                            .await?;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Falha ao registrar observação de fetch no registro de fontes: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
 
             model_req
                 .messages

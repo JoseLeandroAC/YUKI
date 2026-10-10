@@ -568,5 +568,96 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - `cargo build --release`: aprovado.
 - Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) rigorosamente preservados.
 
+---
+
+#### [2026-10-10] Research v1 — Marco 4: Governed Synthesis, Source Identity, Evidence Registry & Verifiable Citations
+
+##### 1. Contexto e Objetivos do Marco 4
+- Implementado o Marco 4 da Yuki Research v1 na branch `feature/research-v1`, estabelecendo a governança estrita de conhecimento, registro de fontes, evidências estruturadas e resolução determinística de citações (`[src:N]`) na síntese conversacional.
+- Consolidada a separação ontológica fundamental:
+  - `Model Output != Command != Authorization`: Afirmações e propostas com citações emitidas pelo modelo são tratadas como dados externos não confiáveis.
+  - `Verification != Truth`: Validar que uma citação existe no registro do turno e possui integridade de transporte (hash SHA-256) atesta rastreabilidade e proveniência criptográfica, mas NÃO constitui prova de veracidade factual no mundo real.
+  - `Data != Instruction`: Todo conteúdo de pesquisa retornado é projetado passivamente para o modelo, impedindo a interpretação de dados externos como comandos de sistema.
+
+##### 2. Arquitetura e Componentes Implementados
+- **Identificadores e Eventos de Auditoria**:
+  - `TurnId` e `ObservationId` tipados em `src/contracts/identifiers.rs`.
+  - Novos eventos de auditoria em `src/contracts/events.rs`: `SourceObserved`, `EvidenceRegistered`, `CitationResolved`, `CitationRejected` e `SynthesisCompleted`.
+- **Propagação Segura de Orçamento e Deadlines (`ResearchTurnContext`)**:
+  - Delimitação imutável do turno com `TurnId`, `session_id`, `budget_tracker` e prazo absoluto (`deadline`).
+  - Task-local `CURRENT_TURN_CONTEXT` propagado com isolamento assíncrono e repassado para threads nativas através de `.sync_scope()`, eliminando vazamentos e garantindo verificação dupla de prazo.
+- **Registro de Fontes Observadas (`ObservedSourceRegistry`)**:
+  - Custodiado exclusivamente pelo Yuki Core em `src/capabilities/research/registry.rs`.
+  - Diferenciação estrita entre snippets de busca (`AggregatedSnippet`, `is_full_page = false`) e páginas recuperadas (`DirectSource`, `is_full_page = true`).
+  - Atribuição sequencial determinística de identificadores de citação (`src:1`, `src:2`).
+  - Imposição de limites por turno: máximo de 20 observações (`DEFAULT_MAX_OBSERVATIONS`) e 2 MiB de volume agregado (`DEFAULT_MAX_TOTAL_BYTES`).
+  - Projeção passiva de prompts via `format_evidences_for_model()`.
+- **Validador de Síntese e Citações Verificáveis (`SynthesisValidator`)**:
+  - Implementado em `src/capabilities/research/synthesis.rs` com parser zero-dependencies determinístico de tags `[src:N]`.
+  - Resolução de citações contra o registro governado, detecção e rejeição de referências inventadas (ex.: `[src:999]`), e anexação transparente de nota de limitação de verificação.
+  - Inclusão incondicional do aviso ontológico `VERIFICATION_DISCLAIMER` (`Verification != Truth`).
+  - Classificação de status: `FullyVerified`, `PartiallyVerified`, `UnverifiedClaims`.
+- **Integração no Yuki Core (`src/core/yuki_core.rs`)**:
+  - Inicialização de `ResearchTurnContext` e `ObservedSourceRegistry` por turno.
+  - Registro automático e emissão de eventos auditáveis durante o loop de continuação governada de ferramentas.
+  - Vinculação de `ResearchSynthesis` tipada ao `YukiResult`.
+
+##### 3. Suíte de Testes Dedicada (`tests/capability_research_synthesis.rs`)
+- 46 testes determinísticos e offline cobrindo:
+  1. Isolamento de escopo por turno;
+  2. Preservação de contexto através de `.await`;
+  3. Propagação de contexto para threads nativas spawned;
+  4. Expiração de deadline falha fechado;
+  5. Isolamento mútuo entre turnos concorrentes;
+  6. Compartilhamento do rastreador de orçamento dentro do turno;
+  7. Proteção contra reset cruzado de orçamento;
+  8. Resiliência a pânico em threads de transporte;
+  9. Prevenção de orçamento substituto;
+  10. Verificação de deadline pré e pós-IO;
+  11. Precisão no cálculo de timeout;
+  12. Propagação de identificador de sessão;
+  13. Distinção entre ObservationId e hash SHA-256;
+  14. Re-leitura gera nova observação;
+  15. Separação snippet vs página completa;
+  16. Atribuição sequencial de cite_id;
+  17. Teto de observações por turno;
+  18. Teto de bytes por turno;
+  19. Resolução com ou sem colchetes;
+  20. Busca de citação inexistente retorna None;
+  21. Projeção contém aviso Data != Instruction;
+  22. Projeção rotula snippets e páginas;
+  23. Projeção reporta flag de truncamento;
+  24. Prefixo de hash SHA-256 incluído na projeção;
+  25. Injeção de prompt em fonte encapsulada como dado passivo;
+  26. Isolamento estrito de registros por TurnId;
+  27. Registro vazio gera projeção vazia;
+  28. Resultados duplicados geram observações distintas;
+  29. Formato rastreável de escopo de evidência;
+  30. Imutabilidade de proveniência;
+  31. Contabilidade precisa de bytes;
+  32. Preservação de URL final pós-redirecionamento;
+  33. Validação completa (FullyVerified);
+  34. Citação inventada resulta em PartiallyVerified;
+  35. Citações totalmente inválidas geram UnverifiedClaims;
+  36. Fontes disponíveis sem citações geram UnverifiedClaims;
+  37. Aviso de limitação anexado ao texto;
+  38. Disclaimer ontológico Verification != Truth presente;
+  39. Deduplicação de citações repetidas;
+  40. Turno conversacional padrão sem fontes é FullyVerified;
+  41. Citação inventada em registro vazio é rejeitada;
+  42. Fluxo ponta-a-ponta de busca com síntese verificada;
+  43. Fluxo ponta-a-ponta de fetch com síntese verificada;
+  44. Auditoria de eventos de síntese e proveniência;
+  45. Auditoria de evento CitationRejected sob citação inventada;
+  46. Conversa normal sem pesquisa preserva YukiResult sem síntese.
+
+##### 4. Portões de Qualidade Aprovados
+- `cargo test`: 306 testes aprovados no workspace (0 falhas, 4 testes live ignorados).
+- `cargo fmt --check`: 100% aprovado.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `cargo build --release`: compilação otimizada concluída com sucesso.
+- Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
+- Classificação: **MARCO 4 IMPLEMENTADO — TESTADO OFFLINE — LIVE PENDENTE**.
+
 
 

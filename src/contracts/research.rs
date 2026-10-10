@@ -16,6 +16,25 @@ pub enum SourceKind {
     UnverifiedMirror,
 }
 
+use crate::contracts::identifiers::{EvidenceId, ObservationId, TurnId};
+
+/// Níveis distintos de verificação ontológica de uma citação (Invariante: Verification != Truth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CitationVerificationLevel {
+    /// Referência identificada e existente no registro governado do turno.
+    ReferenceExists,
+    /// Proveniência e integridade de transporte atestadas por hash SHA-256.
+    ProvenanceIntact,
+    /// Evidência contextual e excerto disponíveis para auditoria.
+    EvidenceAvailable,
+    /// Compatibilidade de escopo do turno e sessão validada.
+    ScopeCompatible,
+    /// [Limitação Marco 4] Suporte textual semântico não computado deterministicamente.
+    SemanticSupportUnverified,
+    /// [Limitação Ontológica ADR-020] Veracidade factual no mundo real não atestada (Verification != Truth).
+    FactualTruthUnverified,
+}
+
 /// Registro estruturado de uma fonte externa observada durante a execução (ADR-020).
 /// Mantido pelo Core como custodiante de evidências.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +47,80 @@ pub struct ObservedSource {
     pub content_hash: String,
     pub confidence_state: SourceKind,
     pub observed_at: String,
+}
+
+/// Observação individual de uma fonte externa emitida exclusivamente pelo Core (Marco 4).
+/// Distingue rigorosamente identidade do conteúdo (SHA-256) de identidade da observação.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceObservation {
+    pub observation_id: ObservationId,
+    pub cite_id: String,         // ex: "src:1"
+    pub source_kind: SourceKind, // AggregatedSnippet, DirectSource, UnverifiedMirror
+    pub original_url: String,
+    pub final_url: String,
+    pub domain: String,
+    pub title: String,
+    pub provider: String,
+    pub observed_at: String,
+    pub content_hash_sha256: String,
+    pub content_length: usize,
+    pub truncated: bool,
+    pub turn_id: TurnId,
+    pub verification_state: String,
+    pub evidence_scope: String,
+}
+
+/// Evidência tipada derivada de observação de pesquisa para consumo governado de síntese.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchEvidence {
+    pub evidence_id: EvidenceId,
+    pub observation_id: ObservationId,
+    pub cite_id: String, // ex: "src:1"
+    pub source_kind: SourceKind,
+    pub title: String,
+    pub canonical_url: String,
+    pub excerpt: String,
+    pub content_hash_sha256: String,
+    pub observed_at: String,
+    pub evidence_scope: String,
+    pub truncated: bool,
+    pub is_full_page: bool,
+}
+
+/// Estado ontológico da síntese de respostas governadas baseadas em evidências.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SynthesisStatus {
+    /// Todas as fontes citadas existem e são comprovadamente válidas no registro do turno.
+    FullyVerified,
+    /// Parte das citações foi verificada, mas há citações inválidas ou não resolvidas.
+    PartiallyVerified,
+    /// Nenhuma citação válida ou afirmações sem qualquer suporte registrado.
+    UnverifiedClaims,
+    /// Síntese rejeitada por violação de segurança ou anomalia grave.
+    Rejected,
+}
+
+/// Citação individual resolvida e verificada contra o registro do turno.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedCitation {
+    pub cite_id: String,
+    pub observation_id: ObservationId,
+    pub canonical_url: String,
+    pub title: String,
+    pub source_kind: SourceKind,
+    pub is_full_page: bool,
+    pub content_hash_sha256: String,
+}
+
+/// Resultado estruturado de síntese governada com citações verificáveis (Marco 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchSynthesis {
+    pub answer_text: String,
+    pub citations: Vec<VerifiedCitation>,
+    pub unresolved_citations: Vec<String>,
+    pub limitations: Vec<String>,
+    pub status: SynthesisStatus,
+    pub verification_disclaimer: String,
 }
 
 // ============================================================================
@@ -217,7 +310,59 @@ impl Default for ResearchBudget {
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Contexto imutável e governado de execução do turno de pesquisa (ADR-020 / Marco 4).
+///
+/// Propaga delimitadamente o identificador do turno, prazo de expiração (deadline),
+/// rastreador de orçamento e sessão entre tarefas assíncronas e threads nativas.
+#[derive(Debug, Clone)]
+pub struct ResearchTurnContext {
+    pub turn_id: TurnId,
+    pub session_id: String,
+    pub budget_tracker: Arc<ResearchBudgetTracker>,
+    pub created_at: Instant,
+    pub deadline: Instant,
+}
+
+impl ResearchTurnContext {
+    pub fn new(
+        turn_id: TurnId,
+        session_id: impl Into<String>,
+        budget_tracker: Arc<ResearchBudgetTracker>,
+        timeout_ms: u64,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            turn_id,
+            session_id: session_id.into(),
+            budget_tracker,
+            created_at: now,
+            deadline: now + Duration::from_millis(timeout_ms),
+        }
+    }
+
+    pub fn for_turn(turn_id: TurnId, budget_tracker: Arc<ResearchBudgetTracker>) -> Self {
+        let timeout = budget_tracker.budget().total_timeout_ms;
+        Self::new(turn_id, "default_session", budget_tracker, timeout)
+    }
+
+    /// Verifica se o prazo limite absoluto deste turno foi ultrapassado.
+    pub fn check_deadline(&self) -> Result<(), YukiError> {
+        if Instant::now() > self.deadline {
+            return Err(YukiError::ExecutionFailed(format!(
+                "Prazo de execução do turno de pesquisa excedido (TurnId: '{}')",
+                self.turn_id
+            )));
+        }
+        Ok(())
+    }
+}
+
+tokio::task_local! {
+    /// Contexto de execução e orçamento de pesquisa governado delimitado ao turno (Marco 4).
+    pub static CURRENT_TURN_CONTEXT: Arc<ResearchTurnContext>;
+}
 
 tokio::task_local! {
     /// Contexto de orçamento delimitado e isolado por turno/tarefa assíncrona.

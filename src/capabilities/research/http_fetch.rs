@@ -64,8 +64,14 @@ impl FetchTransport for NetworkFetchTransport {
 
         let url_clone = req.url.clone();
         let headers_clone = req.headers.clone();
+        let active_context = crate::contracts::research::CURRENT_TURN_CONTEXT
+            .try_with(|ctx| ctx.clone())
+            .ok();
+        let active_budget = crate::contracts::research::CURRENT_TURN_BUDGET
+            .try_with(|b| b.clone())
+            .ok();
 
-        // 2. Execução isolada em thread dedicada com runtime Tokio próprio
+        // 2. Execução isolada em thread dedicada propagando explicitamente o contexto do turno (Marco 4)
         let thread_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -77,7 +83,7 @@ impl FetchTransport for NetworkFetchTransport {
                     ))
                 })?;
 
-            rt.block_on(async move {
+            let fut = async move {
                 let mut req_builder = client.get(url_clone);
                 for (k, v) in headers_clone {
                     req_builder = req_builder.header(k, v);
@@ -136,7 +142,19 @@ impl FetchTransport for NetworkFetchTransport {
                     headers,
                     body_chunks,
                 })
-            })
+            };
+
+            if let Some(ctx) = active_context {
+                let trk = ctx.budget_tracker.clone();
+                crate::contracts::research::CURRENT_TURN_CONTEXT.sync_scope(ctx, || {
+                    crate::contracts::research::CURRENT_TURN_BUDGET
+                        .sync_scope(trk, || rt.block_on(fut))
+                })
+            } else if let Some(b) = active_budget {
+                crate::contracts::research::CURRENT_TURN_BUDGET.sync_scope(b, || rt.block_on(fut))
+            } else {
+                rt.block_on(fut)
+            }
         });
 
         thread_handle.join().map_err(|_| {
@@ -328,10 +346,20 @@ impl ContentFetchProvider for HttpContentFetchProvider {
         // 2. Validação prévia dos parâmetros contratuais de entrada
         input.validate()?;
 
-        // 3. Verificação do orçamento global compartilhado de turno (ADR-020 com isolamento de contexto)
-        let active_tracker = crate::contracts::research::CURRENT_TURN_BUDGET
-            .try_with(|t| t.clone())
-            .unwrap_or_else(|_| self.config.budget_tracker.clone());
+        // 3. Verificação do orçamento global compartilhado de turno (ADR-020 com isolamento de contexto e deadline)
+        let (active_tracker, active_ctx) =
+            match crate::contracts::research::CURRENT_TURN_CONTEXT.try_with(|ctx| ctx.clone()) {
+                Ok(ctx) => {
+                    ctx.check_deadline()?;
+                    (ctx.budget_tracker.clone(), Some(ctx))
+                }
+                Err(_) => {
+                    match crate::contracts::research::CURRENT_TURN_BUDGET.try_with(|b| b.clone()) {
+                        Ok(b) => (b, None),
+                        Err(_) => (self.config.budget_tracker.clone(), None),
+                    }
+                }
+            };
         active_tracker.check_and_increment_fetch()?;
 
         // 4. Loop de navegação e redirecionamento com validação per-hop (máximo 3 saltos)
@@ -490,6 +518,10 @@ impl ContentFetchProvider for HttpContentFetchProvider {
                     current_url.host_str().unwrap_or("origem desconhecida")
                 )
             });
+
+            if let Some(ctx) = &active_ctx {
+                ctx.check_deadline()?;
+            }
 
             return Ok(ResearchFetchResult {
                 url: input.url.clone(),

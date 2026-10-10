@@ -4,8 +4,10 @@ pub mod html_extract;
 pub mod http_fetch;
 pub mod manifest;
 pub mod provider;
+pub mod registry;
 pub mod search;
 pub mod ssrf;
+pub mod synthesis;
 
 pub use brave::*;
 pub use fetch::*;
@@ -13,8 +15,10 @@ pub use html_extract::*;
 pub use http_fetch::*;
 pub use manifest::*;
 pub use provider::*;
+pub use registry::*;
 pub use search::*;
 pub use ssrf::*;
+pub use synthesis::*;
 
 use crate::contracts::research::ResearchBudgetTracker;
 use crate::security::credentials::CredentialBroker;

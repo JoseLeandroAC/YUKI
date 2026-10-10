@@ -33,6 +33,13 @@ pub enum MockBehavior {
     ProviderUnavailable { status: u16, message: String },
     /// Simula bloqueio de conteúdo por filtro de segurança.
     ContentBlocked(String),
+    /// Força uma síntese específica com citações (Marco 4).
+    SynthesizeWithCitations(String),
+    /// Força uma proposta e, após o ToolResult, força uma síntese específica com citações (Marco 4).
+    ProposeThenSynthesize {
+        proposal: CapabilityProposal,
+        synthesis: String,
+    },
 }
 
 /// Implementação determinística e offline de `ModelProvider` para testes e CI.
@@ -59,7 +66,11 @@ impl MockModelProvider {
         if let Some(crate::models::provider::ModelMessage::ToolResult { content, .. }) =
             request.messages.last()
         {
-            let text = format_tool_content(content);
+            let text = match &self.behavior {
+                MockBehavior::SynthesizeWithCitations(synth) => synth.clone(),
+                MockBehavior::ProposeThenSynthesize { synthesis, .. } => synthesis.clone(),
+                _ => format_tool_content(content),
+            };
             return Ok(ModelResponse::text(
                 req_id,
                 "MockProvider",
@@ -90,6 +101,27 @@ impl MockModelProvider {
                 "yuki-mock-reasoner-v0.1",
                 text.clone(),
             )),
+            MockBehavior::SynthesizeWithCitations(text) => Ok(ModelResponse::text(
+                req_id,
+                "MockProvider",
+                "yuki-mock-reasoner-v0.1",
+                text.clone(),
+            )),
+            MockBehavior::ProposeThenSynthesize { proposal, .. } => Ok(ModelResponse {
+                request_id: req_id,
+                provider: "MockProvider".to_string(),
+                model: "yuki-mock-reasoner-v0.1".to_string(),
+                raw_content: format!("Proposing capability: {}", proposal.capability_id),
+                capability_proposal: Some(proposal.clone()),
+                candidate_proposal: Some(RawProposalCandidate {
+                    capability_name: proposal.capability_id.0.clone(),
+                    arguments: proposal.parameters.clone(),
+                    opaque_signature: None,
+                }),
+                usage: None,
+                finish_reason: "TOOL_CALL".to_string(),
+                provider_response_id: None,
+            }),
             MockBehavior::DirectText(text) => Ok(ModelResponse::text(
                 req_id,
                 "MockProvider",
@@ -367,6 +399,45 @@ impl MockModelProvider {
 
 /// Extrai representação textual amigável da saída da capacidade para síntese no mock.
 fn format_tool_content(output: &serde_json::Value) -> String {
+    if let Some(results) = output.get("results").and_then(|r| r.as_array()) {
+        let mut s = String::from("Síntese com base nas fontes encontradas:");
+        for (idx, item) in results.iter().enumerate() {
+            let cite_tag = item
+                .get("cite_id")
+                .and_then(|c| c.as_str())
+                .map(|c| {
+                    if c.starts_with('[') {
+                        c.to_string()
+                    } else {
+                        format!("[{}]", c)
+                    }
+                })
+                .unwrap_or_else(|| format!("[src:{}]", idx + 1));
+            let title = item
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Fonte");
+            let snippet = item.get("snippet").and_then(|sn| sn.as_str()).unwrap_or("");
+            s.push_str(&format!(
+                "\n- Informação de {} {}: {}",
+                title, cite_tag, snippet
+            ));
+        }
+        return s;
+    }
+    if let Some(url) = output.get("url").and_then(|u| u.as_str()) {
+        if let Some(extracted) = output.get("extracted_text").and_then(|t| t.as_str()) {
+            let preview = if extracted.len() > 120 {
+                &extracted[..120]
+            } else {
+                extracted
+            };
+            return format!(
+                "Conteúdo recuperado da página [src:1] ({}): {}",
+                url, preview
+            );
+        }
+    }
     if let Some(s) = output.as_str() {
         return s.to_string();
     }

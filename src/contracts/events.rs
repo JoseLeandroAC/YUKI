@@ -15,6 +15,11 @@ pub enum EventType {
     EffectObserved,
     VerificationCompleted,
     ResponseProduced,
+    SourceObserved,
+    EvidenceRegistered,
+    CitationResolved,
+    CitationRejected,
+    SynthesisCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

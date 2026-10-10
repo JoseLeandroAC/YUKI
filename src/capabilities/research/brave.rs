@@ -198,8 +198,13 @@ impl BraveSearchProvider {
     }
 
     /// Helper para execução assíncrona desacoplada de contextos síncronos/Tokio.
-    /// Executa em thread dedicada isolada para evitar panics de aninhamento com runtimes current_thread ou multi_thread.
-    fn run_async<F, T>(&self, future: F) -> Result<T, YukiError>
+    /// Executa em thread dedicada isolada propagando explicitamente o contexto e orçamento do turno (Marco 4).
+    fn run_async<F, T>(
+        &self,
+        future: F,
+        context: Option<Arc<crate::contracts::research::ResearchTurnContext>>,
+        budget: Arc<crate::contracts::research::ResearchBudgetTracker>,
+    ) -> Result<T, YukiError>
     where
         F: std::future::Future<Output = Result<T, YukiError>> + Send + 'static,
         T: Send + 'static,
@@ -214,7 +219,17 @@ impl BraveSearchProvider {
                         e
                     ))
                 })?;
-            rt.block_on(future)
+
+            if let Some(ctx) = context {
+                let trk = ctx.budget_tracker.clone();
+                crate::contracts::research::CURRENT_TURN_CONTEXT.sync_scope(ctx, || {
+                    crate::contracts::research::CURRENT_TURN_BUDGET
+                        .sync_scope(trk, || rt.block_on(future))
+                })
+            } else {
+                crate::contracts::research::CURRENT_TURN_BUDGET
+                    .sync_scope(budget, || rt.block_on(future))
+            }
         });
 
         thread_handle.join().map_err(|_| {
@@ -238,10 +253,20 @@ impl SearchProvider for BraveSearchProvider {
             ));
         }
 
-        // 2. Verificação de orçamento de buscas por turno (ADR-020 com isolamento de contexto)
-        let active_tracker = crate::contracts::research::CURRENT_TURN_BUDGET
-            .try_with(|t| t.clone())
-            .unwrap_or_else(|_| self.budget_tracker.clone());
+        // 2. Verificação de orçamento de buscas por turno (ADR-020 com isolamento de contexto e deadline)
+        let (active_tracker, active_ctx) =
+            match crate::contracts::research::CURRENT_TURN_CONTEXT.try_with(|ctx| ctx.clone()) {
+                Ok(ctx) => {
+                    ctx.check_deadline()?;
+                    (ctx.budget_tracker.clone(), Some(ctx))
+                }
+                Err(_) => {
+                    match crate::contracts::research::CURRENT_TURN_BUDGET.try_with(|b| b.clone()) {
+                        Ok(b) => (b, None),
+                        Err(_) => (self.budget_tracker.clone(), None),
+                    }
+                }
+            };
         active_tracker.check_and_increment_search()?;
 
         // 3. Resolução segura de credencial via CredentialBroker
@@ -302,94 +327,102 @@ impl SearchProvider for BraveSearchProvider {
         let url_clone = url.clone();
 
         // 5. Execução HTTP isolada
-        let wire_response = self.run_async(async move {
-            let resp = client
-                .get(url_clone)
-                .header("X-Subscription-Token", token)
-                .header("Accept", "application/json")
-                .header("User-Agent", "Yuki/0.2.0 (Governed-AI-Platform)")
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        YukiError::ExecutionFailed(
-                            "Timeout na requisição ao provedor de busca".to_string(),
-                        )
-                    } else if e.is_connect() {
-                        YukiError::ExecutionFailed(format!(
-                            "Falha de conexão de rede com provedor de busca: {}",
-                            e
-                        ))
-                    } else {
-                        YukiError::ExecutionFailed(format!(
-                            "Erro na requisição ao provedor de busca: {}",
-                            e
-                        ))
-                    }
-                })?;
+        let wire_response = self.run_async(
+            async move {
+                let resp = client
+                    .get(url_clone)
+                    .header("X-Subscription-Token", token)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Yuki/0.2.0 (Governed-AI-Platform)")
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            YukiError::ExecutionFailed(
+                                "Timeout na requisição ao provedor de busca".to_string(),
+                            )
+                        } else if e.is_connect() {
+                            YukiError::ExecutionFailed(format!(
+                                "Falha de conexão de rede com provedor de busca: {}",
+                                e
+                            ))
+                        } else {
+                            YukiError::ExecutionFailed(format!(
+                                "Erro na requisição ao provedor de busca: {}",
+                                e
+                            ))
+                        }
+                    })?;
 
-            let status = resp.status();
-            if status == reqwest::StatusCode::BAD_REQUEST {
-                return Err(YukiError::InvalidRequest(
-                    "Provedor de busca rejeitou os parâmetros da consulta (HTTP 400)".to_string(),
-                ));
-            } else if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                return Err(YukiError::ExecutionFailed(
-                    "Credencial de busca inválida, não autorizada ou cota esgotada (HTTP 401/403)"
-                        .to_string(),
-                ));
-            } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(YukiError::ExecutionFailed(
-                    "Limite de taxa (Rate Limit) do provedor de busca excedido (HTTP 429)"
-                        .to_string(),
-                ));
-            } else if status.is_server_error() {
-                return Err(YukiError::ExecutionFailed(format!(
-                    "Instabilidade temporária no provedor de busca (HTTP {})",
-                    status.as_u16()
-                )));
-            } else if !status.is_success() {
-                return Err(YukiError::ExecutionFailed(format!(
-                    "Status HTTP inesperado do provedor de busca: {}",
-                    status.as_u16()
-                )));
-            }
-
-            if let Some(len) = resp.content_length() {
-                if len > max_response_bytes as u64 {
+                let status = resp.status();
+                if status == reqwest::StatusCode::BAD_REQUEST {
+                    return Err(YukiError::InvalidRequest(
+                        "Provedor de busca rejeitou os parâmetros da consulta (HTTP 400)".to_string(),
+                    ));
+                } else if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return Err(YukiError::ExecutionFailed(
+                        "Credencial de busca inválida, não autorizada ou cota esgotada (HTTP 401/403)"
+                            .to_string(),
+                    ));
+                } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    return Err(YukiError::ExecutionFailed(
+                        "Limite de taxa (Rate Limit) do provedor de busca excedido (HTTP 429)"
+                            .to_string(),
+                    ));
+                } else if status.is_server_error() {
                     return Err(YukiError::ExecutionFailed(format!(
-                        "Resposta do provedor de busca excedeu limite de tamanho ({} bytes)",
-                        len
+                        "Instabilidade temporária no provedor de busca (HTTP {})",
+                        status.as_u16()
+                    )));
+                } else if !status.is_success() {
+                    return Err(YukiError::ExecutionFailed(format!(
+                        "Status HTTP inesperado do provedor de busca: {}",
+                        status.as_u16()
                     )));
                 }
-            }
 
-            let body_bytes = resp.bytes().await.map_err(|e| {
-                YukiError::ExecutionFailed(format!(
-                    "Falha ao ler dados da resposta de busca: {}",
-                    e
-                ))
-            })?;
+                if let Some(len) = resp.content_length() {
+                    if len > max_response_bytes as u64 {
+                        return Err(YukiError::ExecutionFailed(format!(
+                            "Resposta do provedor de busca excedeu limite de tamanho ({} bytes)",
+                            len
+                        )));
+                    }
+                }
 
-            if body_bytes.len() > max_response_bytes {
-                return Err(YukiError::ExecutionFailed(format!(
-                    "Corpo da resposta de busca excedeu limite de {} bytes",
-                    max_response_bytes
-                )));
-            }
-
-            let parsed: BraveSearchWireResponse =
-                serde_json::from_slice(&body_bytes).map_err(|e| {
+                let body_bytes = resp.bytes().await.map_err(|e| {
                     YukiError::ExecutionFailed(format!(
-                        "Resposta malformada ou JSON inválido do provedor de busca: {}",
+                        "Falha ao ler dados da resposta de busca: {}",
                         e
                     ))
                 })?;
 
-            Ok(parsed)
-        })?;
+                if body_bytes.len() > max_response_bytes {
+                    return Err(YukiError::ExecutionFailed(format!(
+                        "Corpo da resposta de busca excedeu limite de {} bytes",
+                        max_response_bytes
+                    )));
+                }
+
+                let parsed: BraveSearchWireResponse =
+                    serde_json::from_slice(&body_bytes).map_err(|e| {
+                        YukiError::ExecutionFailed(format!(
+                            "Resposta malformada ou JSON inválido do provedor de busca: {}",
+                            e
+                        ))
+                    })?;
+
+                Ok(parsed)
+            },
+            active_ctx.clone(),
+            active_tracker.clone(),
+        )?;
+
+        if let Some(ctx) = &active_ctx {
+            ctx.check_deadline()?;
+        }
 
         // 6. Conversão estrita e sanitização para o contrato canônico
         let mut results = Vec::new();

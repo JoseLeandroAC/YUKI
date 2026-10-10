@@ -498,3 +498,29 @@ Em auditoria adversarial e independente sobre os Marcos 1, 2 e 3 da Research v1,
 
 8. **Entropia Aumentada de Proveniência:**
    - *Integridade:* Identificadores de fonte (`source_id`) em `research.fetch` foram expandidos para 16 caracteres hexadecimais (64 bits de entropia) derivados do hash SHA-256 do conteúdo (`src:fetch:{hash[..16]}`), eliminando riscos de colisão determinística.
+
+---
+
+## 10. Marco 4: Governed Synthesis, Source Identity, Evidence Registry & Verifiable Citations
+
+O Marco 4 da Research v1 conclui a governança de conhecimento e citação, implementando a ponte segura entre os dados observados pelo runtime e o modelo cognitivo, sustentada pelos seguintes pilares arquiteturais:
+
+### 10.1. Propagação de Orçamento e Deadlines (`ResearchTurnContext`)
+- **Propagação Entre Tarefas e Threads Nativas:** Estabelecida a estrutura `ResearchTurnContext` associada a `TurnId`, `session_id`, `deadline` absoluto do turno e referência atômica para `ResearchBudgetTracker`.
+- **Fronteira com `std::thread::spawn`:** Implementada a propagação via `CURRENT_TURN_CONTEXT.sync_scope()` para threads bloqueantes e ambientes com runtimes aninhados, garantindo que timeouts e tetos de recursos não sejam burlados em chamadas de transporte (`NetworkFetchTransport` e `BraveSearchProvider`).
+- **Verificação Dupla de Deadlines:** Validação incondicional de prazo (`check_deadline()`) antes do envio de tráfego de rede e imediatamente após a recepção dos dados, abortando prematuramente caso o orçamento de tempo do turno tenha sido esgotado.
+
+### 10.2. Registro Governado de Fontes e Identidade de Observação (`ObservedSourceRegistry`)
+- **Custódia Exclusiva do Core:** O modelo cognitivo não possui capacidade nem autoridade para criar, manipular ou adulterar identidades de fontes. As observações são registradas estritamente pelo Yuki Core a partir dos retornos verificados de execução.
+- **Identidade de Observação vs. Hash de Conteúdo:** Cada recuperação de dados gera um `ObservationId` único. Duas URLs distintas com conteúdo idêntico compartilham o mesmo hash SHA-256 (`content_hash_sha256`), mas recebem `ObservationId`s e identificadores de citação (`cite_id`, ex.: `src:1`, `src:2`) distintos. Re-leituras em turnos separados geram observações inteiramente novas.
+- **Diferenciação Ontológica Snippet vs. Página Completa:** Snippets de busca são registrados como `SourceKind::AggregatedSnippet` (`is_full_page == false`), enquanto páginas recuperadas por fetch são classificadas como `SourceKind::DirectSource` (`is_full_page == true`).
+- **Limites Rígidos de Memória e Contagem:** Cada turno impõe o teto padrão de 20 observações (`DEFAULT_MAX_OBSERVATIONS`) e 2 MiB de dados acumulados (`DEFAULT_MAX_TOTAL_BYTES`).
+
+### 10.3. Projeção Passiva de Prompts (`Data != Instruction`)
+- As fontes registradas são formatadas para o modelo em bloco passivo estritamente delimitado (`format_evidences_for_model`), com avisos explícitos de que o conteúdo consiste em dados externos não confiáveis e não constitui comandos de sistema.
+
+### 10.4. Validação de Síntese e Citações Verificáveis (`SynthesisValidator`)
+- **Resolução Determinística:** Extração e resolução das citações no formato `[src:N]` contra o registro do turno corrente.
+- **Detecção de Citações Inventadas:** Se o modelo referenciar fontes inexistentes no registro governado (ex.: `[src:999]`), o validador rejeita a citação, categoriza o status como `SynthesisStatus::PartiallyVerified` ou `SynthesisStatus::UnverifiedClaims`, registra limitações e anexa uma nota visível de limitação de verificação.
+- **Separação Ontológica `Verification != Truth`:** Todo resultado de síntese governada inclui incondicionalmente o `VERIFICATION_DISCLAIMER`: a validação atesta existência no turno e integridade criptográfica de transporte (SHA-256), mas não constitui, isoladamente, atestado de veracidade factual no mundo real.
+- **Auditoria Abrangente:** Emissão dos eventos `EventType::SourceObserved`, `EvidenceRegistered`, `CitationResolved`, `CitationRejected` e `SynthesisCompleted` no subsistema de auditoria.
