@@ -13,6 +13,11 @@ use std::sync::RwLock;
 /// Trait abstrato para provedores de busca textual estruturada.
 pub trait SearchProvider: Send + Sync {
     fn search(&self, input: &ResearchSearchInput) -> Result<ResearchSearchResult, YukiError>;
+
+    /// Indica se o provedor opera em modo live (com saída de rede para serviços externos).
+    fn is_live(&self) -> bool {
+        false
+    }
 }
 
 /// Trait abstrato para provedores de recuperação de conteúdo de páginas.

@@ -7,6 +7,7 @@ use crate::contracts::capability::CapabilityManifest;
 use crate::contracts::errors::YukiError;
 use crate::contracts::identifiers::CapabilityId;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub trait CapabilityHandler: Send + Sync {
     fn manifest(&self) -> CapabilityManifest;
@@ -29,6 +30,14 @@ impl CapabilityRegistry {
         registry.register(Box::new(SearchCapability::default()));
         registry.register(Box::new(FetchCapability::default()));
         registry
+    }
+
+    pub fn with_search_provider(
+        mut self,
+        provider: Arc<dyn crate::capabilities::research::SearchProvider>,
+    ) -> Self {
+        self.register(Box::new(SearchCapability::new(provider)));
+        self
     }
 
     pub fn register(&mut self, handler: Box<dyn CapabilityHandler>) {

@@ -3,6 +3,16 @@ use crate::contracts::identifiers::CapabilityId;
 
 /// Constrói o manifesto canônico para a capability `research.search` (ADR-020).
 pub fn search_manifest() -> CapabilityManifest {
+    search_manifest_for_provider(false)
+}
+
+/// Constrói o manifesto canônico adaptado à natureza do provedor (Mock offline vs Live com egress).
+pub fn search_manifest_for_provider(live_network: bool) -> CapabilityManifest {
+    let mut required_permissions = vec!["capability:research.search".to_string()];
+    if live_network {
+        required_permissions.push("egress:web_search".to_string());
+    }
+
     CapabilityManifest {
         id: CapabilityId::new("research.search"),
         version: "0.1.0".to_string(),
@@ -59,12 +69,16 @@ pub fn search_manifest() -> CapabilityManifest {
                 }
             }
         }),
-        required_permissions: vec!["capability:research.search".to_string()],
-        risk_class: RiskClass::Low,
+        required_permissions,
+        risk_class: if live_network {
+            RiskClass::Medium
+        } else {
+            RiskClass::Low
+        },
         side_effects: SideEffects::None,
-        network_required: false, // Em Marco 1: Provedor Mock estritamente offline
+        network_required: live_network,
         filesystem_required: false,
-        secrets_required: false,
+        secrets_required: live_network,
     }
 }
 

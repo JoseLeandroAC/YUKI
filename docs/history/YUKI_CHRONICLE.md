@@ -386,6 +386,65 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - **Defesa Estrutural contra Indirect Prompt Injection**: Testes adversariais comprovaram que conteúdos web maliciosos contendo comandos embutidos são tratados como dado passivo e NUNCA conferem autorização ou disparam ferramentas.
 - **Suíte de Testes e Qualidade**: 20 novos testes dedicados em `tests/capability_research_mock.rs`, totalizando 180 testes unitários e de integração passando, 0 warnings no Clippy, formatação `cargo fmt` impecável e build de release validado.
 
-##### Status Operacional Atual
-> [!IMPORTANT]
-> **Acesso Real à Internet Permanece Indisponível:** O Marco 1 é estritamente uma camada de contratos, tipos, manifestos, validação de schema e provedores simulados offline. A pesquisa real na internet (Brave Search API e leitor HTTP seguro) só será implementada e ativada no Marco 2.
+##### Status Operacional do Marco 1
+> [!NOTE]
+> O Marco 1 estabeleceu com sucesso a fundação contratual e mock offline da capability de Research. A integração de busca real foi formalmente concluída no Marco 2.
+
+---
+
+#### [Event Time: 2026-10-10 | Record Creation Time: 2026-10-10]
+### Conclusão do Marco 2 da Yuki Research v1 — Adapter Brave Search Real, Segurança de Egress e Testes Offline
+
+- **Event Time**: 10 de outubro de 2026
+- **Record Creation Time**: 10 de outubro de 2026
+- **Milestone Relacionado**: Branch `feature/research-v1` (ADR-020 revisado)
+- **Classificação Formal**: **`IMPLEMENTADO — PENDENTE DE LIVE SMOKE TEST COM QUOTA REAL DO OPERADOR`**
+- **Natureza do Evento**: Implementação completa do adaptador de busca web real (`BraveSearchProvider`), diferenciação formal de permissões (`egress:web_search`), salvaguardas perimetrais, migração de integridade para a biblioteca comunitária `sha2` e suíte de 26 testes offline mais 1 teste live opt-in.
+
+##### 1. Auditoria e Reconciliação do Marco 1
+- **Contratos Reconciliados**: Reconciliação estrita com a especificação formal do ADR-020:
+  - `research.search`: `query` obrigatória, `max_results` delimitado entre 1 e 10 (default 5), enum `freshness` (`any`, `day`, `week`, `month`, `year`).
+  - `research.fetch`: `url` obrigatória, `max_length_chars` delimitado entre 500 e 30000 (default 10000).
+- **Migração de Integridade SHA-256**: Substituição da implementação local manual pelo crate oficial auditado da comunidade Rust `sha2 = "0.10"`. A assinatura pública `compute_sha256(data: &[u8]) -> String` foi preservada sem quebras de compatibilidade, acompanhada de testes com vetores de teste NIST FIPS 180-4 que comprovaram equivalência exata de integridade.
+
+##### 2. Implementação do Adaptador de Busca Real (`BraveSearchProvider`)
+- **Provedor Primário Oficial**: Integração com a API REST da Brave Search (`https://api.search.brave.com/res/v1/web/search`).
+- **Mapeamento Estruturado de Consulta**: A query do usuário e parâmetros de contexto são mapeados em parâmetros HTTP fortemente validados: `q`, `count`, `freshness`, `safesearch`, `search_lang`, `country`, `text_decorations=0`.
+- **Isolamento de Runtime Assíncrono**: Para evitar deadlocks e conflitos de nesting em chamadas síncronas/assíncronas no Tokio, o `BraveSearchProvider` isola a execução da requisição HTTP em uma thread dedicada (`std::thread::spawn`) com runtime `current_thread` próprio.
+- **Fail-Closed de Rede**: A execução de requisições de rede reais é bloqueada por padrão:
+  - `live_enabled` requer `YUKI_RESEARCH_LIVE_ENABLED=true`. Caso desativado ou ausente, a chamada falha de forma fechada antes de qualquer abertura de socket.
+  - A credencial `brave_search_api_key` é resolvida estritamente via `CredentialBroker` e seu `SecretRef`, prevenindo qualquer vazamento no console, em erros ou nos logs de auditoria.
+- **Tratamento Determinístico de Erros HTTP**: Mapeamento seguro para os tipos de erro da Yuki:
+  - HTTP 400: `InvalidRequest` (parâmetros rejeitados upstream).
+  - HTTP 401/403: `PermissionDenied` (credencial inválida, revogada ou ausente).
+  - HTTP 429: `RateLimitExceeded` (cota ou taxa esgotada no provedor).
+  - HTTP 500/502/503: `ExecutionFailed` (falha temporária do serviço Brave).
+- **Proteção Perimetral de Resposta**:
+  - Teto de payload: máximo de 512 KiB por resposta HTTP para evitar exaustão de memória.
+  - Truncamento e sanitização de dados: títulos truncados em 200 caracteres, snippets em 1000 caracteres.
+  - Higienização de links: descarte imediato de resultados com esquemas inseguros (`javascript:`, `file:`, etc.).
+
+##### 3. Modelo Diferenciado de Permissões e Segurança de Egress
+- **Separação Concreta de Permissões**:
+  - Provedor Mock: exige apenas `capability:research.search` e declara `network_required: false`.
+  - Provedor Live (Brave): exige `["capability:research.search", "egress:web_search"]`, declara `network_required: true` e `secrets_required: true`.
+- **Security Controller Governa Egress**: Sob a política fundamental padrão (`DefaultFoundationPolicy`), a permissão `egress:web_search` NÃO é concedida por padrão. Qualquer tentativa de invocar a busca real falha de forma fechada com negação de segurança, garantindo que nenhum tráfego de rede ocorra sem autorização explícita do operador.
+- **Orçamento Global de Turno (`ResearchBudget`)**:
+  - Teto de 3 pesquisas por turno conversacional. A quarta tentativa é bloqueada diretamente pelo provedor.
+  - Timeout por requisição delimitado (default 10 segundos).
+
+##### 4. Escopo Rigorosamente Preservado (Zero Fetch Real no Marco 2)
+- Em conformidade estrita com as diretrizes do Owner:
+  - **`research.fetch` permaneceu 100% Mock (`MockFetchProvider`)**: Nenhum cliente HTTP arbitrário, socket de rede ou scraper foi adicionado para leitura de páginas completas.
+  - A leitura web segura, com resolução DNS perimétrica, anti-SSRF exaustivo (IPv4, IPv6 e IPv4-mapped IPv6), pinning de socket e política de redirecionamento, permanece reservada com exclusividade para o **Marco 3**.
+
+##### 5. Bateria de Testes e Validação
+- **Suíte Dedicada (`tests/capability_research_brave.rs`)**:
+  - 26 testes offline executados contra servidor HTTP mock efêmero em `127.0.0.1` cobrindo sucesso, erros HTTP (400, 401, 403, 429, 500, 503), timeout, JSON malformado, respostas vazias, truncamento de payload, sanitização de URLs, esgotamento de orçamento, não-vazamento de chaves e ataque adversarial de prompt injection em snippets.
+  - 1 teste live opt-in (`test_brave_live_opt_in_smoke_test`) marcado com `#[ignore]` para execução deliberada pelo operador com chave e quota reais da Brave.
+- **Portões de Qualidade**:
+  - `cargo test`: 206 testes unitários e de integração verdes em todo o workspace (com 3 testes live ignorados).
+  - `cargo fmt --check`: código 100% aderente ao padrão da linguagem.
+  - `cargo clippy --all-targets -- -D warnings`: 0 warnings e 0 erros.
+  - `cargo build --release`: compilação limpa e otimizada.
+

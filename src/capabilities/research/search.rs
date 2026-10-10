@@ -1,5 +1,5 @@
 use crate::capabilities::registry::CapabilityHandler;
-use crate::capabilities::research::manifest::search_manifest;
+use crate::capabilities::research::manifest::search_manifest_for_provider;
 use crate::capabilities::research::provider::{MockSearchProvider, SearchProvider};
 use crate::contracts::capability::CapabilityManifest;
 use crate::contracts::errors::YukiError;
@@ -15,6 +15,10 @@ impl SearchCapability {
     pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
         Self { provider }
     }
+
+    pub fn provider(&self) -> &Arc<dyn SearchProvider> {
+        &self.provider
+    }
 }
 
 impl Default for SearchCapability {
@@ -25,7 +29,7 @@ impl Default for SearchCapability {
 
 impl CapabilityHandler for SearchCapability {
     fn manifest(&self) -> CapabilityManifest {
-        search_manifest()
+        search_manifest_for_provider(self.provider.is_live())
     }
 
     fn execute(&self, input: &serde_json::Value) -> Result<serde_json::Value, YukiError> {

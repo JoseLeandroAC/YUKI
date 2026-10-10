@@ -1,10 +1,10 @@
 # ADR-020 — Research v1: Governed Web Retrieval, Vendor Abstraction & Cloud-Ready Boundaries
 
-**Versão:** 1.1  
-**Status:** PROPOSED  
+**Versão:** 1.2  
+**Status:** ACCEPTED / IN IMPLEMENTATION (Marco 1 e 2 Concluídos)  
 **Domínio:** 15 — Integrations / Cognitive Capabilities / Information Retrieval  
 **Data:** 2026-10-10  
-**Decisão:** Proposed (Refinado com Diretrizes de Segurança, Proveniência e Egress do Owner)  
+**Decisão:** Accepted (Marco 1: Contratos & Mocks; Marco 2: Brave Search Adapter, Egress Security & SHA-256 via sha2)  
 
 ---
 
@@ -83,8 +83,30 @@ A Yuki adota uma arquitetura em camadas para a capability de Research, decompond
 
 ### 3.2. Abstração de Fornecedor (*Vendor Independence*)
 O runtime do Core interage exclusivamente com traits abstratos de domínio:
-- `SearchProvider`: Trait assíncrono para provedores de busca (Brave Search API como provedor primário sugerido; SearXNG para auto-hospedagem soberana; Mock para testes offline de CI).
-- `ContentFetchProvider`: Trait assíncrono para leitura de conteúdo web (leitor HTTP nativo em Rust com limpeza HTML estática como padrão seguro).
+- `SearchProvider`: Trait de domínio para provedores de busca (Brave Search API como provedor oficial do Marco 2; SearXNG para auto-hospedagem futura; Mock para testes offline e de CI).
+- `ContentFetchProvider`: Trait de domínio para leitura de conteúdo web (mantido estritamente em Mock no Marco 2; leitor HTTP nativo com anti-SSRF e pinning reservado ao Marco 3).
+
+### 3.3. Implementação Concreta do Marco 2 (Brave Search Adapter & Egress Security)
+O Marco 2 consolidou a implementação do provedor real de busca na web com as seguintes salvaguardas:
+1. **`BraveSearchProvider`**:
+   - Conexão REST oficial com `https://api.search.brave.com/res/v1/web/search`.
+   - Mapeamento determinístico de parâmetros (`q`, `count`, `freshness`, `safesearch`, `search_lang`, `country`, `text_decorations=0`).
+   - Isolamento assíncrono via `std::thread::spawn` e runtime `current_thread` do Tokio, garantindo compatibilidade com chamadas síncronas e assíncronas sem risco de runtime nesting panic.
+   - Resolução de credencial `brave_search_api_key` via `CredentialBroker` (zero exposição em logs, audit ou erros).
+2. **Diferenciação Estrita de Permissões de Saída (*Egress Perms*):**
+   - Modo Mock (Offline): requer apenas `capability:research.search` (`network_required = false`).
+   - Modo Brave (Live): requer `["capability:research.search", "egress:web_search"]` (`network_required = true`, `secrets_required = true`).
+   - Sob a política padrão (`DefaultFoundationPolicy`), a execução ao vivo é negada (*fail-closed*), exigindo concessão explícita pelo operador.
+3. **Fail-Closed por Padrão para Tráfego Externo:**
+   - Variável de ambiente `YUKI_RESEARCH_LIVE_ENABLED=false` por padrão. Qualquer tentativa de busca com a variável desativada ou ausente falha imediatamente sem emissão de tráfego de rede.
+4. **Orçamentos Rígidos de Turno (`ResearchBudget`):**
+   - Teto padrão de 3 buscas por turno conversacional.
+   - Timeout máximo de 10 segundos por requisição.
+   - Limite de payload HTTP de 512 KiB com truncamento seguro de snippets.
+   - Sanitização de URLs retornadas (descarte estrito de esquemas inseguros como `javascript:`, `file:`).
+5. **Migração Criptográfica de Integridade (`sha2` crate):**
+   - Substituição da implementação local por dependência oficial da comunidade Rust (`sha2 = "0.10"`).
+   - Testes com vetores oficiais NIST validam equivalência exata do algoritmo FIPS 180-4.
 
 ---
 
