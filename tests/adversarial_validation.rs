@@ -40,6 +40,7 @@ fn test_adv_01_unknown_capability_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.unregistered_dangerous_action".to_string(),
         arguments: serde_json::json!({}),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -58,6 +59,7 @@ fn test_adv_02_non_object_proposal_arguments_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!(["array_instead_of_object"]),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -80,6 +82,7 @@ fn test_adv_03_oversized_proposal_payload_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!({ "message": large_str }),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -106,6 +109,7 @@ fn test_adv_04_overdepth_proposal_payload_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: deep_args,
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -460,6 +464,7 @@ async fn test_adv_17_fake_provider_operation_id_cannot_gain_authority() {
             "message": "hello",
             "operation_id": "forged_operation_id_9999"
         }),
+        opaque_signature: None,
     };
 
     let mock = Arc::new(MockModelProvider::with_behavior(

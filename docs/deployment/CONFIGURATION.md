@@ -3,7 +3,7 @@
 **Documento:** `docs/deployment/CONFIGURATION.md`  
 **Status:** ATIVO  
 **Fase:** MVP-1 (Marco 1)  
-**Última Atualização:** 2026-10-03  
+**Última Atualização:** 2026-10-04  
 
 ---
 
@@ -47,11 +47,13 @@ Variáveis de Ambiente do Sistema Operacional (`YUKI_*`)
 - `database_path`: Caminho do arquivo SQLite do EventStore. Padrão: `"data/yuki.db"`.
 - `sqlite_synchronous`: Modo de sincronização do SQLite (`"NORMAL"` ou `"FULL"`). Padrão: `"NORMAL"`.
 
-### Seção `[model]` (Previsto para Marco 2)
-- `provider`: Provedor ativo (`"mock"` ou `"gemini"`). Padrão: `"mock"`.
-- `model_id`: Identificador do modelo upstream (ex: `"gemini-2.5-flash"`). Padrão: `"mock-v1"`.
+### Seção `[model]`
+- `provider`: Provedor ativo (`"mock"` ou `"gemini"`). Padrão: `"mock"`. Controlado via `YUKI_MODEL_PROVIDER`.
+- `model_id`: Identificador do modelo upstream (ex: `"gemini-3.8-flash"`). Padrão compilado: `"gemini-3.8-flash"`. Controlado via `YUKI_MODEL_ID`. Sanitiza automaticamente prefixos redundantes (`models/`) e aspas.
+- `api_version`: Versão da API REST upstream (ex: `"v1beta"`, `"v1"`). Padrão compilado: `"v1beta"`. Controlado via `YUKI_API_VERSION`.
+- `max_tool_iterations`: Número máximo de iterações do loop de continuação governada de ferramentas por turno conversacional. Previne ciclos infinitos e consumo descontrolado de tokens. Padrão compilado: `5`. Controlado via `YUKI_MAX_TOOL_ITERATIONS`.
 - `temperature`: Parâmetro de aleatoriedade de amostragem. Padrão: `0.2`.
-- `timeout_ms`: Timeout específico para a chamada HTTP do provedor. Padrão: `15000` (15s).
+- `timeout_ms`: Timeout específico para a chamada HTTP do provedor. Padrão: `30000` (30s). Controlado via `YUKI_REQUEST_TIMEOUT_MS`.
 
 ---
 
@@ -66,5 +68,7 @@ Variáveis de Ambiente do Sistema Operacional (`YUKI_*`)
 | `storage.database_path` | `YUKI_DATABASE_PATH` | `/var/lib/yuki/data/yuki.db` |
 | `storage.sqlite_synchronous` | `YUKI_SQLITE_SYNCHRONOUS` | `NORMAL` |
 | `model.provider` | `YUKI_MODEL_PROVIDER` | `gemini` |
-| `model.model_id` | `YUKI_MODEL_ID` | `gemini-2.5-flash` |
+| `model.model_id` | `YUKI_MODEL_ID` | `gemini-3.8-flash` |
+| `model.api_version` | `YUKI_API_VERSION` | `v1beta` |
+| `model.max_tool_iterations` | `YUKI_MAX_TOOL_ITERATIONS` | `5` |
 | *(Segredo Externo)* | `YUKI_GEMINI_API_KEY` | *(Material bruto do segredo)* |

@@ -71,6 +71,7 @@ impl ProposalParser {
                 "Proposta validada estruturalmente para {}",
                 candidate.capability_name
             ),
+            opaque_signature: candidate.opaque_signature,
         })
     }
 

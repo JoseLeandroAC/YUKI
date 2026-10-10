@@ -12,13 +12,73 @@ pub enum MessageRole {
     User,
     Model,
     System,
+    Tool,
 }
 
-/// Mensagem individual de histórico projetada para o modelo.
+/// Mensagem individual de histórico ou turno de ferramenta projetada para o modelo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelMessage {
-    pub role: MessageRole,
-    pub content: String,
+pub enum ModelMessage {
+    User {
+        content: String,
+    },
+    Model {
+        content: String,
+    },
+    System {
+        content: String,
+    },
+    AssistantWithToolCall {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        capability_name: String,
+        arguments: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        opaque_signature: Option<String>,
+    },
+    ToolResult {
+        capability_name: String,
+        content: serde_json::Value,
+    },
+}
+
+impl ModelMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            content: content.into(),
+        }
+    }
+
+    pub fn model(content: impl Into<String>) -> Self {
+        Self::Model {
+            content: content.into(),
+        }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::System {
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant_tool_call(
+        capability_name: impl Into<String>,
+        arguments: serde_json::Value,
+        opaque_signature: Option<String>,
+    ) -> Self {
+        Self::AssistantWithToolCall {
+            content: None,
+            capability_name: capability_name.into(),
+            arguments,
+            opaque_signature,
+        }
+    }
+
+    pub fn tool_result(capability_name: impl Into<String>, content: serde_json::Value) -> Self {
+        Self::ToolResult {
+            capability_name: capability_name.into(),
+            content,
+        }
+    }
 }
 
 /// Declaração tipada de capacidade registrada para projeção em esquemas de chamadas de ferramentas.
@@ -56,10 +116,7 @@ impl ModelRequest {
         let p = prompt.into();
         Self {
             request_id: ModelRequestId::new(),
-            messages: vec![ModelMessage {
-                role: MessageRole::User,
-                content: p.clone(),
-            }],
+            messages: vec![ModelMessage::user(p.clone())],
             prompt: p,
             context_id,
             purpose: purpose.into(),
@@ -87,6 +144,30 @@ impl ModelRequest {
 pub struct RawProposalCandidate {
     pub capability_name: String,
     pub arguments: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub opaque_signature: Option<String>,
+}
+
+impl RawProposalCandidate {
+    pub fn new(capability_name: impl Into<String>, arguments: serde_json::Value) -> Self {
+        Self {
+            capability_name: capability_name.into(),
+            arguments,
+            opaque_signature: None,
+        }
+    }
+
+    pub fn with_signature(
+        capability_name: impl Into<String>,
+        arguments: serde_json::Value,
+        opaque_signature: Option<String>,
+    ) -> Self {
+        Self {
+            capability_name: capability_name.into(),
+            arguments,
+            opaque_signature,
+        }
+    }
 }
 
 /// Proposta canônica de invocação de capacidade validada sintaticamente pelo `ProposalParser`.
@@ -106,6 +187,8 @@ pub struct CapabilityProposal {
     /// Este campo NÃO contém tokens de 'thought' ou cadeia oculta de raciocínio (hidden CoT)
     /// do provedor externo. Ele documenta a validação sintática e procedência para auditoria.
     pub reasoning: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub opaque_signature: Option<String>,
 }
 
 impl CapabilityProposal {
@@ -121,6 +204,24 @@ impl CapabilityProposal {
             capability_id,
             parameters,
             reasoning: reasoning.into(),
+            opaque_signature: None,
+        }
+    }
+
+    pub fn with_signature(
+        capability_id: CapabilityId,
+        parameters: serde_json::Value,
+        reasoning: impl Into<String>,
+        opaque_signature: Option<String>,
+    ) -> Self {
+        Self {
+            proposal_id: ProposalId::new(),
+            model_request_id: ModelRequestId::new(),
+            provider_response_id: None,
+            capability_id,
+            parameters,
+            reasoning: reasoning.into(),
+            opaque_signature,
         }
     }
 }

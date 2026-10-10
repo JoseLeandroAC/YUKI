@@ -1,0 +1,363 @@
+# CRÔNICAS DA YUKI
+## Registro Histórico, Narrativo e Factual da Criação e Evolução da Yuki
+
+---
+
+### Protocolo Histórico e Princípios
+
+Este documento é o registro perene da criação e maturação da Yuki. Ele não é um simples changelog técnico ou sumário de commits; seu propósito é documentar a jornada real de engenharia: as hipóteses, os avanços, as hesitações, as decisões de design, os erros cometidos, as correções arquiteturais e as lições aprendidas.
+
+#### Diretrizes Fundamentais do Registro:
+1. **Preservar a História; Corrigir Fatos com Transparência**:
+   - A Crônica não adota uma imutabilidade cega que congele erros factuais. Se uma entrada contiver imprecisões ou omissões, os fatos devem ser corrigidos de forma aberta e fundamentada, registrando a correção e preservando a proveniência e as evidências. O objetivo é a integridade histórica, jamais o acobertamento ou a falsificação retrospectiva.
+2. **Distinção Fundamental de Tempo**:
+   - `Event Time` (Momento do Evento): Quando o fato histórico efetivamente ocorreu no mundo real ou no repositório.
+   - `Record Creation Time` (Momento do Registro): Quando a entrada foi redigida e formalizada neste documento.
+   - A ordem em que as entradas são escritas não presume nem dita a ordem em que os acontecimentos ocorreram. A Crônica permite e incentiva a reconstrução retrospectiva contínua a partir de evidências sólidas.
+3. **Reconstrução Retrospectiva Baseada em Evidências**:
+   - Nenhuma data ou alegação deve ser inventada. A gênese e as fases iniciais da Yuki serão reconstruídas rigorosamente em conjunto com o Owner e o Architecture Review a partir das fontes primárias: conversas originais do projeto, histórico de commits do Git, ADRs, tags, relatórios de auditoria, arquivos do sistema operacional e registros formais do Owner.
+4. **Separação de Evidências**:
+   - *Fatos tecnicamente verificados*: Registros ancorados em hashes de Git, branches, tags imutáveis e verificações de compilador/testes.
+   - *Horários fornecidos pelo Owner*: Timestamps humanos indicados explicitamente como aproximados.
+   - *Interpretações narrativas e contextuais*: Intenções, hipóteses e reflexões documentadas com rigor e clareza.
+
+---
+
+### Quadro Estrutural de Fases Históricas
+
+Para fins de organização e futura reconstrução retrospectiva, a trajetória da Yuki estrutura-se nas seguintes fases conceituais:
+
+1. **Origem**:
+   O nascimento da ideia da Yuki e a definição inicial de quem e do que ela deveria se tornar.
+2. **Visão**:
+   A definição do propósito soberano — *“Yuki for user, not user for Yuki”* —, a inspiração em assistentes pessoais autônomos de referência (como JARVIS/FRIDAY), as capacidades desejadas (memória persistente, voz, ferramentas, agentes, segurança, automação residencial e de dispositivos, pesquisa, desenvolvimento controlado) e os limites éticos do sistema.
+3. **Arquitetura**:
+   A transformação da visão em arquitetura técnica modular e princípios constitucionais: Capability Registry, Security Controller, Execution Engine, Verification Engine, Audit durável, Evolution Manager, documentação formal e ADRs.
+4. **Foundation**:
+   A consolidação do primeiro baseline arquitetural e executável congelado (`v0.1.0-foundation`, commit `654c1812f40d6c903e67fd6f86f4b83e06e14b8c`).
+5. **MVP-1**:
+   A implementação controlada dos Marcos 1 a 4 (Core Async, Gateway de Modelos, Execução Real com Verificação Dinâmica e Persistência Durável SQLite com Isolamento OCI), reconciliações de branch, auditorias de segurança e o congelamento do baseline `v0.2.0-mvp1` (commit `6a9d07010719b18bb10a60a082606be54b813f66`).
+6. **04/10/2026 — Yuki Fala Pela Primeira Vez**:
+   A primeira interação manual conhecida com o runtime real compilado do MVP-1 executando no notebook do Owner.
+7. **Pós-MVP-1**:
+   A primeira lacuna de integração descoberta em uso real, a investigação arquitetural do bootstrap, o isolamento seguro de credenciais e a primeira correção pós-release (`feature/post-mvp1-model-runtime-wiring`).
+
+---
+
+### Entradas Históricas
+
+---
+
+#### [Fases 1 a 5 — Em Reconstrução Retrospectiva]
+*A reconstrução detalhada das fases de Origem, Visão, Arquitetura, Foundation e MVP-1 será realizada em momento oportuno junto ao Owner e Architecture Review, recorrendo aos registros primários e transcripts da conversa fundacional.*
+
+---
+
+#### [Event Time: 2026-10-04 ~12:09 | Record Creation Time: 2026-10-04]
+### 04/10/2026 — Yuki Fala Pela Primeira Vez (Primeira Execução Manual do Runtime Real)
+
+- **Event Time**: 04 de outubro de 2026, aproximadamente 12:09 (America/Sao_Paulo) — *Horário aproximado fornecido pelo Owner*
+- **Milestone Relacionado**: Pós-congelamento do MVP-1 (`v0.2.0-mvp1`, commit `6a9d07010719b18bb10a60a082606be54b813f66`)
+- **Contexto Operacional**: Teste manual real executado no notebook de desenvolvimento do Owner.
+- **Natureza do Evento**: Este marco NÃO representa o nascimento conceitual da Yuki nem o início absoluto de sua história (já extensamente consolidada nas fases anteriores). Representa, com exatidão factual, **a primeira mensagem conhecida da Yuki executando como runtime real durante teste manual do MVP-1**.
+
+##### O que se pretendia
+Após a conclusão dos Marcos 1 a 4 e a emissão do baseline imutável `v0.2.0-mvp1`, o Owner realizou o primeiro teste prático fora dos scripts automatizados de CI: compilar o binário em release, inicializar a persistência durável SQLite localmente, validar a execução das capabilities fundamentais (`system.echo`, `system.time`) e conectar a chave da API do Google Gemini para uma interação real com LLM.
+
+##### O que aconteceu
+1. O runtime iniciou com sucesso. O subsistema SQLite abriu o banco e reportou integridade durável (`Persistent Audit (SQLite): OK`).
+2. A capability `system.echo` executou com sucesso sob autorização do Security Controller.
+3. A capability `system.time` executou com sucesso, reportando o horário local e confirmando a estratégia dinâmica de verificação.
+4. O Owner configurou temporariamente a variável `YUKI_GEMINI_API_KEY`.
+5. O comando `yuki health` foi executado e reportou:
+   ```text
+   External Model Provider: CONFIGURED (Gemini available)
+   ```
+6. O Owner submeteu um prompt conversacional esperando a resposta do modelo Google Gemini. A resposta, contudo, exibiu o texto determinístico fixo do `MockModelProvider`.
+
+##### O Erro e a Investigação Arquitetural
+A investigação do código-fonte revelou uma desconexão no bootstrap da aplicação:
+- No Marco 2, o `GeminiProviderAdapter`, o `ModelRouter`, as abstrações seguras de credenciais (`SecretRef`, `SecretMaterial`, `EnvSecretStore`) e os parsers haviam sido completamente implementados e validados em testes unitários e de segurança.
+- No entanto, no ponto de entrada real da CLI (`src/main.rs`), a instância de `YukiCore` continuava sendo gerada exclusivamente via `YukiCore::new()`, mantendo hardcoded o `MockModelProvider`.
+- O método de injeção `core.with_model_provider(...)` existia no domínio do Core, mas a CLI nunca o invocava com base nas variáveis de ambiente.
+- A linha em `yuki health` apenas checava a presença de `std::env::var("YUKI_GEMINI_API_KEY").is_ok()`, emitindo uma mensagem otimista e tecnicamente enganosa: a credencial estava presente no ambiente, mas o provedor sequer havia sido instanciado pelo runtime.
+- A suíte automatizada possuía 120 testes verdes porque os testes unitários utilizavam o Mock intencionalmente (para garantir determinismo, reprodutibilidade e independência de rede), enquanto o teste live ignorado (`model_gateway_live.rs`) chamava o adapter diretamente, sem passar pela CLI ou pelo `YukiCore`. Não havia teste de integração cobrindo o bootstrap de produção.
+
+##### A Decisão e a Solução
+O Owner e o Architecture Review determinaram que a falha não seria contornada:
+1. O baseline `v0.2.0-mvp1` foi mantido 100% congelado e inalterado.
+2. Criou-se a branch pós-release `feature/post-mvp1-model-runtime-wiring`.
+3. Implementou-se a resolução estrita e desacoplada do provedor (`resolve_model_provider_from_env`), garantindo que o bootstrap nunca manipule `SecretMaterial`, transferindo apenas o `SecretRef` e o broker.
+4. Removeu-se a mensagem falsa de `health`, tornando o diagnóstico 100% offline, honesto e baseado nos metadados e estado local do provedor ativo.
+5. Criou-se a suíte `tests/model_provider_wiring.rs` para garantir que o bootstrap do Core e a injeção do provedor estejam permanentemente cobertos por testes de integração.
+
+##### Lição de Engenharia
+> *«Um componente implementado com perfeição em sua unidade e coberto por testes isolados não tem valor operacional se não estiver conectado ao runtime real. O teste de integração do bootstrap de entrada é um portão de segurança indispensável.»*
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Incidente Operacional de Manipulação de Credencial e Nova Política de Autenticação Segura
+
+- **Event Time**: 04 de outubro de 2026
+- **Contexto Operacional**: Operação de push da branch de correção pós-MVP-1 para o repositório remoto.
+- **Natureza do Evento**: Incidente de segurança operacional em ambiente de desenvolvimento (sanitizado).
+
+##### O Incidente (Descrição Sanitizada)
+Durante a revisão arquitetural independente dos procedimentos de push da branch `feature/post-mvp1-model-runtime-wiring`, identificou-se que um token de acesso ao GitHub havia sido manipulado em texto claro dentro de scripts temporários e comandos interpolados (`https://<TOKEN>@github.com/...`) no transcript operacional da sessão.
+
+Embora o token nunca tenha sido comitado em arquivos do repositório, gravado em `.env`, adicionado a `git config` ou mantido no histórico de commits, a interpolação direta de material secreto em linhas de comando, URLs de Git ou scripts intermediários representa um desvio das melhores práticas de segurança e gerou risco de exposição acidental no transcript.
+
+A não-conformidade foi prontamente identificada pelo Architecture Review, que interrompeu o fluxo e exigiu a formalização de contramedidas definitivas.
+
+##### Nova Regra Operacional e Política Permanente
+A partir deste incidente, fica estabelecido com caráter mandatório:
+1. **Vedação Absoluta de Interpolação de Segredos**:
+   - É estritamente proibido construir ou executar comandos na forma conceitual `https://<TOKEN>@github...` com material secreto interpolado.
+   - Segredos, chaves de API, PATs ou tokens NUNCA devem ser colocados diretamente em:
+     - Linhas de comando ou argumentos de processos;
+     - Scripts temporários em disco (mesmo em diretórios temporários transitórios);
+     - URLs de remotes do Git;
+     - Prompts ou mensagens trocadas;
+     - Relatórios, crônicas ou documentação;
+     - Logs de execução ou variáveis visíveis em transcripts.
+2. **Uso de Mecanismos Apropriados de Credenciais**:
+   - As autenticações devem ser realizadas exclusivamente via gerenciadores seguros de credenciais do ambiente (ex.: Git Credential Manager nativo do host, agentes SSH ou brokers autenticados fora do escopo do transcript).
+3. **Diretriz de Interrupção Segura (*Stop and Inquire*)**:
+   - Se um mecanismo de autenticação seguro e não expositivo não estiver disponível no ambiente para a realização de uma operação remota, o operador deve **PARAR imediatamente** e solicitar a intervenção direta do Owner, jamais tentando criar scripts de contorno que manipulem segredos em claro.
+
+##### Lição de Segurança
+> *«Secrets must never be embedded directly into command URLs, temporary scripts, or preserved transcripts. A segurança de credenciais não se aplica apenas ao código do produto, mas a toda a cadeia de ferramentas operacionais de engenharia.»*
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Primeira Requisição Live ao Gemini — Provedor Atingido, Rejeição de Contrato de Ferramentas (additionalProperties)
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Primeiro teste real executado pelo Owner conectando o runtime compilado à API do Google Gemini com credencial real.
+- **Classificação Histórica**: **FIRST VERIFIED LIVE GEMINI REQUEST THROUGH YUKI — PROVIDER REACHED, CONTRACT REJECTED**.
+  *Nota Histórica Estrita*: Este evento NÃO constitui o "First Verified Live Gemini Turn", uma vez que o modelo externo rejeitou a requisição no gateway antes de gerar uma resposta conversacional. Representa, porém, uma evidência empírica de extremo valor: a comprovação de que o wiring local funcionou perfeitamente e alcançou o endpoint remoto do Gemini.
+
+##### O que se pretendia
+Com a resolução de bootstrap concluída e o comando `yuki health` reportando com fidelidade e sem rede:
+```text
+Status: OK
+Model Subsystem (GoogleGemini): OK
+Selected Model Provider: GoogleGemini (model: gemini-2.5-flash, version: v1beta)
+Model Provider Health: OK
+```
+O Owner disparou a primeira requisição conversacional real contra a API do Google Gemini através da CLI da Yuki, com a variável de sessão `YUKI_GEMINI_API_KEY` devidamente configurada.
+
+##### O que aconteceu
+1. O runtime não fez fallback para o Mock.
+2. A requisição HTTP real foi disparada com sucesso contra o endpoint `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`.
+3. O endpoint da Google retornou HTTP 400 (Bad Request) com o erro:
+   ```text
+   Model error: Requisição inválida para o provedor:
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[0].parameters': Cannot find field.
+
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[1].parameters': Cannot find field.
+
+   Invalid JSON payload received.
+   Unknown name "additionalProperties" at 'tools[0].function_declarations[2].parameters': Cannot find field.
+   ```
+4. A execução encerrou de forma determinística com código 1 (*fail-closed*), reportando o erro tipado ao usuário sem corromper a persistência nem mascarar o resultado.
+
+##### A Investigação Arquitetural e a Causa Raiz
+A investigação técnica revelou o descompasso na fronteira do provedor:
+- Os manifestos canônicos de entrada das capabilities da Yuki (`system.echo`, `system.time`, `system.info`) utilizam JSON Schema padrão com a restrição de segurança `"additionalProperties": false`. Essa propriedade é utilizada pela validação interna e confiável da Yuki (`validate_capability_input`) para assegurar que propriedades injetadas ou inesperadas sejam rejeitadas antes da autorização e execução de capabilities.
+- No entanto, a representação de esquema de parâmetros de ferramentas da API Google Gemini (`tools[].function_declarations[].parameters`) mapeia internamente para a mensagem protobuf `google.ai.generativelanguage.v1beta.Schema`.
+- O subconjunto OpenAPI 3.0 suportado pelo parser protobuf do Gemini v1beta não define o campo `additionalProperties`. Ao encontrar esse campo em cada uma das três capacidades projetadas, o deserializador do Google rejeitou a totalidade do payload.
+
+##### A Decisão Arquitetural e a Solução
+O princípio constitucional fundamental foi reafirmado:
+> *«O manifesto canônico de capacidades da Yuki JAMAIS deve ser enfraquecido ou remodelado apenas para se amoldar a restrições sintáticas de um provedor LLM específico. Restrições de provedor pertencem estritamente à fronteira do provedor (Yuki Schema != Gemini Schema).»*
+
+1. **Preservação Integral dos Manifestos Canônicos**: Os manifestos de `system.echo`, `system.time` e `system.info` mantêm `"additionalProperties": false` intacto.
+2. **Preservação da Validação Estrita na Execução**: A validação prévia à autorização (`validate_capability_input`) continua executando estritamente contra o esquema canônico da Yuki. Propostas que contenham propriedades inesperadas continuam sendo barradas (*Model-visible schema != Execution validation schema*).
+3. **Projeção de Esquema Específica do Gemini (`project_schema_to_gemini`)**: Implementou-se um tradutor de fronteira no `GeminiProviderAdapter` que normaliza recursivamente os esquemas das capacidades antes da serialização para a API:
+   - Omite palavras-chave incompatíveis com o protobuf do Gemini (`additionalProperties`, `$schema`, etc.);
+   - Recursa em objetos aninhados, arrays (`items`) e uniões (`anyOf`);
+   - Opera em modo *fail-closed* diante de construções incompatíveis (`not`, `patternProperties`);
+   - Garante a presença de `properties: {}` para objetos vazios.
+4. **Cobertura Automatizada de Regressão**: Criou-se a suíte `tests/gemini_schema_projection.rs` demonstrando que o payload corrigido elimina as 3 ocorrências de `additionalProperties` sem que qualquer manifesto interno seja mutado.
+
+##### Lição de Engenharia
+> *«Testes de componentes com mocks e validações locais de seleção de provedor comprovam a integridade interna da arquitetura, mas não atestam a compatibilidade estrita do contrato com a API remota. A fronteira com o mundo real revela verdades que o ambiente isolado não pode simular. Preserve a integridade do seu domínio; adapte apenas a fronteira.»*
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Segundo Teste Live ao Gemini — Eliminação do Erro de Schema Confirmada, Detecção de HTTP 404 e Falha de Observabilidade no Gateway
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Segundo teste real executado pelo Owner conectando o runtime compilado (`HEAD b60fdd923000aea9af6f09b99ef6648345d99466`) à API do Google Gemini.
+- **Classificação Histórica**: **SECOND LIVE GEMINI TEST — SCHEMA REJECTION ELIMINATED, UPSTREAM HTTP 404 DETECTED & GATEWAY OBSERVABILITY GAP RESOLVED**.
+  *Nota Histórica Estrita*: Este evento NÃO constitui o "First Verified Live Gemini Turn", pois nenhuma resposta de modelo foi produzida ainda. Trata-se, contudo, de mais um marco empírico de progresso real na fronteira entre a Yuki e a infraestrutura externa.
+
+##### O que se pretendia
+Após a projeção dos esquemas de capacidade para o subconjunto OpenAPI do Gemini (eliminando `additionalProperties`), o Owner recompilou a branch e executou novamente o comando conversacional real da Yuki.
+
+##### O que aconteceu (Fatos Empíricos)
+1. **Confirmação Empírica da Eliminação de `additionalProperties`**: O erro anterior de rejeição de schema (`Unknown name "additionalProperties"`) **NÃO** voltou a ocorrer. O tradutor de fronteira cumpriu seu papel com precisão.
+2. **Novo Ponto de Parada**: A requisição avançou no pipeline do Google Gemini, mas retornou `HTTP 404`.
+3. **Lacuna de Observabilidade Revelada no Gateway**: A mensagem exibida no terminal foi:
+   ```text
+   Model error: Erro interno no gateway de modelos: Status HTTP inesperado: 404
+   ```
+   O runtime classificou o 404 como um erro genérico interno (`ModelError::Internal`), descartando completamente o corpo de resposta JSON retornado pelo Google Gemini, impossibilitando diagnosticar de imediato o motivo exato apontado pelo upstream.
+
+##### A Investigação Arquitetural e a Causa Raiz
+A investigação técnica revelou duas causas entrelaçadas:
+1. **Descarte de Mensagens de Diagnóstico em Status Não Mapeados**:
+   No método `execute_single_turn` de `src/models/gemini.rs`, o bloco de tratamento de falhas HTTP avaliava status 400, 401, 403, 429 e 5xx. Para qualquer outro código (incluindo 404), o fluxo caía no branch coringa `_ => Err(ModelError::Internal(format!("Status HTTP inesperado: {}", status_code)))`. A variável `error_msg` contendo o payload detalhado do Google (`{"error": {"code": 404, "message": "...", "status": "NOT_FOUND"}}`) era simplesmente descartada.
+2. **Vulnerabilidade a Prefixos Redundantes e Fragilidade de Deserialização**:
+   - A construção do endpoint concatenava diretamente `self.config.model_id` em `format!("{}/v1beta/models/{}:generateContent", ...)`. Se o operador fornecesse um identificador com o prefixo `models/` (padrão comum em SDKs e documentações do Google, ex: `models/gemini-2.5-flash`), a URL resultante tornava-se `.../models/models/gemini-2.5-flash:generateContent`, gerando erro 404 de recurso não encontrado.
+   - A estrutura interna `GeminiErrorDetail` definia `code: Option<u16>`, que falhava a desserialização JSON caso o Google retornasse o código de erro como string (ex: `"invalid_request"` ou `"not_found"`), provocando fallback para a string crua `"HTTP 404"`.
+
+##### A Decisão Arquitetural e a Solução
+1. **Preservação Integral da Observabilidade Sanitizada**:
+   - Implementou-se `parse_gemini_error_message`, que extrai `status`, `code` (seja número ou texto) e `message` da resposta do Gemini, preservando diagnósticos reais mesmo para respostas não-JSON (gateways intermediários/proxies) até um teto seguro.
+   - Implementou-se `scrub_potential_secrets`, garantindo que nenhum fragmento acidental de token de autenticação possa vazar nas mensagens de erro.
+   - O status `404` foi mapeado explicitamente para `ModelError::InvalidRequest(format!("Recurso ou modelo não encontrado no provedor (HTTP 404): {}", error_msg))`.
+   - O caso padrão coringa `_` passou a preservar o diagnóstico completo: `ModelError::Internal(format!("Status HTTP inesperado {}: {}", status_code, error_msg))`.
+2. **Normalização e Sanitização do Identificador de Modelo e Versão da API**:
+   - Criaram-se as funções `sanitize_gemini_model_id` e `sanitize_gemini_api_version`, e `build_gemini_endpoint`. Qualquer prefixo `models/`, aspas ou barras espúrias em `YUKI_MODEL_ID` são normalizados deterministicamente.
+   - Adicionou-se o parâmetro configurável `api_version` (padrão `"v1beta"`), permitindo override via `YUKI_API_VERSION`.
+3. **Cobertura Automatizada com Servidor Mock Local**:
+   - Criou-se a suíte `tests/gemini_endpoint_observability.rs` (10 testes), com servidores TCP locais mockados em loopback provando que respostas 404 reais preservam o diagnóstico textual exato do upstream sem cair em erros genéricos opacos.
+
+##### Lição de Engenharia
+> *«Em integrações com serviços externos, a observabilidade não pode ser tratada como detalhe secundário. Descartar o corpo de um erro HTTP transforma um diagnóstico claro do provedor em um enigma opaco para o operador. Nunca silencie o upstream; sanitize os segredos, preserve a mensagem e exponha o erro com tipagem rigorosa.»*
+
+##### Correção Retrospectiva e Esclarecimento Factual da Causa do 404
+Após a implementação da observabilidade aprimorada no commit `75f9f683d7d6069f7ce2c845c8bb6073dd023919`, o Owner executou novamente o runtime apontando para o modelo padrão da época (`gemini-2.5-flash`). A nova camada de diagnóstico capturou e exibiu com fidelidade a mensagem real do Google:
+```text
+HTTP 404: NOT_FOUND: This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements. We recommend you to use the Interactions API.
+```
+
+Fatos empíricos confirmados:
+1. A observabilidade do gateway funcionou perfeitamente, demonstrando de pronto sua utilidade.
+2. A hipótese preliminar de duplicação sintática `models/models/...` foi refutada como causa daquele erro 404 específico (embora a sanitização permaneça no código como defesa arquitetural válida contra entradas malformadas).
+3. A causa real e factual do 404 foi a indisponibilidade/depreciação de `gemini-2.5-flash` para novos usuários pela infraestrutura da Google, exigindo a atualização da Yuki para `gemini-3.8-flash`.
+
+---
+
+#### [Event Time: 2026-10-04 | Record Creation Time: 2026-10-04]
+### Terceiro Teste Live ao Gemini — Primeira Execução de Capability Dirigida por Modelo em Produção e Descoberta do Loop de Continuação de Ferramentas
+
+- **Event Time**: 04 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`)
+- **Contexto Operacional**: Terceiro teste real executado pelo Owner utilizando o modelo `gemini-3.8-flash` via CLI da Yuki.
+- **Prompt Submetido**: *"Yuki, por favor se apresente e diga qual e o seu proposito fundamental em uma frase"*
+- **Classificação Histórica**: **FIRST VERIFIED LIVE GEMINI-DRIVEN CAPABILITY EXECUTION THROUGH YUKI**.  
+  *Distinção Histórica Estrita*: Este evento comprova empiricamente a primeira cadeia completa em que um modelo LLM externo remoto propôs autonomamente uma capability que foi autorizada pelo Security Controller, executada pelo Execution Engine, verificada pelo Verification Engine e auditada pelo Audit Subsystem. NÃO é classificado como "Primeiro Turno Conversacional Completo do Gemini", pois o runtime retornou a saída bruta da ferramenta em vez de sintetizar uma resposta conversacional final em linguagem natural ao operador.
+
+##### O que se pretendia
+Com a atualização para o modelo `gemini-3.8-flash` e a observabilidade ativa, o Owner submeteu um prompt natural solicitando a apresentação da Yuki e seu propósito fundamental.
+
+##### O que aconteceu (Fatos Empíricos)
+1. **Conexão e Compreensão do Modelo**: O Google Gemini recebeu o prompt e os esquemas sanitizados das ferramentas (`system.echo`, `system.time`, `system.info`).
+2. **Proposta de Capability Autônoma**: O modelo deduziu que para responder adequadamente sobre si mesma e seu ambiente precisava consultar o contexto da máquina, emitindo autonomamente uma proposta de chamada para `system.info` com argumentos `{}`.
+3. **Cadeia Constitucional de Execução e Verificação**:
+   - `Model Output != Command`: A proposta do modelo foi tratada como mera intenção não-confiável.
+   - O Security Controller avaliou a proposta sob as políticas ativas e autorizou formalmente a execução de `system.info`.
+   - O Execution Engine despachou e executou a capacidade no ambiente local.
+   - O Verification Engine atestou a integridade e conformidade dos dados produzidos.
+   - O Audit Subsystem persistiu o registro durável do ciclo de execução.
+4. **Desfecho Observado**: O runtime retornou ao terminal do operador o JSON bruto verificado:
+   ```json
+   {"arch":"x86_64","os":"windows","yuki_version":"0.1.0"}
+   ```
+5. **Lacuna Arquitetural Descoberta**: O runtime encerrou o turno imediatamente após a execução da ferramenta. A Yuki não possuía um loop multi-turn de continuação para devolver o resultado da ferramenta (`Tool Result`) ao modelo e obter a resposta em linguagem natural esperada pelo usuário.
+
+##### A Investigação Arquitetural e a Solução (Governed Bounded Tool Continuation Loop)
+A análise arquitetural identificou que o método `YukiCore::process_input_async` operava sob um paradigma unistep (single-turn). Ao executar uma capability proposta pelo modelo, o resultado da execução era considerado a resposta terminal do turno.
+
+Em uma arquitetura de assistente autônomo governado, a execução de ferramenta é um passo intermediário de percepção e ação:
+1. **Invariantes Constitucionais Reafirmadas**:
+   - `Tool Result = Data` (Dados externos não confiáveis, jamais instrução ou autoridade).
+   - O modelo não adquire "controle de fluxo" ao receber o resultado da ferramenta.
+   - Se o modelo propor uma nova ferramenta após receber o resultado anterior, essa nova proposta DEVE passar por nova e independente avaliação do `SecurityController` (*Every tool execution requires fresh authorization*).
+2. **Limite Rígido e Determinístico de Iterações (*Fail-Closed Boundary*)**:
+   - Implementou-se `max_tool_iterations` (padrão `5`, configurável via `YUKI_MAX_TOOL_ITERATIONS` e `config/yuki.toml`).
+   - Se o modelo entrar em recursão infinita ou ultrapassar o orçamento de iterações, o loop aborta imediatamente com erro explícito tipado (`ModelError::InvalidRequest`), sem execução silenciosa.
+3. **Conformidade com o Protocolo Gemini 3 Multi-Turn**:
+   - No protocolo Google Gemini (em especial na família Gemini 3), chamadas de função com `thoughtSignature` exigem a retransmissão obrigatória da assinatura no histórico conversacional; a omissão gera erro HTTP 400.
+   - O resultado da ferramenta é entregue no papel `user` com a estrutura `functionResponse`, encapsulando os dados em `{"output": ...}` conforme a especificação protobuf `google.protobuf.Struct`.
+4. **Atualização do Modelo Padrão**:
+   - O modelo padrão da Yuki foi atualizado em código e documentação para `gemini-3.8-flash`.
+5. **Cobertura de Testes**:
+   - Implementou-se a suíte `tests/model_tool_continuation.rs` (9 testes) cobrindo todos os cenários: continuação unistep, zero ferramentas (texto direto), multistep sequencial (ex.: `system.info` seguido de `system.time`), esgotamento do orçamento de iterações com encerramento fail-closed, bloqueio pelo Security Controller no meio do loop, e integridade da serialização wire com servidor mock local.
+
+##### Lição de Engenharia
+> *«A ferramenta executada produz dados para alimentar o raciocínio do modelo, não o encerramento da conversa. Porém, ao reintroduzir os dados de uma ferramenta no diálogo, a integridade da governança deve ser mantida: o modelo nunca adquire autorização automática para a próxima ação. Cada proposta subsequente recomeça o ciclo constitucional de autorização, execução, verificação e auditoria.»*
+
+---
+
+#### [Event Time: 2026-10-04 ~17:22 | Record Creation Time: 2026-10-10]
+### Quarto Teste Live ao Gemini — Primeiro Turno Conversacional Completo e Bateria de Validação de Capacidades
+
+- **Event Time**: 04 de outubro de 2026, aproximadamente 17:22 (America/Sao_Paulo) / 20:22 UTC — *Horário evidenciado pelos registros de auditoria persistente*
+- **Record Creation Time**: 10 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`, commit `accc8320872c1b179eb4e9a82fa49e1e82bd35ad`)
+- **Contexto Operacional**: Validação prática conduzida pelo Owner após a implementação do *Governed Bounded Tool Continuation Loop* e atualização para o modelo `gemini-3.8-flash`.
+
+##### 1. Teste A — Primeiro Turno Conversacional Completo
+- **Entrada Submetida**:
+  `Yuki, por favor se apresente e diga qual e o seu proposito fundamental em uma frase.`
+- **Resposta Produzida**:
+  > *«Olá, eu sou a Yuki, uma assistente de inteligência artificial cujo propósito fundamental é auxiliar você de forma clara, segura e eficiente na resolução de dúvidas e execução de suas tarefas.»*
+- **Classificação Histórica Formal**: **`FIRST VERIFIED SUCCESSFUL LIVE GEMINI CONVERSATIONAL TURN THROUGH YUKI`**.
+- **Evidência Técnica Verificada**:
+  A auditoria persistente em SQLite (`data/yuki.db`, eventos sequência 64 a 74) atesta a mecânica do turno:
+  1. O prompt foi recebido e o contexto foi construído (`seq 64-65`).
+  2. Na iteração 0, o Gemini 3.8 propôs autonomamente a capability `system.info` (`seq 66-67`).
+  3. O Security Controller autorizou explicitamente a operação sob classe de risco `Low` (`seq 68-69`).
+  4. O Execution Engine despachou `system.info` (`seq 70`), o efeito foi observado (`seq 71`) e atestado como `VerifiedSuccess` pelo Verification Engine (`seq 72`).
+  5. O resultado verificado foi encapsulado como dado e reintroduzido no modelo como `functionResponse` na iteração 1 (`seq 73`).
+  6. O Gemini sintetizou a resposta conversacional final em linguagem natural, encerrando o turno com sucesso (`seq 74`, status `DirectText`, 1 iteração de ferramenta).
+
+##### 2. Teste B — Tempo, Calendário e Análise Forense de Execução de Ferramentas
+- **Entrada Submetida**:
+  `Yuki, que horas são agora e que dia do ano?`
+- **Resposta Produzida**:
+  A Yuki respondeu fornecendo o horário UTC, a data de 4 de outubro de 2026, o dia 277 do ano e contextualizou o fuso horário de Brasília.
+- **Investigação Forense e Evidência Factual**:
+  Ao analisar os registros do banco de auditoria (`data/yuki.db`), identificou-se categoricamente:
+  - No ciclo correspondente (eventos sequência 75 a 85), o modelo propôs formalmente a capability `system.time` (`seq 78`, `op_1a10896b76d_9`).
+  - O Security Controller concedeu autorização (`seq 80`), a capability executou com sucesso (`seq 81-82`) e foi verificada pelo Verification Engine (`seq 83`).
+  - O resultado de `system.time` foi entregue na iteração 1 (`seq 84`), fornecendo a base fática necessária para que o modelo respondesse com precisão sobre o dia 277 e o horário exato.
+  - Em contraste, em uma execução subsequente com pequena variação de prompt (eventos sequência 86 a 89), o modelo não propôs ferramentas (`has_proposal: false`), respondendo exclusivamente a partir de contexto paramétrico. A Crônica registra a evidência real: houve chamada e verificação efetiva de `system.time` no turno que contextualizou o dia do ano.
+
+##### 3. Teste C — Conhecimento Geral Paramétrico
+- **Entrada Submetida**: Consulta sobre a primeira viagem humana à Lua e o programa Apollo.
+- **Resposta Produzida**: A Yuki forneceu detalhes históricos acurados sobre a missão Apollo 11 e as seis missões que pousaram astronautas na Lua.
+- **Classificação**: Resposta puramente baseada no conhecimento pré-treinado (paramétrico) do LLM, sem acionamento de capabilities e sem atribuição indevida a pesquisa web.
+
+##### 4. Teste D — Reconhecimento Explícito de Limitação de Capacidades
+- **Entrada Submetida**:
+  `Yuki, Como está as votações do Brasil hoje?`
+- **Resposta Produzida**: A Yuki informou com transparência que não possui acesso a informações em tempo real e sugeriu ao operador a consulta a fontes externas e veículos oficiais.
+- **Classificação**: Limitação atual e legítima de capacidades (*Capability Boundary*), constituindo comportamento íntegro e seguro da IA, e NÃO uma falha do Model Gateway.
+
+##### 5. Teste E — Pesquisa Complexa: Observabilidade de Timeout e Limites de Cota
+- **Entrada Submetida**: Consulta complexa demandando pesquisas, estatísticas e tendências da eleição presidencial brasileira de 2026.
+- **Resultados Observados**:
+  1. *Primeira tentativa*: `Model error: Timeout: 30s` — O processamento upstream do Gemini excedeu a janela máxima de 30 segundos configurada para uma chamada HTTP individual.
+  2. *Segunda tentativa*: `RESOURCE_EXHAUSTED` — O provedor Google Gemini rejeitou a requisição informando esgotamento do limite na métrica `generate_content_free_tier_requests` para o modelo `gemini-3.8-flash`, indicando um intervalo de retry de aproximadamente 9 segundos.
+- **Lição de Engenharia e Esclarecimento de Infraestrutura**:
+  1. *Free Tier vs Assinatura de Consumidor:* A assinatura Google AI Pro (Google One AI Premium) do usuário destina-se exclusivamente ao aplicativo web de consumo do Gemini (gemini.google.com). Ela não concede cota paga nem remove os limites da Google Gemini Developer API (Google AI Studio / GCP), que opera sob políticas próprias de tarifação e cotas (Rate Limit de 5 ou 15 RPM no nível gratuito).
+  2. *Necessidade de Orçamentos de Pesquisa:* Consultas de alta densidade cognitiva demandam orçamentos formais de tempo, controle de taxa e decomposição assíncrona, corroborando a necessidade da futura capability de Research.
+
+##### Lição de Engenharia
+> *«Um assistente pessoal governado não se prova apenas quando acerta, mas quando revela com integridade suas fronteiras: reconhecendo a ausência de acesso à rede, falhando de forma fechada diante de timeouts e cotas, e mantendo cada ferramenta sob escrutínio de segurança mesmo no fluxo contínuo de conversação.»*
+
+
+
+

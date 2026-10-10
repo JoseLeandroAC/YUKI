@@ -2,7 +2,6 @@ use crate::audit::event_store::{EventStore, InMemoryEventStore};
 use crate::capabilities::registry::CapabilityRegistry;
 use crate::context::builder::ContextBuilder;
 use crate::contracts::authorization::{AuthorizationDecision, AuthorizationRequest};
-use crate::contracts::capability::RiskClass;
 use crate::contracts::context::ContextRequest;
 use crate::contracts::errors::YukiError;
 use crate::contracts::events::{AuditEvent, EventType};
@@ -56,6 +55,7 @@ pub struct YukiCore {
     pub verifier: Arc<Verifier>,
     pub event_store: Arc<dyn EventStore>,
     pub persistent_audit: Option<Arc<SqliteAuditStore>>,
+    pub model_config: ModelGatewayConfig,
 }
 
 impl YukiCore {
@@ -68,6 +68,7 @@ impl YukiCore {
             verifier: Arc::new(Verifier::new()),
             event_store: Arc::new(InMemoryEventStore::new()),
             persistent_audit: None,
+            model_config: ModelGatewayConfig::default(),
         }
     }
 
@@ -87,6 +88,7 @@ impl YukiCore {
             verifier,
             event_store,
             persistent_audit: None,
+            model_config: ModelGatewayConfig::default(),
         }
     }
 
@@ -97,6 +99,16 @@ impl YukiCore {
 
     pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
         self.model_provider = provider;
+        self
+    }
+
+    pub fn with_model_config(mut self, config: ModelGatewayConfig) -> Self {
+        self.model_config = config;
+        self
+    }
+
+    pub fn with_max_tool_iterations(mut self, max_iterations: u32) -> Self {
+        self.model_config.max_tool_iterations = max_iterations;
         self
     }
 
@@ -226,306 +238,355 @@ impl YukiCore {
             })
             .collect();
 
-        let model_resp = self.model_provider.generate(&model_req).await?;
+        let mut iterations: u32 = 0;
+        let mut last_operation_id: Option<OperationId> = None;
+        let mut last_verification: Option<crate::contracts::verification::VerificationResult> =
+            None;
 
-        let has_proposal =
-            model_resp.capability_proposal.is_some() || model_resp.candidate_proposal.is_some();
-        self.record_audit_async(AuditEvent::new(
-            EventType::ModelInvoked,
-            correlation_id.clone(),
-            CausationId::new(context.context_id.0.clone()),
-            serde_json::json!({
-                "provider": self.model_provider.metadata().provider_name,
-                "has_proposal": has_proposal
-            }),
-            "yuki_core",
-        ))
-        .await?;
+        // Governed Bounded Tool Continuation Loop (ADR-018)
+        loop {
+            let model_resp = self.model_provider.generate(&model_req).await?;
 
-        // 4. Capability Proposal Handling & ProposalParser validation
-        let proposal = if let Some(p) = model_resp.capability_proposal {
-            p
-        } else if let Some(candidate) = model_resp.candidate_proposal {
-            // Validate untrusted model candidate through ProposalParser
-            ProposalParser::parse(
-                candidate,
-                &model_req,
-                &self.capability_registry,
-                &ModelGatewayConfig::default(),
-                model_resp.provider_response_id.clone(),
-            )?
-        } else {
-            // If model didn't propose any capability, return raw conversational output
-            let res = YukiResult::success(
-                request_id.clone(),
-                correlation_id.clone(),
-                None,
-                model_resp.raw_content,
-                None,
-            );
+            let has_proposal =
+                model_resp.capability_proposal.is_some() || model_resp.candidate_proposal.is_some();
             self.record_audit_async(AuditEvent::new(
-                EventType::ResponseProduced,
-                correlation_id,
-                CausationId::new(request_id.to_string()),
-                serde_json::json!({ "status": "DirectText" }),
+                EventType::ModelInvoked,
+                correlation_id.clone(),
+                CausationId::new(context.context_id.0.clone()),
+                serde_json::json!({
+                    "provider": self.model_provider.metadata().provider_name,
+                    "has_proposal": has_proposal,
+                    "iteration": iterations
+                }),
                 "yuki_core",
             ))
             .await?;
-            return Ok(res);
-        };
 
-        let operation_id = OperationId::new();
-        self.record_audit_async(AuditEvent::new(
-            EventType::CapabilityProposed,
-            correlation_id.clone(),
-            CausationId::new(request_id.to_string()),
-            serde_json::json!({
-                "operation_id": operation_id.0,
-                "capability_id": proposal.capability_id.0,
-                "reasoning": proposal.reasoning
-            }),
-            "model_provider",
-        ))
-        .await?;
+            // 4. Capability Proposal Handling & ProposalParser validation
+            let proposal = if let Some(p) = model_resp.capability_proposal {
+                p
+            } else if let Some(candidate) = model_resp.candidate_proposal {
+                // Validate untrusted model candidate through ProposalParser
+                ProposalParser::parse(
+                    candidate,
+                    &model_req,
+                    &self.capability_registry,
+                    &self.model_config,
+                    model_resp.provider_response_id.clone(),
+                )?
+            } else {
+                // If model didn't propose any capability, return raw conversational output
+                let res = YukiResult::success(
+                    request_id.clone(),
+                    correlation_id.clone(),
+                    last_operation_id,
+                    model_resp.raw_content,
+                    last_verification,
+                );
+                self.record_audit_async(AuditEvent::new(
+                    EventType::ResponseProduced,
+                    correlation_id,
+                    CausationId::new(request_id.to_string()),
+                    serde_json::json!({ "status": "DirectText", "iterations": iterations }),
+                    "yuki_core",
+                ))
+                .await?;
+                return Ok(res);
+            };
 
-        // 4.1. Pre-Authorization Input Contract Validation (ADR-007, ADR-018)
-        let manifest = self
-            .capability_registry
-            .get_manifest(&proposal.capability_id)
-            .ok_or_else(|| YukiError::CapabilityNotFound(proposal.capability_id.to_string()))?;
+            // Enforce tool continuation iteration limit (fail-closed boundary)
+            if iterations >= self.model_config.max_tool_iterations {
+                self.record_audit_async(AuditEvent::new(
+                    EventType::AuthorizationDenied,
+                    correlation_id.clone(),
+                    CausationId::new(request_id.to_string()),
+                    serde_json::json!({
+                        "reason": format!(
+                            "Limite máximo de iterações de ferramentas ({}) atingido",
+                            self.model_config.max_tool_iterations
+                        )
+                    }),
+                    "yuki_core",
+                ))
+                .await?;
+                return Err(YukiError::ExecutionFailed(format!(
+                    "Limite máximo de iterações do ciclo de ferramentas ({}) atingido",
+                    self.model_config.max_tool_iterations
+                )));
+            }
 
-        if let Err(e) = crate::capabilities::validation::validate_capability_input(
-            &manifest.input_schema,
-            &proposal.parameters,
-        ) {
+            iterations += 1;
+
+            let operation_id = OperationId::new();
             self.record_audit_async(AuditEvent::new(
-                EventType::AuthorizationDenied,
+                EventType::CapabilityProposed,
+                correlation_id.clone(),
+                CausationId::new(request_id.to_string()),
+                serde_json::json!({
+                    "operation_id": operation_id.0,
+                    "capability_id": proposal.capability_id.0,
+                    "reasoning": proposal.reasoning,
+                    "iteration": iterations
+                }),
+                "model_provider",
+            ))
+            .await?;
+
+            // 4.1. Pre-Authorization Input Contract Validation (ADR-007, ADR-018)
+            let manifest = self
+                .capability_registry
+                .get_manifest(&proposal.capability_id)
+                .ok_or_else(|| YukiError::CapabilityNotFound(proposal.capability_id.to_string()))?;
+
+            if let Err(e) = crate::capabilities::validation::validate_capability_input(
+                &manifest.input_schema,
+                &proposal.parameters,
+            ) {
+                self.record_audit_async(AuditEvent::new(
+                    EventType::AuthorizationDenied,
+                    correlation_id.clone(),
+                    CausationId::new(operation_id.0.clone()),
+                    serde_json::json!({
+                        "operation_id": operation_id.0,
+                        "capability_id": proposal.capability_id.0,
+                        "reason": format!("Pre-authorization input contract validation failed: {}", e),
+                    }),
+                    "security_controller",
+                ))
+                .await?;
+                return Err(e);
+            }
+
+            // 5. Security Controller Authorization
+            // Invariant: Model output != Authorization! Explicit policy evaluation is required.
+            let risk_class = manifest.risk_class;
+
+            let auth_req = AuthorizationRequest {
+                operation_id: operation_id.clone(),
+                capability_id: proposal.capability_id.clone(),
+                context_id: context.context_id.clone(),
+                caller_id: "yuki_core".to_string(),
+                input_summary: proposal.parameters.clone(),
+                risk_class: risk_class.clone(),
+            };
+
+            self.record_audit_async(AuditEvent::new(
+                EventType::AuthorizationRequested,
                 correlation_id.clone(),
                 CausationId::new(operation_id.0.clone()),
                 serde_json::json!({
                     "operation_id": operation_id.0,
-                    "capability_id": proposal.capability_id.0,
-                    "reason": format!("Pre-authorization input contract validation failed: {}", e),
+                    "capability_id": proposal.capability_id.0
                 }),
                 "security_controller",
             ))
             .await?;
-            return Err(e);
-        }
 
-        // 5. Security Controller Authorization
-        // Invariant: Model output != Authorization! Explicit policy evaluation is required.
-        let risk_class = self
-            .capability_registry
-            .get_manifest(&proposal.capability_id)
-            .map(|m| m.risk_class)
-            .unwrap_or(RiskClass::High);
+            let auth_decision = self
+                .security_controller
+                .authorize(&auth_req, &self.capability_registry)?;
 
-        let auth_req = AuthorizationRequest {
-            operation_id: operation_id.clone(),
-            capability_id: proposal.capability_id.clone(),
-            context_id: context.context_id.clone(),
-            caller_id: "yuki_core".to_string(),
-            input_summary: proposal.parameters.clone(),
-            risk_class: risk_class.clone(),
-        };
-
-        self.record_audit_async(AuditEvent::new(
-            EventType::AuthorizationRequested,
-            correlation_id.clone(),
-            CausationId::new(operation_id.0.clone()),
-            serde_json::json!({
-                "operation_id": operation_id.0,
-                "capability_id": proposal.capability_id.0
-            }),
-            "security_controller",
-        ))
-        .await?;
-
-        let auth_decision = self
-            .security_controller
-            .authorize(&auth_req, &self.capability_registry)?;
-
-        let auth_token = match auth_decision {
-            AuthorizationDecision::Allow { token, .. } => {
-                self.record_audit_async(AuditEvent::new(
-                    EventType::AuthorizationGranted,
-                    correlation_id.clone(),
-                    CausationId::new(operation_id.0.clone()),
-                    serde_json::json!({
-                        "decision": "Allow",
-                        "risk_class": format!("{:?}", risk_class)
-                    }),
-                    "security_controller",
-                ))
-                .await?;
-                token
-            }
-            AuthorizationDecision::RequiresApproval { reason } => {
-                self.record_audit_async(AuditEvent::new(
-                    EventType::AuthorizationDenied,
-                    correlation_id.clone(),
-                    CausationId::new(operation_id.0.clone()),
-                    serde_json::json!({
-                        "operation_id": operation_id.0,
-                        "requires_approval": true,
-                        "reason": reason
-                    }),
-                    "security_controller",
-                ))
-                .await?;
-                return Ok(YukiResult::denied(
-                    request_id,
-                    correlation_id,
-                    format!("Ação requer aprovação humana: {}", reason),
-                ));
-            }
-            AuthorizationDecision::Deny { reason } => {
-                self.record_audit_async(AuditEvent::new(
-                    EventType::AuthorizationDenied,
-                    correlation_id.clone(),
-                    CausationId::new(operation_id.0.clone()),
-                    serde_json::json!({
-                        "operation_id": operation_id.0,
-                        "reason": reason
-                    }),
-                    "security_controller",
-                ))
-                .await?;
-                return Ok(YukiResult::denied(
-                    request_id,
-                    correlation_id,
-                    format!("Ação rejeitada por segurança: {}", reason),
-                ));
-            }
-        };
-
-        // 6. Capability Execution
-        let attempt_id = AttemptId::new();
-        let exec_req = ExecutionRequest {
-            operation_id: operation_id.clone(),
-            attempt_id: attempt_id.clone(),
-            capability_id: proposal.capability_id.clone(),
-            authorization_token: auth_token,
-            input: proposal.parameters.clone(),
-        };
-
-        self.record_audit_async(AuditEvent::new(
-            EventType::OperationDispatched,
-            correlation_id.clone(),
-            CausationId::new(operation_id.0.clone()),
-            serde_json::json!({
-                "operation_id": operation_id.0,
-                "attempt_id": attempt_id.0
-            }),
-            "executor",
-        ))
-        .await?;
-
-        let exec_result = self.executor.execute(
-            &exec_req,
-            &self.capability_registry,
-            &self.security_controller,
-        )?;
-
-        // 7. Verification Layer
-        let evidences = match &exec_result.state {
-            OperationState::Completed => {
-                if let Some(output) = &exec_result.output {
-                    vec![Evidence {
-                        evidence_id: EvidenceId::new(),
-                        source: "executor_output".to_string(),
-                        data: output.clone(),
-                        observed_at: now_utc(),
-                        confidence_basis: "deterministic_execution_output".to_string(),
-                        operation_id: Some(operation_id.clone()),
-                        attempt_id: Some(attempt_id.clone()),
-                    }]
-                } else {
-                    Vec::new()
+            let auth_token = match auth_decision {
+                AuthorizationDecision::Allow { token, .. } => {
+                    self.record_audit_async(AuditEvent::new(
+                        EventType::AuthorizationGranted,
+                        correlation_id.clone(),
+                        CausationId::new(operation_id.0.clone()),
+                        serde_json::json!({
+                            "decision": "Allow",
+                            "risk_class": format!("{:?}", risk_class)
+                        }),
+                        "security_controller",
+                    ))
+                    .await?;
+                    token
                 }
+                AuthorizationDecision::RequiresApproval { reason } => {
+                    self.record_audit_async(AuditEvent::new(
+                        EventType::AuthorizationDenied,
+                        correlation_id.clone(),
+                        CausationId::new(operation_id.0.clone()),
+                        serde_json::json!({
+                            "operation_id": operation_id.0,
+                            "requires_approval": true,
+                            "reason": reason
+                        }),
+                        "security_controller",
+                    ))
+                    .await?;
+                    return Ok(YukiResult::denied(
+                        request_id,
+                        correlation_id,
+                        format!("Ação requer aprovação humana: {}", reason),
+                    ));
+                }
+                AuthorizationDecision::Deny { reason } => {
+                    self.record_audit_async(AuditEvent::new(
+                        EventType::AuthorizationDenied,
+                        correlation_id.clone(),
+                        CausationId::new(operation_id.0.clone()),
+                        serde_json::json!({
+                            "operation_id": operation_id.0,
+                            "reason": reason
+                        }),
+                        "security_controller",
+                    ))
+                    .await?;
+                    return Ok(YukiResult::denied(
+                        request_id,
+                        correlation_id,
+                        format!("Ação rejeitada por segurança: {}", reason),
+                    ));
+                }
+            };
+
+            // 6. Capability Execution
+            let attempt_id = AttemptId::new();
+            let exec_req = ExecutionRequest {
+                operation_id: operation_id.clone(),
+                attempt_id: attempt_id.clone(),
+                capability_id: proposal.capability_id.clone(),
+                authorization_token: auth_token,
+                input: proposal.parameters.clone(),
+            };
+
+            self.record_audit_async(AuditEvent::new(
+                EventType::OperationDispatched,
+                correlation_id.clone(),
+                CausationId::new(operation_id.0.clone()),
+                serde_json::json!({
+                    "operation_id": operation_id.0,
+                    "attempt_id": attempt_id.0
+                }),
+                "executor",
+            ))
+            .await?;
+
+            let exec_result = self.executor.execute(
+                &exec_req,
+                &self.capability_registry,
+                &self.security_controller,
+            )?;
+
+            // 7. Verification Layer
+            let evidences = match &exec_result.state {
+                OperationState::Completed => {
+                    if let Some(output) = &exec_result.output {
+                        vec![Evidence {
+                            evidence_id: EvidenceId::new(),
+                            source: "executor_output".to_string(),
+                            data: output.clone(),
+                            observed_at: now_utc(),
+                            confidence_basis: "deterministic_execution_output".to_string(),
+                            operation_id: Some(operation_id.clone()),
+                            attempt_id: Some(attempt_id.clone()),
+                        }]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => Vec::new(),
+            };
+
+            self.record_audit_async(AuditEvent::new(
+                EventType::EffectObserved,
+                correlation_id.clone(),
+                CausationId::new(attempt_id.0.clone()),
+                serde_json::json!({
+                    "operation_state": format!("{:?}", exec_result.state),
+                    "evidence_count": evidences.len()
+                }),
+                "verification_engine",
+            ))
+            .await?;
+
+            let verification_context = crate::verification::VerificationContext::new(
+                &operation_id,
+                &proposal.capability_id,
+                &exec_result,
+                &evidences,
+            );
+
+            let verification = self.verifier.verify_operation(&verification_context);
+
+            self.record_audit_async(AuditEvent::new(
+                EventType::VerificationCompleted,
+                correlation_id.clone(),
+                CausationId::new(operation_id.0.clone()),
+                serde_json::json!({
+                    "verification_state": format!("{:?}", verification.verification_state),
+                    "effect_state": format!("{:?}", verification.observed_effect_state)
+                }),
+                "verification_engine",
+            ))
+            .await?;
+
+            // 8. Result Production / Evaluation
+            let output_text = if let Some(out) = &exec_result.output {
+                format_execution_output(out)
+            } else if let Some(err) = &exec_result.error {
+                format!("Erro na execução: {}", err)
+            } else {
+                "Operação concluída sem saída legível.".to_string()
+            };
+
+            if !verification.is_success() {
+                let res = if verification.is_unknown() {
+                    YukiResult::unknown(
+                        request_id.clone(),
+                        correlation_id.clone(),
+                        Some(operation_id),
+                        output_text,
+                        Some(verification),
+                    )
+                } else {
+                    YukiResult::failed(
+                        request_id.clone(),
+                        correlation_id.clone(),
+                        format!("Falha na verificação da operação: {}", output_text),
+                    )
+                };
+
+                self.record_audit_async(AuditEvent::new(
+                    EventType::ResponseProduced,
+                    correlation_id,
+                    CausationId::new(request_id.to_string()),
+                    serde_json::json!({
+                        "status": format!("{:?}", res.status)
+                    }),
+                    "yuki_core",
+                ))
+                .await?;
+
+                return Ok(res);
             }
-            _ => Vec::new(),
-        };
 
-        self.record_audit_async(AuditEvent::new(
-            EventType::EffectObserved,
-            correlation_id.clone(),
-            CausationId::new(attempt_id.0.clone()),
-            serde_json::json!({
-                "operation_state": format!("{:?}", exec_result.state),
-                "evidence_count": evidences.len()
-            }),
-            "verification_engine",
-        ))
-        .await?;
+            // Verified Success: Record operational evidence and feed result to continuation turn
+            last_operation_id = Some(operation_id);
+            last_verification = Some(verification);
 
-        let verification_context = crate::verification::VerificationContext::new(
-            &operation_id,
-            &proposal.capability_id,
-            &exec_result,
-            &evidences,
-        );
+            let tool_data = exec_result
+                .output
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
 
-        let verification = self.verifier.verify_operation(&verification_context);
+            model_req
+                .messages
+                .push(crate::models::provider::ModelMessage::assistant_tool_call(
+                    proposal.capability_id.0.clone(),
+                    proposal.parameters.clone(),
+                    proposal.opaque_signature.clone(),
+                ));
 
-        self.record_audit_async(AuditEvent::new(
-            EventType::VerificationCompleted,
-            correlation_id.clone(),
-            CausationId::new(operation_id.0.clone()),
-            serde_json::json!({
-                "verification_state": format!("{:?}", verification.verification_state),
-                "effect_state": format!("{:?}", verification.observed_effect_state)
-            }),
-            "verification_engine",
-        ))
-        .await?;
+            model_req
+                .messages
+                .push(crate::models::provider::ModelMessage::tool_result(
+                    proposal.capability_id.0.clone(),
+                    tool_data,
+                ));
 
-        // 8. Result Production (Capability-Neutral Output Representation)
-        let output_text = if let Some(out) = &exec_result.output {
-            format_execution_output(out)
-        } else if let Some(err) = &exec_result.error {
-            format!("Erro na execução: {}", err)
-        } else {
-            "Operação concluída sem saída legível.".to_string()
-        };
-
-        let result = if verification.is_success() {
-            YukiResult::success(
-                request_id.clone(),
-                correlation_id.clone(),
-                Some(operation_id),
-                output_text,
-                Some(verification),
-            )
-        } else if verification.is_unknown() {
-            YukiResult::unknown(
-                request_id.clone(),
-                correlation_id.clone(),
-                Some(operation_id),
-                output_text,
-                Some(verification),
-            )
-        } else {
-            YukiResult::failed(
-                request_id.clone(),
-                correlation_id.clone(),
-                format!("Falha na verificação da operação: {}", output_text),
-            )
-        };
-
-        self.record_audit_async(AuditEvent::new(
-            EventType::ResponseProduced,
-            correlation_id,
-            CausationId::new(request_id.to_string()),
-            serde_json::json!({
-                "status": format!("{:?}", result.status)
-            }),
-            "yuki_core",
-        ))
-        .await?;
-
-        Ok(result)
+            model_req.request_id = crate::contracts::identifiers::ModelRequestId::new();
+        }
     }
 
     /// Processamento síncrono padrão (compatibilidade e preservação da Foundation).

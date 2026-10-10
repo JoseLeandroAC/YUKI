@@ -1,3 +1,4 @@
+pub mod builder;
 pub mod config;
 pub mod errors;
 pub mod gemini;
@@ -6,6 +7,7 @@ pub mod proposal_parser;
 pub mod provider;
 pub mod router;
 
+pub use builder::*;
 pub use config::*;
 pub use errors::*;
 pub use gemini::*;

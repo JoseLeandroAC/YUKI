@@ -13,12 +13,17 @@ use yuki::persistence::sqlite::SqliteAuditStore;
 use yuki::security::authorization::SecurityController;
 use yuki::verification::Verifier;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static SEC_TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn temp_db_path() -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("yuki_sec_test_{:x}.db", nanos))
+    let count = SEC_TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("yuki_sec_test_{}_{}_{:x}.db", pid, count, nanos))
 }
 
 struct TempDbCleanup(PathBuf);

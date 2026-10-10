@@ -84,6 +84,7 @@ fn test_proposal_parser_valid_candidate() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!({ "message": "Olá Yuki" }),
+        opaque_signature: None,
     };
 
     let proposal = ProposalParser::parse(candidate, &req, &registry, &config, None)
@@ -106,6 +107,7 @@ fn test_proposal_parser_unregistered_capability() {
     let candidate = RawProposalCandidate {
         capability_name: "system.shell".to_string(),
         arguments: serde_json::json!({ "cmd": "ls" }),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -131,6 +133,7 @@ fn test_proposal_parser_non_object_arguments() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!("uma string em vez de um objeto json"),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -172,6 +175,7 @@ fn test_proposal_parser_depth_limit_exceeded() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: deep_arguments,
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -199,6 +203,7 @@ fn test_proposal_parser_size_limit_exceeded() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!({ "message": large_message }),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);

@@ -231,6 +231,7 @@ fn test_security_13_schema_violation_depth_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: deep_val,
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -251,6 +252,7 @@ fn test_security_14_unknown_capability_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.unauthorized_capability".to_string(),
         arguments: serde_json::json!({}),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);
@@ -280,6 +282,7 @@ fn test_security_15_oversized_proposal_rejected() {
     let candidate = RawProposalCandidate {
         capability_name: "system.echo".to_string(),
         arguments: serde_json::json!({ "message": "Texto suficientemente longo para exceder cinquenta bytes" }),
+        opaque_signature: None,
     };
 
     let result = ProposalParser::parse(candidate, &req, &registry, &config, None);

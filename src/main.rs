@@ -3,6 +3,7 @@ use std::sync::Arc;
 use yuki::contracts::input::UserInput;
 use yuki::contracts::output::ResultStatus;
 use yuki::core::yuki_core::YukiCore;
+use yuki::models::{resolve_model_provider_from_env, HealthStatus};
 use yuki::persistence::sqlite::SqliteAuditStore;
 
 #[derive(Parser, Debug)]
@@ -30,6 +31,15 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
+    // Resolve model provider from environment (ADR-018 / CONFIGURATION.md)
+    let model_provider = match resolve_model_provider_from_env() {
+        Ok(provider) => provider,
+        Err(err) => {
+            eprintln!("Erro de configuração do provedor de modelo: {}", err);
+            std::process::exit(1);
+        }
+    };
+
     // Resolve persistent database path (ADR-019 / CONFIGURATION.md / 00_ENVIRONMENT_BASELINE.md)
     let db_path = std::env::var("YUKI_DATABASE_PATH")
         .or_else(|_| std::env::var("YUKI_PERSISTENCE_PATH"))
@@ -45,20 +55,31 @@ async fn main() {
     let (core, sqlite_status) = match SqliteAuditStore::open(&db_path) {
         Ok(store) => {
             let store = Arc::new(store);
-            (YukiCore::new().with_persistent_audit(store), "OK")
+            (
+                YukiCore::new()
+                    .with_model_provider(model_provider)
+                    .with_persistent_audit(store),
+                "OK",
+            )
         }
         Err(e) => {
             eprintln!(
                 "Aviso: Falha ao inicializar banco de auditoria durável ('{}'): {}. Operando em modo degradado (in-memory).",
                 db_path, e
             );
-            (YukiCore::new(), "DEGRADED (In-Memory Fallback)")
+            (
+                YukiCore::new().with_model_provider(model_provider),
+                "DEGRADED (In-Memory Fallback)",
+            )
         }
     };
 
     match cli.command {
         Some(Commands::Health) => {
             let health = core.health();
+            let model_meta = core.model_provider.metadata();
+            let model_health = core.model_provider.health();
+
             println!("Yuki");
             if health.is_all_ok() {
                 println!("Status: OK\n");
@@ -68,18 +89,23 @@ async fn main() {
 
             println!("Core: {}", if health.core_ok { "OK" } else { "FAIL" });
             println!("Context: {}", if health.context_ok { "OK" } else { "FAIL" });
+            let model_status_str = match &model_health {
+                HealthStatus::Healthy => "OK".to_string(),
+                HealthStatus::Degraded(reason) => format!("DEGRADED ({})", reason),
+                HealthStatus::Unhealthy(reason) => format!("FAIL ({})", reason),
+            };
+
+            let subsystem_name = if model_meta.provider_name.contains("Mock") {
+                "Model Subsystem (Mock)".to_string()
+            } else {
+                format!("Model Subsystem ({})", model_meta.provider_name)
+            };
+            println!("{}: {}", subsystem_name, model_status_str);
             println!(
-                "Model Subsystem (Mock): {}",
-                if health.model_ok { "OK" } else { "FAIL" }
+                "Selected Model Provider: {} (model: {}, version: {})",
+                model_meta.provider_name, model_meta.model_name, model_meta.version
             );
-            println!(
-                "External Model Provider: {}",
-                if std::env::var("YUKI_GEMINI_API_KEY").is_ok() {
-                    "CONFIGURED (Gemini available)"
-                } else {
-                    "NOT CONFIGURED (Operating with Mock)"
-                }
-            );
+            println!("Model Provider Health: {}", model_status_str);
             println!(
                 "Capability Registry: {}",
                 if health.registry_ok { "OK" } else { "FAIL" }

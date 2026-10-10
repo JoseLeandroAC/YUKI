@@ -55,6 +55,9 @@ pub enum ModelError {
 
     #[error("Erro interno no gateway de modelos: {0}")]
     Internal(String),
+
+    #[error("Erro de configuração do provedor de modelo: {0}")]
+    Configuration(String),
 }
 
 impl ModelError {
