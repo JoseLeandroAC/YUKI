@@ -1,10 +1,10 @@
 # ADR-020 — Research v1: Governed Web Retrieval, Vendor Abstraction & Cloud-Ready Boundaries
 
 **Versão:** 1.3  
-**Status:** ACCEPTED / IMPLEMENTED (Marcos 1, 2 e 3 Concluídos)  
+**Status:** ACCEPTED / IMPLEMENTED (Marcos 1 a 4 Concluídos — Auditoria Final de Integração e Segurança Concluída)  
 **Domínio:** 15 — Integrations / Cognitive Capabilities / Information Retrieval  
 **Data:** 2026-10-10  
-**Decisão:** Accepted (Marco 1: Contratos & Mocks; Marco 2: Brave Search Adapter & Egress Security; Marco 3: Governed Web Fetch, SSRF Defense, Socket Pinning & HTML Sanitization)  
+**Decisão:** Accepted (Marco 1: Contratos & Mocks; Marco 2: Brave Search Adapter & Egress Security; Marco 3: Governed Web Fetch & SSRF Defense; Marco 4: Governed Synthesis & Verifiable Citations; Auditoria Final: Integração e Segurança Endurecida)  
 
 ---
 
@@ -524,3 +524,32 @@ O Marco 4 da Research v1 conclui a governança de conhecimento e citação, impl
 - **Detecção de Citações Inventadas:** Se o modelo referenciar fontes inexistentes no registro governado (ex.: `[src:999]`), o validador rejeita a citação, categoriza o status como `SynthesisStatus::PartiallyVerified` ou `SynthesisStatus::UnverifiedClaims`, registra limitações e anexa uma nota visível de limitação de verificação.
 - **Separação Ontológica `Verification != Truth`:** Todo resultado de síntese governada inclui incondicionalmente o `VERIFICATION_DISCLAIMER`: a validação atesta existência no turno e integridade criptográfica de transporte (SHA-256), mas não constitui, isoladamente, atestado de veracidade factual no mundo real.
 - **Auditoria Abrangente:** Emissão dos eventos `EventType::SourceObserved`, `EvidenceRegistered`, `CitationResolved`, `CitationRejected` e `SynthesisCompleted` no subsistema de auditoria.
+
+---
+
+## 11. Auditoria Final de Integração e Segurança (Marcos 1 a 4)
+
+Em auditoria adversarial e independente sobre a totalidade da capability Research v1 (Marcos 1 a 4), foram avaliados e consolidados os seguintes endurecimentos estruturais:
+
+### 11.1. Correção de Classificação Ontológica de Páginas Truncadas
+- **Vulnerabilidade identificada:** `is_full_page` estava associado unicamente a `SourceKind::DirectSource`, marcando `true` mesmo quando o corpo da página havia sido truncado por restrições de tamanho (`truncated == true`).
+- **Correção estrutural:** `is_full_page` passa a exigir estritamente `!fetch_result.truncated`. Páginas truncadas permanecem como `SourceKind::DirectSource`, porém com `is_full_page = false` e `truncated = true`.
+- **Propagação de ponta a ponta:** O campo `pub truncated: bool` foi integrado à estrutura `VerifiedCitation`, garantindo que metadados de truncamento sejam preservados desde a extração HTTP até a citação final consumida pelo operador.
+
+### 11.2. Política Fail-Closed contra Afirmações Fabricadas e Citações Inexistentes
+- **Vulnerabilidade identificada:** Quando o modelo inventava uma citação inexistente (ex.: `[src:999]`), o validador classificava como `PartiallyVerified` ou `UnverifiedClaims` e anexava uma nota de rodapé, porém mantinha o texto cru com aparência de confirmação.
+- **Correção estrutural:** 
+  - Se todas as citações forem inexistentes/inválidas (`unresolved_citations` não-vazio e `verified_citations` vazio), o texto cru é substituído por uma resposta segura de evidências insuficientes, eliminando a afirmação fabricada da resposta.
+  - Se houver citações mistas (válidas e inventadas), as citações inválidas no corpo do texto são desarmadas e anotadas com `[src:N][NÃO VERIFICADA]`, e a limitação de verificação é anexada ao rodapé.
+  - Citações inexistentes NUNCA constam no vetor `citations: Vec<VerifiedCitation>`.
+
+### 11.3. Verificação dos Perímetros Integrados
+- **Egress e SSRF:** Revalidadas as proteções IPv4/IPv6, IPv4-mapped IPv6, DNS rebinding, socket pinning e `.no_proxy()`.
+- **Data != Instruction:** Sanitização estrita de scripts, estilos e tags de injeção em HTML, tratando conteúdo externo como dado passivo não confiável.
+- **Orçamento e Concorrência:** Isolamento multissessão e multiturno via task-locals Tokio e `sync_scope()`, cancelamento limpo e verificação de deadline sem vazamentos.
+- **Proveniência:** Unicidade de `ObservationId`, independência entre identidade e hash SHA-256 e limites estritos do registro (20 observações / 2 MiB).
+
+### 11.4. Nova Suíte de Auditoria Integrada (`tests/research_v1_final_audit.rs`)
+- 23 testes automatizados cobrindo os 7 eixos da auditoria final.
+- Base total expandida para 329 testes com 100% de sucesso.
+- Classificação: **RESEARCH V1 — APROVADA PARA VALIDAÇÃO LIVE CONTROLADA**.

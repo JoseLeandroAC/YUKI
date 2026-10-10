@@ -213,7 +213,7 @@ impl ObservedSourceRegistry {
             observed_at: fetch_result.fetched_at.clone(),
             evidence_scope: format!("fetch:url={}", fetch_result.url),
             truncated: fetch_result.truncated,
-            is_full_page: true,
+            is_full_page: !fetch_result.truncated,
         };
 
         self.total_bytes += body_bytes_len;
@@ -239,7 +239,7 @@ impl ObservedSourceRegistry {
     ///
     /// Invariante Constitucional: `Data != Instruction`.
     /// Conteúdo externo é categorizado como dados não confiáveis, rotulado explicitamente
-    /// como Snippet ou Página Completa.
+    /// como Snippet ou Página Completa / Truncada.
     pub fn format_evidences_for_model(&self) -> String {
         if self.evidences.is_empty() {
             return String::new();
@@ -256,7 +256,7 @@ impl ObservedSourceRegistry {
         );
 
         for ev in &self.evidences {
-            let tipo = if ev.is_full_page {
+            let tipo = if ev.source_kind == SourceKind::DirectSource {
                 format!(
                     "Página Web Recuperada (Leitura Direta - Truncada: {})",
                     ev.truncated

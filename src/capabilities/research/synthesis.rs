@@ -54,8 +54,9 @@ impl SynthesisValidator {
         for cite_tag in cited_ids {
             let bare_id = cite_tag.trim_start_matches('[').trim_end_matches(']');
             if let Some(obs) = registry.get_observation_by_cite_id(bare_id) {
-                let is_full_page =
-                    obs.source_kind == crate::contracts::research::SourceKind::DirectSource;
+                let is_full_page = obs.source_kind
+                    == crate::contracts::research::SourceKind::DirectSource
+                    && !obs.truncated;
                 verified_citations.push(VerifiedCitation {
                     cite_id: cite_tag.clone(),
                     observation_id: obs.observation_id.clone(),
@@ -63,6 +64,7 @@ impl SynthesisValidator {
                     title: obs.title.clone(),
                     source_kind: obs.source_kind,
                     is_full_page,
+                    truncated: obs.truncated,
                     content_hash_sha256: obs.content_hash_sha256.clone(),
                 });
             } else {
@@ -99,7 +101,21 @@ impl SynthesisValidator {
             SynthesisStatus::FullyVerified
         };
 
-        let mut final_answer = raw_answer.to_string();
+        let mut final_answer = if !unresolved_citations.is_empty() && verified_citations.is_empty()
+        {
+            format!(
+                "Não foi possível validar as afirmações com fontes verificadas. As referências citadas ({}) não existem no registro governado de evidências deste turno.",
+                unresolved_citations.join(", ")
+            )
+        } else {
+            let mut sanitized = raw_answer.to_string();
+            for unres in &unresolved_citations {
+                let marked = format!("{}[NÃO VERIFICADA]", unres);
+                sanitized = sanitized.replace(unres, &marked);
+            }
+            sanitized
+        };
+
         if !unresolved_citations.is_empty() {
             final_answer.push_str(&format!(
                 "\n\n[Limitação de Verificação: Citação(ões) {} não puderam ser resolvidas no registro governado deste turno.]",

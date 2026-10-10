@@ -659,5 +659,57 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
 - Classificação: **MARCO 4 IMPLEMENTADO — TESTADO OFFLINE — LIVE PENDENTE**.
 
+---
+
+#### [2026-10-10] Research v1 — Auditoria Final de Integração e Segurança (Marcos 1 a 4)
+
+##### 1. Contexto e Objetivos da Auditoria Final
+- Conduzida auditoria final abrangente, independente e adversarial sobre a totalidade da capability Research v1 na branch `feature/research-v1`.
+- Avaliados os eixos contratuais e constitucionais estabelecidos pelo ADR-020: fluxo completo ponta-a-ponta, auditoria de citações e citações inexistentes/fabricadas com política fail-closed, semântica de páginas truncadas (`is_full_page`), concorrência e orçamento de turno (`ResearchTurnContext`), segurança de rede e anti-SSRF, contenção de prompt injection (`Data != Instruction`), proveniência e isolamento multissessão/multiturno (`Verification != Truth`), compatibilidade com baselines congelados e validação de qualidade.
+
+##### 2. Achados e Correções Implementadas
+- **Classificação Ontológica de Páginas Truncadas (`is_full_page` vs `truncated`)**:
+  - *Arquivo/Linha*: `src/capabilities/research/registry.rs`, `src/capabilities/research/synthesis.rs`, `src/contracts/research.rs`.
+  - *Problema*: `is_full_page` estava marcado incondicionalmente como `true` para qualquer `SourceKind::DirectSource`, mesmo quando o payload havia sido truncado (`truncated == true`).
+  - *Correção*: `is_full_page` passa a exigir estritamente `!fetch_result.truncated`. Páginas truncadas permanecem como `DirectSource`, porém rotuladas com `is_full_page = false` e `truncated = true`. O campo `pub truncated: bool` foi adicionado à estrutura `VerifiedCitation`, garantindo rastreabilidade de ponta a ponta.
+- **Política Fail-Closed contra Afirmações Fabricadas e Citações Inexistentes**:
+  - *Arquivo/Linha*: `src/capabilities/research/synthesis.rs`.
+  - *Problema*: Quando o modelo inventava uma citação inexistente (ex.: `[src:999]`), o validador classificava o status e anexava uma nota de rodapé, porém mantinha a afirmação fabricada crua no texto com falsa aparência de confirmação.
+  - *Correção*: Se todas as referências forem inexistentes/inválidas (`unresolved_citations` não-vazio e `verified_citations` vazio), a afirmação crua é integralmente substituída por uma resposta segura de evidências insuficientes, eliminando qualquer afirmação fabricada da resposta. Em citações mistas, fontes inválidas no texto são sanitizadas como `[src:N][NÃO VERIFICADA]`, e a limitação de verificação é anexada.
+
+##### 3. Nova Suíte Dedicada de Auditoria Integrada (`tests/research_v1_final_audit.rs`)
+- 23 testes determinísticos e offline adicionados cobrindo:
+  1. Cadeia ponta-a-ponta de busca, leitura e síntese governada;
+  2. Tratamento gracioso de pesquisas com 0 resultados;
+  3. Preservação de observações independentes para fontes contraditórias;
+  4. Interrupção fail-closed ao esgotar orçamento de turno no meio do loop;
+  5. Impossibilidade absoluta de contornar o Security Controller;
+  6. Resposta segura fail-closed para citações inventadas `[src:999]`;
+  7. Sanitização de citações mistas com marcação explícita de não-verificada;
+  8. Rejeição e fail-closed para citações de outros turnos ou sessões;
+  9. Deduplicação de citações e descarte de referências malformadas;
+  10. Classificação de UnverifiedClaims quando há fontes disponíveis sem citação;
+  11. Distinção semântica entre página integral e página truncada;
+  12. Preservação da propriedade `truncated` até a citação final `VerifiedCitation`;
+  13. Unicidade de identidade (`ObservationId`) para leituras múltiplas da mesma URL;
+  14. Isolamento estrito de orçamentos e contextos em sessões simultâneas;
+  15. Cancelamento estruturado assíncrono sem vazamentos nem deadlocks;
+  16. Validação de deadline antes e após IO com falha fechada;
+  17. Matriz exaustiva de bloqueio anti-SSRF (IPv4 privado, IPv6 ULA, cloud metadata, IPv4-mapped IPv6);
+  18. Bloqueio de representações de IP ofuscadas (hex, octal, dword, truncadas);
+  19. Defesa fail-closed contra DNS rebinding com IPs mistos;
+  20. Sanitização estrita de scripts, estilos e injeções em HTML;
+  21. Candidatos não confiáveis do modelo não podem invocar comandos não autorizados;
+  22. Páginas diferentes com conteúdo idêntico recebem observações e cite_ids distintos;
+  23. Limites de contagem de observações (20) e volume de memória (2 MiB) no registro.
+
+##### 4. Portões de Qualidade Aprovados
+- `cargo test`: 329 testes aprovados no workspace (0 falhas, 4 testes live ignorados).
+- `cargo fmt --check`: 100% aprovado.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `cargo build --release`: compilação otimizada concluída com sucesso.
+- Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
+- Veredito da Auditoria: **RESEARCH V1 — APROVADA PARA VALIDAÇÃO LIVE CONTROLADA**.
+
 
 

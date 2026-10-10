@@ -109,6 +109,8 @@ pub struct VerifiedCitation {
     pub title: String,
     pub source_kind: SourceKind,
     pub is_full_page: bool,
+    #[serde(default)]
+    pub truncated: bool,
     pub content_hash_sha256: String,
 }
 
