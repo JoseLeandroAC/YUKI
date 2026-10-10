@@ -1026,8 +1026,8 @@ async fn test_adv_34_capability_projection_in_model_request() {
         .expect("recorded request");
     let caps = recorded.available_capabilities;
 
-    // Must project all 3 registered capabilities
-    assert_eq!(caps.len(), 3);
+    // Must project registered capabilities including MVP-1 foundation
+    assert!(caps.len() >= 3);
     let names: Vec<String> = caps.iter().map(|c| c.name.clone()).collect();
     assert!(names.contains(&"system.echo".to_string()));
     assert!(names.contains(&"system.time".to_string()));

@@ -58,6 +58,8 @@ impl DefaultFoundationPolicy {
                 "capability:system.echo".to_string(),
                 "capability:system.time".to_string(),
                 "capability:system.info".to_string(),
+                "capability:research.search".to_string(),
+                "capability:research.fetch".to_string(),
             ],
         }
     }

@@ -7,6 +7,7 @@ pub mod execution;
 pub mod identifiers;
 pub mod input;
 pub mod output;
+pub mod research;
 pub mod verification;
 
 pub use authorization::*;
@@ -18,4 +19,5 @@ pub use execution::*;
 pub use identifiers::*;
 pub use input::*;
 pub use output::*;
+pub use research::*;
 pub use verification::*;

@@ -76,6 +76,58 @@ pub fn validate_capability_input(
                             prop_name, expected_type
                         )));
                     }
+
+                    // 3.1 String length constraints
+                    if let Some(s) = prop_val.as_str() {
+                        if let Some(min_len) = prop_schema.get("minLength").and_then(|v| v.as_u64())
+                        {
+                            if s.len() < min_len as usize {
+                                return Err(YukiError::InvalidRequest(format!(
+                                    "Campo '{}' deve ter comprimento mínimo de {} caracteres",
+                                    prop_name, min_len
+                                )));
+                            }
+                        }
+                        if let Some(max_len) = prop_schema.get("maxLength").and_then(|v| v.as_u64())
+                        {
+                            if s.len() > max_len as usize {
+                                return Err(YukiError::InvalidRequest(format!(
+                                    "Campo '{}' excede comprimento máximo de {} caracteres",
+                                    prop_name, max_len
+                                )));
+                            }
+                        }
+                    }
+
+                    // 3.2 Numeric bounds constraints
+                    if let Some(num) = prop_val.as_i64() {
+                        if let Some(min_val) = prop_schema.get("minimum").and_then(|v| v.as_i64()) {
+                            if num < min_val {
+                                return Err(YukiError::InvalidRequest(format!(
+                                    "Campo '{}' deve ser no mínimo {}",
+                                    prop_name, min_val
+                                )));
+                            }
+                        }
+                        if let Some(max_val) = prop_schema.get("maximum").and_then(|v| v.as_i64()) {
+                            if num > max_val {
+                                return Err(YukiError::InvalidRequest(format!(
+                                    "Campo '{}' deve ser no máximo {}",
+                                    prop_name, max_val
+                                )));
+                            }
+                        }
+                    }
+
+                    // 3.3 Enum value constraint
+                    if let Some(enum_vals) = prop_schema.get("enum").and_then(|v| v.as_array()) {
+                        if !enum_vals.contains(prop_val) {
+                            return Err(YukiError::InvalidRequest(format!(
+                                "Valor inválido para o campo '{}': não consta na lista de opções permitidas",
+                                prop_name
+                            )));
+                        }
+                    }
                 }
             }
         }

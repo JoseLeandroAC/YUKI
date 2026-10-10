@@ -244,8 +244,95 @@ impl MockModelProvider {
                         finish_reason: "TOOL_CALL".to_string(),
                         provider_response_id: None,
                     })
+                } else if lower.starts_with("pesquise:")
+                    || lower.starts_with("busque:")
+                    || lower.starts_with("search:")
+                {
+                    let q = if let Some(stripped) = trimmed.strip_prefix("Pesquise:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("pesquise:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("Busque:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("busque:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("Search:") {
+                        stripped.trim()
+                    } else {
+                        trimmed.strip_prefix("search:").unwrap_or(trimmed).trim()
+                    };
+
+                    let proposal = CapabilityProposal {
+                        proposal_id: ProposalId::new(),
+                        model_request_id: req_id.clone(),
+                        provider_response_id: None,
+                        capability_id: CapabilityId::new("research.search"),
+                        parameters: serde_json::json!({
+                            "query": q,
+                            "max_results": 5,
+                            "freshness": "any"
+                        }),
+                        reasoning: "Usuário solicitou pesquisa de termos na web.".to_string(),
+                        opaque_signature: None,
+                    };
+
+                    Ok(ModelResponse {
+                        request_id: req_id,
+                        provider: "MockProvider".to_string(),
+                        model: "yuki-mock-reasoner-v0.1".to_string(),
+                        raw_content: format!("Proponho pesquisar: {}", q),
+                        capability_proposal: Some(proposal.clone()),
+                        candidate_proposal: Some(RawProposalCandidate {
+                            capability_name: proposal.capability_id.0.clone(),
+                            arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
+                        }),
+                        usage: None,
+                        finish_reason: "TOOL_CALL".to_string(),
+                        provider_response_id: None,
+                    })
+                } else if lower.starts_with("leia:") || lower.starts_with("fetch:") {
+                    let url = if let Some(stripped) = trimmed.strip_prefix("Leia:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("leia:") {
+                        stripped.trim()
+                    } else if let Some(stripped) = trimmed.strip_prefix("Fetch:") {
+                        stripped.trim()
+                    } else {
+                        trimmed.strip_prefix("fetch:").unwrap_or(trimmed).trim()
+                    };
+
+                    let proposal = CapabilityProposal {
+                        proposal_id: ProposalId::new(),
+                        model_request_id: req_id.clone(),
+                        provider_response_id: None,
+                        capability_id: CapabilityId::new("research.fetch"),
+                        parameters: serde_json::json!({
+                            "url": url,
+                            "max_length_chars": 10000
+                        }),
+                        reasoning: "Usuário solicitou leitura de página web.".to_string(),
+                        opaque_signature: None,
+                    };
+
+                    Ok(ModelResponse {
+                        request_id: req_id,
+                        provider: "MockProvider".to_string(),
+                        model: "yuki-mock-reasoner-v0.1".to_string(),
+                        raw_content: format!("Proponho ler URL: {}", url),
+                        capability_proposal: Some(proposal.clone()),
+                        candidate_proposal: Some(RawProposalCandidate {
+                            capability_name: proposal.capability_id.0.clone(),
+                            arguments: proposal.parameters.clone(),
+                            opaque_signature: None,
+                        }),
+                        usage: None,
+                        finish_reason: "TOOL_CALL".to_string(),
+                        provider_response_id: None,
+                    })
                 } else {
                     let proposal = CapabilityProposal {
+
                         proposal_id: ProposalId::new(),
                         model_request_id: req_id.clone(),
                         provider_response_id: None,

@@ -4,6 +4,9 @@ use std::sync::{Arc, RwLock};
 use crate::contracts::identifiers::CapabilityId;
 use crate::verification::strategies::echo::EchoVerificationStrategy;
 use crate::verification::strategies::info::InfoVerificationStrategy;
+use crate::verification::strategies::research::{
+    FetchVerificationStrategy, SearchVerificationStrategy,
+};
 use crate::verification::strategies::time::TimeVerificationStrategy;
 use crate::verification::strategy::VerificationStrategy;
 
@@ -30,6 +33,8 @@ impl VerificationStrategyRegistry {
         registry.register_strategy(Arc::new(EchoVerificationStrategy::new()));
         registry.register_strategy(Arc::new(TimeVerificationStrategy::new()));
         registry.register_strategy(Arc::new(InfoVerificationStrategy::new()));
+        registry.register_strategy(Arc::new(SearchVerificationStrategy::new()));
+        registry.register_strategy(Arc::new(FetchVerificationStrategy::new()));
 
         // 2. Register trusted capability-to-strategy bindings
         registry.bind_capability(
@@ -43,6 +48,14 @@ impl VerificationStrategyRegistry {
         registry.bind_capability(
             CapabilityId::new("system.info"),
             InfoVerificationStrategy::STRATEGY_ID,
+        );
+        registry.bind_capability(
+            CapabilityId::new("research.search"),
+            SearchVerificationStrategy::STRATEGY_ID,
+        );
+        registry.bind_capability(
+            CapabilityId::new("research.fetch"),
+            FetchVerificationStrategy::STRATEGY_ID,
         );
 
         registry

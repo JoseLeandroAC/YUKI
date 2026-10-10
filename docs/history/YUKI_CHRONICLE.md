@@ -358,6 +358,34 @@ Em uma arquitetura de assistente autônomo governado, a execução de ferramenta
 ##### Lição de Engenharia
 > *«Um assistente pessoal governado não se prova apenas quando acerta, mas quando revela com integridade suas fronteiras: reconhecendo a ausência de acesso à rede, falhando de forma fechada diante de timeouts e cotas, e mantendo cada ferramenta sob escrutínio de segurança mesmo no fluxo contínuo de conversação.»*
 
+---
 
+#### [Event Time: 2026-10-10 | Record Creation Time: 2026-10-10]
+### Integração Oficial do Runtime Gemini em Main e Execução do Marco 1 da Yuki Research v1 (Mocks & Contratos)
 
+- **Event Time**: 10 de outubro de 2026
+- **Record Creation Time**: 10 de outubro de 2026
+- **Milestones Relacionados**:
+  1. Integração oficial da branch `feature/post-mvp1-model-runtime-wiring` ao `main` (`33fd9da861cfa0bb1056585ef5e05a074b4af912`, CI: SUCCESS).
+  2. Implementação do Marco 1 de Research v1 na branch `feature/research-v1` (ADR-020 revisado).
+- **Natureza do Evento**: Marco arquitetural de estabelecimento dos primeiros contratos tipados de busca e leitura estruturada da Yuki, com execução simulada em memória e salvaguardas perimetrais completas.
 
+##### 1. Integração Governamental do Gemini Runtime ao Main
+Com a aprovação do Owner e a validação dos 11 commits de observabilidade e continuação de ferramentas, o branch `feature/post-mvp1-model-runtime-wiring` foi formalmente integrado ao `main`:
+- Merge commit: `33fd9da861cfa0bb1056585ef5e05a074b4af912` (pais: `6a9d070` e `e83905a`).
+- CI de integração aprovado no GitHub Actions (Run 38045614665, status: `success`).
+- Baselines congelados `v0.1.0-foundation` e `v0.2.0-mvp1` mantidos rigorosamente preservados. Nenhuma release tag ou release GitHub foi criada.
+
+##### 2. Conclusão do Marco 1 de Research v1 (Contratos e Mock Providers)
+Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capability de pesquisa web da Yuki, respeitando os contratos constitucionais:
+- **`research.search`**: Contratos tipados de entrada (`query`, `max_results`, `freshness`) e saída verificada (`query`, `provider`, `results` com `cite_id`, título, URL, snippet, metadados e estado de confiança `AggregatedSnippet`).
+- **`research.fetch`**: Contratos tipados de entrada (`url`, `max_length_chars`) e saída verificada (`url`, `final_url`, `http_status`, `content_type`, `title`, `extracted_text`, `content_hash_sha256`, integridade e estado de confiança `DirectSource`).
+- **Abstrações e Mocks**: Criação dos traits `SearchProvider` e `ContentFetchProvider` com implementações determinísticas `MockSearchProvider` e `MockFetchProvider` funcionando 100% em memória, sem qualquer tráfego de rede, cliente HTTP, scraper ou browser.
+- **SHA-256 Puro em Rust**: Implementação determinística FIPS 180-4 em Rust puro para cômputo de hashes de integridade sem adicionar dependências externas de rede.
+- **Integração no Core**: Capabilities registradas no `CapabilityRegistry`, permissões gerenciadas no `SecurityController`, estratégias de verificação estrutural dedicadas no `VerificationEngine` (`SearchVerificationStrategy`, `FetchVerificationStrategy`) e projeção automática no loop de continuação de ferramentas.
+- **Defesa Estrutural contra Indirect Prompt Injection**: Testes adversariais comprovaram que conteúdos web maliciosos contendo comandos embutidos são tratados como dado passivo e NUNCA conferem autorização ou disparam ferramentas.
+- **Suíte de Testes e Qualidade**: 20 novos testes dedicados em `tests/capability_research_mock.rs`, totalizando 180 testes unitários e de integração passando, 0 warnings no Clippy, formatação `cargo fmt` impecável e build de release validado.
+
+##### Status Operacional Atual
+> [!IMPORTANT]
+> **Acesso Real à Internet Permanece Indisponível:** O Marco 1 é estritamente uma camada de contratos, tipos, manifestos, validação de schema e provedores simulados offline. A pesquisa real na internet (Brave Search API e leitor HTTP seguro) só será implementada e ativada no Marco 2.

@@ -102,6 +102,11 @@ impl YukiCore {
         self
     }
 
+    pub fn with_capability_registry(mut self, registry: Arc<CapabilityRegistry>) -> Self {
+        self.capability_registry = registry;
+        self
+    }
+
     pub fn with_model_config(mut self, config: ModelGatewayConfig) -> Self {
         self.model_config = config;
         self

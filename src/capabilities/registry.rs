@@ -1,5 +1,7 @@
 use crate::capabilities::echo::EchoCapability;
 use crate::capabilities::info::InfoCapability;
+use crate::capabilities::research::fetch::FetchCapability;
+use crate::capabilities::research::search::SearchCapability;
 use crate::capabilities::time::TimeCapability;
 use crate::contracts::capability::CapabilityManifest;
 use crate::contracts::errors::YukiError;
@@ -20,10 +22,12 @@ impl CapabilityRegistry {
         let mut registry = Self {
             handlers: HashMap::new(),
         };
-        // Register default capabilities for Yuki MVP-1
+        // Register default capabilities for Yuki (MVP-1 + Research v1 Marco 1 Mocks)
         registry.register(Box::new(EchoCapability::new()));
         registry.register(Box::new(TimeCapability::new()));
         registry.register(Box::new(InfoCapability::new()));
+        registry.register(Box::new(SearchCapability::default()));
+        registry.register(Box::new(FetchCapability::default()));
         registry
     }
 
