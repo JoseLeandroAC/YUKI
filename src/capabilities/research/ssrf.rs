@@ -52,6 +52,21 @@ pub fn validate_and_parse_fetch_url(raw_url: &str) -> Result<reqwest::Url, YukiE
         ));
     }
 
+    // Inspeciona se o host na URL bruta continha representação hexadecimal ou ofuscada antes de qualquer normalização do parser
+    if let Some(after_scheme) = trimmed.split("://").nth(1) {
+        let raw_host = after_scheme
+            .split(['/', ':', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        if is_ambiguous_ip_encoding(raw_host) {
+            return Err(YukiError::SecurityViolation(format!(
+                "Representação ambígua ou ofuscada de endereço IP ('{}') é proibida por segurança.",
+                raw_host
+            )));
+        }
+    }
+
     // 3. Validação do host
     let host = url.host_str().ok_or_else(|| {
         YukiError::InvalidRequest("URL deve conter um nome de host válido".to_string())
@@ -78,6 +93,11 @@ pub fn validate_and_parse_fetch_url(raw_url: &str) -> Result<reqwest::Url, YukiE
             "Representação ambígua ou ofuscada de endereço IP ('{}') é proibida por segurança.",
             host_trimmed
         )));
+    }
+
+    // Se o host for um IP literal (ou foi normalizado para IP pelo parser), valida imediatamente contra a política anti-SSRF
+    if let Ok(ip) = host_trimmed.parse::<IpAddr>() {
+        is_globally_routable_ip(ip)?;
     }
 
     // 4. Restrição estrita de portas
@@ -128,11 +148,14 @@ fn is_forbidden_domain_name(host: &str) -> bool {
 }
 
 /// Detecta formatos de IP ofuscados como números inteiros isolados (dword),
-/// notações com zeros à esquerda (octal) ou prefixos hexadecimais (0x).
+/// notações com zeros à esquerda (octal), hexadecimais em partes ou IPs numéricos incompletos.
 fn is_ambiguous_ip_encoding(host: &str) -> bool {
     let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
 
-    // Hexadecimal
+    // Hexadecimal geral
     if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
         return true;
     }
@@ -142,12 +165,31 @@ fn is_ambiguous_ip_encoding(host: &str) -> bool {
         return true;
     }
 
-    // Componentes de IPv4 com zero à esquerda (interpretação octal em C/POSIX)
+    // Componentes de IPv4 pontuados
     if trimmed.contains('.') {
         let parts: Vec<&str> = trimmed.split('.').collect();
-        if parts.len() == 4 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())) {
-            for p in parts {
-                if p.len() > 1 && p.starts_with('0') {
+        // Verifica se todos os segmentos são numéricos (dígitos ou hex com 0x)
+        let all_numeric_parts = parts.iter().all(|p| {
+            p.chars().all(|c| c.is_ascii_digit())
+                || ((p.starts_with("0x") || p.starts_with("0X"))
+                    && p.len() > 2
+                    && p[2..].chars().all(|c| c.is_ascii_hexdigit()))
+        });
+
+        if all_numeric_parts {
+            // Se tem menos de 4 partes numéricas (ex: 127.1, 10.1, 127.0.1)
+            if parts.len() < 4 {
+                return true;
+            }
+            // Se tem partes com zero à esquerda (octal em C/POSIX) ou hex em parte (ex: 127.0.0.0x1)
+            for p in &parts {
+                if (p.len() > 1
+                    && p.starts_with('0')
+                    && !p.starts_with("0x")
+                    && !p.starts_with("0X"))
+                    || p.starts_with("0x")
+                    || p.starts_with("0X")
+                {
                     return true;
                 }
             }
@@ -412,6 +454,14 @@ fn validate_ipv6(ipv6: Ipv6Addr) -> Result<(), YukiError> {
     if (segments[0] & 0xffc0) == 0xfe80 {
         return Err(YukiError::SecurityViolation(format!(
             "Endereço IPv6 link-local (fe80::/10): '{}' bloqueado por SSRF.",
+            ipv6
+        )));
+    }
+
+    // 8.5. Site-Local Depreciado (fec0::/10 RFC 3879)
+    if (segments[0] & 0xffc0) == 0xfec0 {
+        return Err(YukiError::SecurityViolation(format!(
+            "Endereço IPv6 site-local depreciado (fec0::/10): '{}' bloqueado por SSRF.",
             ipv6
         )));
     }

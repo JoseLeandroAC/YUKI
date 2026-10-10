@@ -200,13 +200,28 @@ impl YukiCore {
     /// - Data != Instruction
     /// - External model output is UNTRUSTED DATA
     pub async fn process_input_async(&self, input: UserInput) -> Result<YukiResult, YukiError> {
+        let turn_budget = self
+            .research_budget_tracker
+            .as_ref()
+            .map(|t| {
+                Arc::new(crate::contracts::research::ResearchBudgetTracker::new(
+                    t.budget().clone(),
+                ))
+            })
+            .unwrap_or_else(|| {
+                Arc::new(crate::contracts::research::ResearchBudgetTracker::default())
+            });
+
+        crate::contracts::research::CURRENT_TURN_BUDGET
+            .scope(turn_budget, self.process_input_internal(input))
+            .await
+    }
+
+    async fn process_input_internal(&self, input: UserInput) -> Result<YukiResult, YukiError> {
         let request_id = input.request_id.clone();
         let correlation_id = CorrelationId::from_request(&request_id);
 
         // 1. Audit Input Received
-        if let Some(tracker) = &self.research_budget_tracker {
-            tracker.reset_turn();
-        }
 
         self.record_audit_async(AuditEvent::new(
             EventType::InputReceived,

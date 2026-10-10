@@ -139,6 +139,10 @@ fn strip_dangerous_blocks(input: &str) -> String {
                     i = j;
                     output.push(' ');
                     continue;
+                } else {
+                    // Tag perigosa não fechada até o fim do documento (EOF):
+                    // descarta até o final para impedir vazamento de scripts/estilos malformados
+                    break;
                 }
             }
         }

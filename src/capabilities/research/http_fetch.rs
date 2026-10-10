@@ -53,6 +53,7 @@ impl FetchTransport for NetworkFetchTransport {
             .timeout(req.timeout)
             .redirect(reqwest::redirect::Policy::none()) // Redirecionamento supervisionado manualmente
             .resolve(host, req.pinned_addr) // Imunidade absoluta contra DNS Rebinding
+            .no_proxy() // CRÍTICO: Previne que proxies herdados do ambiente (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) contornem validações de IP e socket pinning
             .build()
             .map_err(|e| {
                 YukiError::ExecutionFailed(format!(
@@ -108,17 +109,32 @@ impl FetchTransport for NetworkFetchTransport {
                     }
                 }
 
-                let body_bytes = resp.bytes().await.map_err(|e| {
+                // Streaming seguro com aborto imediato em violação de teto (prevenção contra OOM/Memory Exhaustion)
+                let mut body_chunks = Vec::new();
+                let mut total_bytes = 0usize;
+                let max_stream_limit = 1024 * 1024; // 1 MiB teto incondicional de streaming
+
+                let mut resp_stream = resp;
+                while let Some(chunk) = resp_stream.chunk().await.map_err(|e| {
                     YukiError::ExecutionFailed(format!(
-                        "Falha ao ler dados da resposta HTTP: {}",
+                        "Falha ao ler dados de streaming da resposta HTTP: {}",
                         e
                     ))
-                })?;
+                })? {
+                    total_bytes += chunk.len();
+                    if total_bytes > max_stream_limit {
+                        return Err(YukiError::ExecutionFailed(format!(
+                            "Corpo descomprimido excedeu o limite máximo de {} bytes",
+                            max_stream_limit
+                        )));
+                    }
+                    body_chunks.push(chunk.to_vec());
+                }
 
                 Ok(FetchResponse {
                     status,
                     headers,
-                    body_chunks: vec![body_bytes.to_vec()],
+                    body_chunks,
                 })
             })
         });
@@ -312,8 +328,11 @@ impl ContentFetchProvider for HttpContentFetchProvider {
         // 2. Validação prévia dos parâmetros contratuais de entrada
         input.validate()?;
 
-        // 3. Verificação do orçamento global compartilhado de turno (ADR-020)
-        self.config.budget_tracker.check_and_increment_fetch()?;
+        // 3. Verificação do orçamento global compartilhado de turno (ADR-020 com isolamento de contexto)
+        let active_tracker = crate::contracts::research::CURRENT_TURN_BUDGET
+            .try_with(|t| t.clone())
+            .unwrap_or_else(|_| self.config.budget_tracker.clone());
+        active_tracker.check_and_increment_fetch()?;
 
         // 4. Loop de navegação e redirecionamento com validação per-hop (máximo 3 saltos)
         let mut current_url = validate_and_parse_fetch_url(&input.url)?;
@@ -452,7 +471,7 @@ impl ContentFetchProvider for HttpContentFetchProvider {
             }
 
             // 9. Registro de bytes consumidos no orçamento global compartilhado
-            self.config.budget_tracker.record_bytes(body_bytes.len())?;
+            active_tracker.record_bytes(body_bytes.len())?;
 
             // 10. Extração e sanitização segura de texto HTML (Data != Instruction)
             let raw_text = String::from_utf8_lossy(&body_bytes);
@@ -463,10 +482,7 @@ impl ContentFetchProvider for HttpContentFetchProvider {
 
             let published_date = resp.headers.get("last-modified").cloned();
             let bytes_observed = body_bytes.len();
-            let source_id = Some(format!(
-                "src:fetch:{}",
-                &compute_sha256(input.url.as_bytes())[..8]
-            ));
+            let source_id = Some(format!("src:fetch:{}", &content_hash_sha256[..16]));
 
             let final_title = title.unwrap_or_else(|| {
                 format!(

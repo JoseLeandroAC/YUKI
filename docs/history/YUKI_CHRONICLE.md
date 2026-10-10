@@ -515,4 +515,58 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
   - `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) mantidos integralmente preservados.
   - Nenhuma release tag ou release GitHub criada.
 
+---
+
+#### [2026-10-10] Research v1 — Auditoria Corretiva de Segurança Pós-Marco 3 (Concorrência, SSRF, Orçamento e Proveniência)
+
+##### 1. Contexto e Objetivos da Auditoria
+- Conduzida auditoria adversarial independente sobre os subsistemas dos Marcos 1, 2 e 3 da Research v1 (`feature/research-v1`), avaliando convecção de transporte HTTP, proteção SSRF contra evasões com proxies, concorrência no orçamento de recursos, isolamento de turnos e higienização de dados.
+- Verificação minuciosa das invariantes constitucionais: `Capability != Permission != Authorization != Execution`, `Model Output != Command != Authorization`, `Think != Authorize != Execute`, `Data != Instruction`, `Verification != Truth`, `Storage != Authority`.
+
+##### 2. Vulnerabilidades Remediadas e Endurecimentos Implementados
+- **Transporte HTTP e Defesa Anti-SSRF contra Evasão de Proxy**:
+  - Implementado `.no_proxy()` nos construtores `reqwest::Client::builder()` de `NetworkFetchTransport` e `BraveSearchProvider`, prevenindo que proxies de ambiente (`HTTP_PROXY`, `ALL_PROXY`) sequestrassem o tráfego e anulassem o socket pinning.
+  - Endurecida a validação `validate_url` e `is_ambiguous_ip_encoding` contra IPs truncados (ex.: `127.1`, `10.1`), hexadecimais em segmentos (ex.: `0x7f000001`, `127.0.0.0x1`) e validação direta de IPs literais parseados.
+  - Adicionado bloqueio explícito de endereços IPv6 site-local obsoletos (`fec0::/10`, RFC 3879) em `validate_ipv6`.
+- **Contenção Estrita de Recursos e Prevenção de OOM**:
+  - Substituído `resp.bytes().await` por leitura streaming incremental (`resp_stream.chunk().await`) com aborto imediato e devolução de erro assim que o acumulador excede 1 MiB (`1.048.576` bytes).
+- **Concorrência e Isolamento de Orçamento (`ResearchBudgetTracker`)**:
+  - Eliminadas corridas de verificação-e-ação (*check-then-act*) através de loops atômicos `compare_exchange_weak` com ordenação `SeqCst` / `Relaxed` para contagem de buscas, fetches e bytes acumulados.
+  - Implementado escopo de orçamento isolado por turno via `tokio::task_local! { pub static CURRENT_TURN_BUDGET: Arc<ResearchBudgetTracker>; }` em `YukiCore::process_input_async`, eliminando contaminação e mutações inseguras de instâncias singleton via `reset_turn()`.
+  - Reconciliado o limite cumulativo padrão de bytes por turno para 2 MiB (`2.097.152` bytes) no `ResearchBudget`, harmonizando a capacidade com o teto de 3 fetches de 1 MiB.
+- **Higiene de Conteúdo e Entropia de Proveniência**:
+  - Descarte seguro até EOF de blocos perigosos não fechados (`<script>`, `<style>`) em `html_extract.rs`, eliminando vazamento de código em HTML truncado ou hostil.
+  - Expandido o identificador `source_id` para 16 caracteres hexadecimais (64 bits de entropia) derivados do SHA-256 (`src:fetch:{hash[..16]}`).
+
+##### 3. Nova Suíte Dedicada de Auditoria (`tests/security_research_audit.rs`)
+- 20 testes adversariais adicionados cobrindo:
+  1. Socket pinning e imunidade a proxies de ambiente (`.no_proxy()`);
+  2. Liberação de conexões sob timeout de requisições lentas;
+  3. Ausência de vazamento de recursos sob concorrência multi-thread;
+  4. Isolamento de orçamento por sessão/turno assíncrono;
+  5. Prevenção de condições de corrida via loops atômicos CAS;
+  6. Contabilidade atômica de bytes em requisições paralelas;
+  7. Teto cumulativo canônico de 2 MiB;
+  8. Bloqueio de IPs numéricos truncados;
+  9. Bloqueio de representações hexadecimais ofuscadas;
+  10. Bloqueio de endereços IPv6 site-local (`fec0::/10`);
+  11. Bloqueio de redirecionamento para loopback e metadados de nuvem;
+  12. Aborto precoce em streaming de corpo excessivo;
+  13. Descarte limpo de tags `<script>` não fechadas;
+  14. Extração de HTML malformado, aninhado e com Unicode/emojis;
+  15. Injeção indireta de prompt não pode autorizar nem executar capacidades desautorizadas;
+  16. Permissão `egress:web_search` não autoriza `research.fetch`;
+  17. Permissão `egress:web_fetch` não autoriza `research.search`;
+  18. Chamada direta ao executor sem token válido falha fechada;
+  19. Entropia de 16 caracteres hexadecimais no `source_id`;
+  20. `DirectSource` representa integridade de proveniência, não veracidade de fatos.
+
+##### 4. Portões de Qualidade
+- `cargo test`: 260 testes unitários, de integração e de auditoria aprovados (4 testes live ignorados).
+- `cargo fmt --check`: 100% aprovado.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `cargo build --release`: aprovado.
+- Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) rigorosamente preservados.
+
+
 

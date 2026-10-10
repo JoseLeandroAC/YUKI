@@ -464,3 +464,37 @@ A capability de Research é projetada para ser completamente agnóstica em rela�
 - **Latência de Turno:** O acesso à internet adiciona de 1 a 3 segundos de latência ao turno conversacional.
 - **Páginas com Proteção Anti-Bot:** Sites que exigem execução pesada de JavaScript ou CAPTCHAs retornarão HTTP 403 e serão tratados graciosamente como indisponíveis, pois a Yuki não executará browsers headless desgovernados.
 - **Dependência de Quota Externa:** O operador deve gerenciar sua conta na Brave Search API ou operar sua própria instância do SearXNG.
+
+---
+
+## 9. Auditoria Corretiva de Segurança Pós-Marco 3
+
+Em auditoria adversarial e independente sobre os Marcos 1, 2 e 3 da Research v1, foram identificados e corrigidos pontos críticos de segurança em transporte, concorrência, contenção de recursos e proveniência:
+
+1. **Imunidade a Proxies de Ambiente (`.no_proxy()`):**
+   - *Vulnerabilidade remediada:* Variáveis de ambiente como `HTTP_PROXY`, `HTTPS_PROXY` e `ALL_PROXY` poderiam interceptar o tráfego HTTP de `NetworkFetchTransport` e `BraveSearchProvider`, delegando a resolução do hostname ao proxy e anulando o socket pinning e a validação anti-SSRF.
+   - *Correção:* Configuração explícita de `.no_proxy()` nos construtores `reqwest::Client::builder()`, assegurando conexão direta e determinística exclusivamente aos IPs validados pela política de segurança.
+
+2. **Leitura Streaming Incremental com Aborto Imediato de OOM:**
+   - *Vulnerabilidade remediada:* `resp.bytes().await` realizava buffering de todo o payload antes de checar seu tamanho, expondo o processo a esgotamento de memória (OOM) caso o servidor remoto enviasse fluxos massivos ou contínuos sem cabeçalho `Content-Length`.
+   - *Correção:* Leitura em chunks contínuos via `resp_stream.chunk().await` com encerramento imediato da conexão e devolução de `YukiError::ExecutionFailed` se o acumulador exceder estritamente 1 MiB (`1,048,576` bytes).
+
+3. **Operações Atômicas CAS no Orçamento (`ResearchBudgetTracker`):**
+   - *Vulnerabilidade remediada:* Métodos `check_and_increment` apresentavam corrida de verificação-e-ação (*check-then-act*) sob acessos assíncronos simultâneos, permitindo ultrapassar o teto estrito de buscas e fetches sob concorrência.
+   - *Correção:* Implementação de loops atômicos com `compare_exchange_weak` (Ordering `SeqCst` / `Relaxed`) para `check_and_increment_search`, `check_and_increment_fetch` e `record_bytes`.
+
+4. **Isolamento de Orçamento por Turno (`CURRENT_TURN_BUDGET`):**
+   - *Vulnerabilidade remediada:* Compartilhamento de instância singleton com mutações via `reset_turn()` poderia zerar prematuramente orçamentos de tarefas ativas em concorrência.
+   - *Correção:* Adoção de `tokio::task_local! { pub static CURRENT_TURN_BUDGET: Arc<ResearchBudgetTracker>; }`, delimitando o escopo de cada turno em `YukiCore::process_input_async` com destruição limpa ao final do turno e desacoplamento de instâncias singleton.
+
+5. **Reconciliação do Teto Canônico de Bytes:**
+   - *Ajuste:* Reconciliação do default `max_total_bytes` no `ResearchBudget` para 2 MiB (`2,097,152` bytes), permitindo o download de múltiplos fetches parciais dentro do limite máximo de 3 páginas por turno, mantendo o teto individual de 1 MiB por requisição.
+
+6. **Endurecimento Anti-SSRF (Representações Numéricas e IPv6 Depreciado):**
+   - *Endurecimento:* Detecção e rejeição explícita de representações de IP truncadas (ex.: `127.1`, `10.1`), notações hexadecimais em segmentos (ex.: `0x7f000001`, `127.0.0.0x1`) e rejeição de endereços IPv6 site-local obsoletos (`fec0::/10`, RFC 3879).
+
+7. **Sanitização de HTML com Fechamento Seguro de Tags Perigosas:**
+   - *Robustez:* O extrator de texto passa a descartar até o fim do documento (EOF) caso blocos perigosos (`<script>`, `<style>`) não possuam tag de fechamento correspondente, impedindo vazamento de código de script ou folhas de estilo para a extração textual.
+
+8. **Entropia Aumentada de Proveniência:**
+   - *Integridade:* Identificadores de fonte (`source_id`) em `research.fetch` foram expandidos para 16 caracteres hexadecimais (64 bits de entropia) derivados do hash SHA-256 do conteúdo (`src:fetch:{hash[..16]}`), eliminando riscos de colisão determinística.

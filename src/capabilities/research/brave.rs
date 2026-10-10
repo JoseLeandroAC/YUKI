@@ -170,6 +170,7 @@ impl BraveSearchProvider {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy() // Previne desvio de tráfego por proxies de ambiente
             .build()
             .map_err(|e| {
                 YukiError::ExecutionFailed(format!(
@@ -237,8 +238,11 @@ impl SearchProvider for BraveSearchProvider {
             ));
         }
 
-        // 2. Verificação de orçamento de buscas por turno (ADR-020)
-        self.budget_tracker.check_and_increment_search()?;
+        // 2. Verificação de orçamento de buscas por turno (ADR-020 com isolamento de contexto)
+        let active_tracker = crate::contracts::research::CURRENT_TURN_BUDGET
+            .try_with(|t| t.clone())
+            .unwrap_or_else(|_| self.budget_tracker.clone());
+        active_tracker.check_and_increment_search()?;
 
         // 3. Resolução segura de credencial via CredentialBroker
         let lease = self

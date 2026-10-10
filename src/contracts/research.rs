@@ -206,8 +206,8 @@ impl Default for ResearchBudget {
         Self {
             max_searches: 3,
             max_fetches: 3,
-            max_page_bytes: 256 * 1024,   // 256 KiB
-            max_total_bytes: 1024 * 1024, // 1 MiB
+            max_page_bytes: 256 * 1024,       // 256 KiB
+            max_total_bytes: 2 * 1024 * 1024, // 2 MiB (ADR-020 teto cumulativo canônico)
             search_timeout_ms: 10_000,
             fetch_timeout_ms: 15_000,
             total_timeout_ms: 45_000,
@@ -216,8 +216,14 @@ impl Default for ResearchBudget {
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+tokio::task_local! {
+    /// Contexto de orçamento delimitado e isolado por turno/tarefa assíncrona.
+    /// Garante que concorrência entre turnos e sessões não sofra poluição nem resets acidentais.
+    pub static CURRENT_TURN_BUDGET: Arc<ResearchBudgetTracker>;
+}
 
 /// Rastreador governado de consumo do envelope de orçamento de Research por turno (ADR-020).
 ///
@@ -281,41 +287,68 @@ impl ResearchBudgetTracker {
 
     pub fn check_and_increment_search(&self) -> Result<(), YukiError> {
         self.check_total_timeout()?;
-        let current = self.searches_executed.load(Ordering::SeqCst);
-        if current >= self.budget.max_searches as usize {
-            return Err(YukiError::ExecutionFailed(format!(
-                "Orçamento de pesquisas esgotado para este turno (máximo: {})",
-                self.budget.max_searches
-            )));
+        let mut current = self.searches_executed.load(Ordering::SeqCst);
+        loop {
+            if current >= self.budget.max_searches as usize {
+                return Err(YukiError::ExecutionFailed(format!(
+                    "Orçamento de pesquisas esgotado para este turno (máximo: {})",
+                    self.budget.max_searches
+                )));
+            }
+            match self.searches_executed.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
         }
-        self.searches_executed.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 
     pub fn check_and_increment_fetch(&self) -> Result<(), YukiError> {
         self.check_total_timeout()?;
-        let current = self.fetches_executed.load(Ordering::SeqCst);
-        if current >= self.budget.max_fetches as usize {
-            return Err(YukiError::ExecutionFailed(format!(
-                "Orçamento de leituras de páginas (fetch) esgotado para este turno (máximo: {})",
-                self.budget.max_fetches
-            )));
+        let mut current = self.fetches_executed.load(Ordering::SeqCst);
+        loop {
+            if current >= self.budget.max_fetches as usize {
+                return Err(YukiError::ExecutionFailed(format!(
+                    "Orçamento de leituras de páginas (fetch) esgotado para este turno (máximo: {})",
+                    self.budget.max_fetches
+                )));
+            }
+            match self.fetches_executed.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
         }
-        self.fetches_executed.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 
     pub fn record_bytes(&self, bytes: usize) -> Result<(), YukiError> {
-        let current = self.total_bytes_consumed.load(Ordering::SeqCst);
-        let new_total = current.saturating_add(bytes);
-        if new_total > self.budget.max_total_bytes {
-            return Err(YukiError::ExecutionFailed(format!(
-                "Orçamento cumulativo de dados de pesquisa excedido ({} bytes excedeu teto de {} bytes)",
-                new_total, self.budget.max_total_bytes
-            )));
+        let mut current = self.total_bytes_consumed.load(Ordering::SeqCst);
+        loop {
+            let new_total = current.saturating_add(bytes);
+            if new_total > self.budget.max_total_bytes {
+                return Err(YukiError::ExecutionFailed(format!(
+                    "Orçamento cumulativo de dados de pesquisa excedido ({} bytes excedeu teto de {} bytes)",
+                    new_total, self.budget.max_total_bytes
+                )));
+            }
+            match self.total_bytes_consumed.compare_exchange_weak(
+                current,
+                new_total,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
         }
-        self.total_bytes_consumed.store(new_total, Ordering::SeqCst);
-        Ok(())
     }
 
     pub fn reset_turn(&self) {
