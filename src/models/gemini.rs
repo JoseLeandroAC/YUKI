@@ -409,7 +409,9 @@ impl GeminiProviderAdapter {
                     error_msg
                 ))),
                 429 => {
-                    if error_msg.to_lowercase().contains("quota") {
+                    if error_msg.to_lowercase().contains("quota")
+                        || error_msg.contains("RESOURCE_EXHAUSTED")
+                    {
                         Err(ModelError::QuotaExceeded(error_msg))
                     } else {
                         Err(ModelError::RateLimited { retry_after_secs })

@@ -298,5 +298,66 @@ Em uma arquitetura de assistente autônomo governado, a execução de ferramenta
 ##### Lição de Engenharia
 > *«A ferramenta executada produz dados para alimentar o raciocínio do modelo, não o encerramento da conversa. Porém, ao reintroduzir os dados de uma ferramenta no diálogo, a integridade da governança deve ser mantida: o modelo nunca adquire autorização automática para a próxima ação. Cada proposta subsequente recomeça o ciclo constitucional de autorização, execução, verificação e auditoria.»*
 
+---
+
+#### [Event Time: 2026-10-04 ~17:22 | Record Creation Time: 2026-10-10]
+### Quarto Teste Live ao Gemini — Primeiro Turno Conversacional Completo e Bateria de Validação de Capacidades
+
+- **Event Time**: 04 de outubro de 2026, aproximadamente 17:22 (America/Sao_Paulo) / 20:22 UTC — *Horário evidenciado pelos registros de auditoria persistente*
+- **Record Creation Time**: 10 de outubro de 2026
+- **Milestone Relacionado**: Branch pós-MVP-1 (`feature/post-mvp1-model-runtime-wiring`, commit `accc8320872c1b179eb4e9a82fa49e1e82bd35ad`)
+- **Contexto Operacional**: Validação prática conduzida pelo Owner após a implementação do *Governed Bounded Tool Continuation Loop* e atualização para o modelo `gemini-3.8-flash`.
+
+##### 1. Teste A — Primeiro Turno Conversacional Completo
+- **Entrada Submetida**:
+  `Yuki, por favor se apresente e diga qual e o seu proposito fundamental em uma frase.`
+- **Resposta Produzida**:
+  > *«Olá, eu sou a Yuki, uma assistente de inteligência artificial cujo propósito fundamental é auxiliar você de forma clara, segura e eficiente na resolução de dúvidas e execução de suas tarefas.»*
+- **Classificação Histórica Formal**: **`FIRST VERIFIED SUCCESSFUL LIVE GEMINI CONVERSATIONAL TURN THROUGH YUKI`**.
+- **Evidência Técnica Verificada**:
+  A auditoria persistente em SQLite (`data/yuki.db`, eventos sequência 64 a 74) atesta a mecânica do turno:
+  1. O prompt foi recebido e o contexto foi construído (`seq 64-65`).
+  2. Na iteração 0, o Gemini 3.8 propôs autonomamente a capability `system.info` (`seq 66-67`).
+  3. O Security Controller autorizou explicitamente a operação sob classe de risco `Low` (`seq 68-69`).
+  4. O Execution Engine despachou `system.info` (`seq 70`), o efeito foi observado (`seq 71`) e atestado como `VerifiedSuccess` pelo Verification Engine (`seq 72`).
+  5. O resultado verificado foi encapsulado como dado e reintroduzido no modelo como `functionResponse` na iteração 1 (`seq 73`).
+  6. O Gemini sintetizou a resposta conversacional final em linguagem natural, encerrando o turno com sucesso (`seq 74`, status `DirectText`, 1 iteração de ferramenta).
+
+##### 2. Teste B — Tempo, Calendário e Análise Forense de Execução de Ferramentas
+- **Entrada Submetida**:
+  `Yuki, que horas são agora e que dia do ano?`
+- **Resposta Produzida**:
+  A Yuki respondeu fornecendo o horário UTC, a data de 4 de outubro de 2026, o dia 277 do ano e contextualizou o fuso horário de Brasília.
+- **Investigação Forense e Evidência Factual**:
+  Ao analisar os registros do banco de auditoria (`data/yuki.db`), identificou-se categoricamente:
+  - No ciclo correspondente (eventos sequência 75 a 85), o modelo propôs formalmente a capability `system.time` (`seq 78`, `op_1a10896b76d_9`).
+  - O Security Controller concedeu autorização (`seq 80`), a capability executou com sucesso (`seq 81-82`) e foi verificada pelo Verification Engine (`seq 83`).
+  - O resultado de `system.time` foi entregue na iteração 1 (`seq 84`), fornecendo a base fática necessária para que o modelo respondesse com precisão sobre o dia 277 e o horário exato.
+  - Em contraste, em uma execução subsequente com pequena variação de prompt (eventos sequência 86 a 89), o modelo não propôs ferramentas (`has_proposal: false`), respondendo exclusivamente a partir de contexto paramétrico. A Crônica registra a evidência real: houve chamada e verificação efetiva de `system.time` no turno que contextualizou o dia do ano.
+
+##### 3. Teste C — Conhecimento Geral Paramétrico
+- **Entrada Submetida**: Consulta sobre a primeira viagem humana à Lua e o programa Apollo.
+- **Resposta Produzida**: A Yuki forneceu detalhes históricos acurados sobre a missão Apollo 11 e as seis missões que pousaram astronautas na Lua.
+- **Classificação**: Resposta puramente baseada no conhecimento pré-treinado (paramétrico) do LLM, sem acionamento de capabilities e sem atribuição indevida a pesquisa web.
+
+##### 4. Teste D — Reconhecimento Explícito de Limitação de Capacidades
+- **Entrada Submetida**:
+  `Yuki, Como está as votações do Brasil hoje?`
+- **Resposta Produzida**: A Yuki informou com transparência que não possui acesso a informações em tempo real e sugeriu ao operador a consulta a fontes externas e veículos oficiais.
+- **Classificação**: Limitação atual e legítima de capacidades (*Capability Boundary*), constituindo comportamento íntegro e seguro da IA, e NÃO uma falha do Model Gateway.
+
+##### 5. Teste E — Pesquisa Complexa: Observabilidade de Timeout e Limites de Cota
+- **Entrada Submetida**: Consulta complexa demandando pesquisas, estatísticas e tendências da eleição presidencial brasileira de 2026.
+- **Resultados Observados**:
+  1. *Primeira tentativa*: `Model error: Timeout: 30s` — O processamento upstream do Gemini excedeu a janela máxima de 30 segundos configurada para uma chamada HTTP individual.
+  2. *Segunda tentativa*: `RESOURCE_EXHAUSTED` — O provedor Google Gemini rejeitou a requisição informando esgotamento do limite na métrica `generate_content_free_tier_requests` para o modelo `gemini-3.8-flash`, indicando um intervalo de retry de aproximadamente 9 segundos.
+- **Lição de Engenharia e Esclarecimento de Infraestrutura**:
+  1. *Free Tier vs Assinatura de Consumidor:* A assinatura Google AI Pro (Google One AI Premium) do usuário destina-se exclusivamente ao aplicativo web de consumo do Gemini (gemini.google.com). Ela não concede cota paga nem remove os limites da Google Gemini Developer API (Google AI Studio / GCP), que opera sob políticas próprias de tarifação e cotas (Rate Limit de 5 ou 15 RPM no nível gratuito).
+  2. *Necessidade de Orçamentos de Pesquisa:* Consultas de alta densidade cognitiva demandam orçamentos formais de tempo, controle de taxa e decomposição assíncrona, corroborando a necessidade da futura capability de Research.
+
+##### Lição de Engenharia
+> *«Um assistente pessoal governado não se prova apenas quando acerta, mas quando revela com integridade suas fronteiras: reconhecendo a ausência de acesso à rede, falhando de forma fechada diante de timeouts e cotas, e mantendo cada ferramenta sob escrutínio de segurança mesmo no fluxo contínuo de conversação.»*
+
+
 
 
