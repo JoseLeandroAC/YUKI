@@ -7,6 +7,7 @@ pub mod execution;
 pub mod memory;
 pub mod models;
 pub mod persistence;
+pub mod personality;
 pub mod security;
 pub mod verification;
 
