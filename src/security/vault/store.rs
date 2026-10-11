@@ -65,6 +65,9 @@ pub enum VaultError {
 
     #[error("Cofre em uso por outro processo: {0}")]
     ProcessLockBusy(String),
+
+    #[error("Cofre legado sem canário e sem credenciais verificáveis: '{0}'. Inicialização explícita necessária")]
+    UnverifiableLegacyVault(String),
 }
 
 /// Registro persistido contendo metadados claros e segredo cifrado.
@@ -102,20 +105,69 @@ fn lock_path_for(target_path: &Path) -> PathBuf {
     target_path.with_file_name(format!("{}.lock", file_name))
 }
 
-/// Lock interprocessos para sincronização segura de operações no Credential Vault.
-pub struct VaultProcessLock {
+/// Aplica permissões restritas em arquivos sensíveis do Vault.
+/// - No Unix: modo 0o600 (leitura/escrita exclusiva para o proprietário).
+/// - No Windows: remove herança de ACL e concede controle total exclusivamente ao usuário atual.
+pub fn restrict_file_permissions(path: &Path) -> Result<(), VaultError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        let _ = fs::set_permissions(path, perms);
+        Ok(())
+    }
+
     #[cfg(windows)]
+    {
+        if let Ok(username) = std::env::var("USERNAME") {
+            let path_str = path.to_string_lossy().to_string();
+            let grant_arg = format!("{}:F", username);
+            let _ = std::process::Command::new("icacls")
+                .arg(&path_str)
+                .arg("/inheritance:r")
+                .arg("/grant:r")
+                .arg(&grant_arg)
+                .output();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        Ok(())
+    }
+}
+
+/// Lock interprocessos para sincronização segura de operações no Credential Vault.
+/// Baseado em locks de sistema operacional mantidos por descritores abertos:
+/// - No Windows: `share_mode(0)` garante exclusão mútua em nível de kernel NTFS.
+/// - No Unix: `libc::flock(LOCK_EX | LOCK_NB)` garante exclusão mútua em nível de kernel POSIX.
+///
+/// INVARIANTE: O lock é liberado automaticamente pelo kernel do SO caso o processo termine
+/// inesperadamente (evitando deadlocks permanentes), e NUNCA é removido por critério de idade/tempo.
+pub struct VaultProcessLock {
     _file: File,
-    #[cfg(not(windows))]
-    lock_path: PathBuf,
 }
 
 impl VaultProcessLock {
-    /// Adquire lock exclusivo para o arquivo do cofre especificado com timeout/tentativas.
+    /// Adquire lock exclusivo para o cofre com timeout padrão de 10 segundos.
     pub fn acquire(vault_path: &Path) -> Result<Self, VaultError> {
+        Self::acquire_with_timeout(vault_path, std::time::Duration::from_millis(10_000))
+    }
+
+    /// Adquire lock exclusivo para o cofre com timeout configurável.
+    pub fn acquire_with_timeout(
+        vault_path: &Path,
+        timeout: std::time::Duration,
+    ) -> Result<Self, VaultError> {
         if let Some(parent) = vault_path.parent() {
             if !parent.as_os_str().is_empty() {
                 let _ = fs::create_dir_all(parent);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+                }
             }
         }
         let lock_path = lock_path_for(vault_path);
@@ -129,14 +181,17 @@ impl VaultProcessLock {
             let start = std::time::Instant::now();
             loop {
                 match opts.open(&lock_path) {
-                    Ok(file) => return Ok(Self { _file: file }),
+                    Ok(file) => {
+                        let _ = restrict_file_permissions(&lock_path);
+                        return Ok(Self { _file: file });
+                    }
                     Err(e)
                         if e.raw_os_error() == Some(32)
                             || e.kind() == std::io::ErrorKind::PermissionDenied =>
                     {
-                        if start.elapsed() > std::time::Duration::from_millis(10_000) {
+                        if start.elapsed() > timeout {
                             return Err(VaultError::ProcessLockBusy(format!(
-                                "Cofre em uso por outro processo (lock em {}): {}",
+                                "Cofre em uso por outro processo (lock Windows em {}): {}",
                                 lock_path.display(),
                                 e
                             )));
@@ -154,57 +209,72 @@ impl VaultProcessLock {
             }
         }
 
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::io::AsRawFd;
+
+            let mut opts = fs::OpenOptions::new();
+            opts.read(true).write(true).create(true);
+
+            let file = opts.open(&lock_path).map_err(|e| {
+                VaultError::Io(format!(
+                    "Falha ao abrir arquivo de lock em {}: {}",
+                    lock_path.display(),
+                    e
+                ))
+            })?;
+            let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+
+            let fd = file.as_raw_fd();
             let start = std::time::Instant::now();
             loop {
-                match fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&lock_path)
+                let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                if ret == 0 {
+                    return Ok(Self { _file: file });
+                }
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                    || err.raw_os_error() == Some(libc::EAGAIN)
                 {
-                    Ok(mut file) => {
-                        let pid = std::process::id();
-                        let _ = writeln!(file, "{}", pid);
-                        return Ok(Self { lock_path });
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if let Ok(meta) = fs::metadata(&lock_path) {
-                            if let Ok(elapsed) = meta.modified().and_then(|m| {
-                                m.elapsed().map_err(|_| std::io::Error::other("time error"))
-                            }) {
-                                if elapsed > std::time::Duration::from_secs(5) {
-                                    let _ = fs::remove_file(&lock_path);
-                                    continue;
-                                }
-                            }
-                        }
-                        if start.elapsed() > std::time::Duration::from_millis(10_000) {
-                            return Err(VaultError::ProcessLockBusy(format!(
-                                "Cofre em uso por outro processo (lock em {}): {}",
-                                lock_path.display(),
-                                e
-                            )));
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(15));
-                    }
-                    Err(e) => {
-                        return Err(VaultError::Io(format!(
-                            "Falha ao adquirir lock do cofre em {}: {}",
+                    if start.elapsed() > timeout {
+                        return Err(VaultError::ProcessLockBusy(format!(
+                            "Cofre em uso por outro processo (flock Unix em {}): {}",
                             lock_path.display(),
-                            e
+                            err
                         )));
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                } else {
+                    return Err(VaultError::Io(format!(
+                        "Falha na chamada flock em {}: {}",
+                        lock_path.display(),
+                        err
+                    )));
                 }
             }
+        }
+
+        #[cfg(not(any(windows, unix)))]
+        {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)
+                .map_err(|e| VaultError::Io(e.to_string()))?;
+            Ok(Self { _file: file })
         }
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 impl Drop for VaultProcessLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.lock_path);
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -317,11 +387,20 @@ impl CredentialVault {
                 _ => return Err(VaultError::InvalidPassphrase),
             }
         } else {
-            // Migração transparente de cofre legado (Marco 6) sem canário
-            if let Some((_, first_entry)) = vault_file.entries.iter().next() {
-                if decrypt_secret(passphrase.expose_secret(), &first_entry.encrypted).is_err() {
-                    return Err(VaultError::InvalidPassphrase);
-                }
+            // Migração de cofre legado (Marco 6) sem canário
+            if vault_file.entries.is_empty() {
+                // CORREÇÃO P1 (Marco 7.2): Cofre legado vazio sem canário não possui
+                // qualquer evidência criptográfica que comprove a senha fornecida.
+                // Falha fechado sem adotar senha arbitrária silenciosamente.
+                return Err(VaultError::UnverifiableLegacyVault(
+                    path.display().to_string(),
+                ));
+            }
+
+            // Se possui entradas, valida contra a primeira entrada existente
+            let (_, first_entry) = vault_file.entries.iter().next().unwrap();
+            if decrypt_secret(passphrase.expose_secret(), &first_entry.encrypted).is_err() {
+                return Err(VaultError::InvalidPassphrase);
             }
             let canary_blob = encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
             vault_file.verification = Some(canary_blob.clone());
@@ -334,6 +413,42 @@ impl CredentialVault {
             passphrase,
             verification: RwLock::new(verification),
             entries: RwLock::new(vault_file.entries),
+        })
+    }
+
+    /// Inicializa explicitamente um cofre legado vazio sem canário prévio,
+    /// estabelecendo uma nova senha mestra após ação administrativa explícita.
+    pub fn initialize_unverifiable_legacy(
+        path: impl Into<PathBuf>,
+        passphrase: SecretMaterial,
+    ) -> Result<Self, VaultError> {
+        let path = path.into();
+        let _lock = VaultProcessLock::acquire(&path)?;
+
+        if !path.exists() {
+            return Err(VaultError::NotFound(path.display().to_string()));
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|e| VaultError::Io(format!("Falha ao ler vault: {}", e)))?;
+        let mut vault_file: VaultFile = serde_json::from_str(&content)
+            .map_err(|e| VaultError::Serialization(format!("JSON inválido: {}", e)))?;
+
+        if !vault_file.entries.is_empty() {
+            return Err(VaultError::Io(
+                "O cofre possui credenciais existentes e não é um cofre legado vazio".to_string(),
+            ));
+        }
+
+        let canary_blob = encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
+        vault_file.verification = Some(canary_blob.clone());
+        Self::persist_file_atomic(&path, &vault_file)?;
+
+        Ok(Self {
+            path,
+            passphrase,
+            verification: RwLock::new(Some(canary_blob)),
+            entries: RwLock::new(BTreeMap::new()),
         })
     }
 
@@ -665,6 +780,8 @@ impl CredentialVault {
                 let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
             }
 
+            let _ = restrict_file_permissions(&tmp_path);
+
             file.write_all(serialized.as_bytes()).map_err(|e| {
                 let _ = fs::remove_file(&tmp_path);
                 VaultError::Io(format!("Falha ao escrever dados do vault: {}", e))
@@ -680,6 +797,8 @@ impl CredentialVault {
             let _ = fs::remove_file(&tmp_path);
             VaultError::Io(format!("Falha no rename atômico do vault: {}", e))
         })?;
+
+        let _ = restrict_file_permissions(target_path);
 
         Ok(())
     }

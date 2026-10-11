@@ -61,6 +61,9 @@ Yuki Marco 7 (Personal Intelligence Foundation: Vault Hardened, Memory v1, Perso
 Yuki Marco 7.1 (Endurecimento da Personal Intelligence & Diretrizes de Longo Prazo)
 ████████████████████████████████████████  implementado e validado (419+ testes, 12 correções técnicas, ADRs 022 a 025)
 
+Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente)
+████████████████████████████████████████  implementado e validado (488 testes, locks de kernel, proteção DACL, orçamento integral 6 tiers)
+
 Yuki Marco 8 (Voice v1 & Missions Foundation)
 🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)
 

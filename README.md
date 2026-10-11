@@ -58,8 +58,15 @@ O projeto encontra-se na fase de:
     - **ADR-025:** Princípio de Independência Arquitetural e Primazia do Proprietário;
     - **Proposta:** Yuki Ambient Intelligence & Security (`docs/proposals/YUKI_AMBIENT_INTELLIGENCE_AND_SECURITY.md`);
     - **Proposta:** OperatorProfile v1 (`docs/proposals/OPERATOR_PROFILE_V1.md`).
+* **Marco 7.2 (Hardening Final, Integridade e Validação Independente):**
+  - Implementação de bloqueio de processo no nível de kernel do sistema operacional (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), eliminando heurísticas frágeis de tempo e prevenindo roubo de lock;
+  - Proteção contra adoção silenciosa de senhas arbitrárias em migração de cofres legados vazios (`UnverifiableLegacyVault`), exigindo intervenção administrativa explícita (`initialize_unverifiable_legacy`);
+  - Proteção de permissões de arquivos restritas nativas no Vault (`0o600` em Unix e remoção de herança com concessão exclusiva ao usuário corrente via `icacls` no Windows);
+  - Propagação rigorosa de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com registro de auditoria `MemoryRetrievalFailed` e retorno de `YukiError::ExecutionFailed` sem fallback silencioso;
+  - Gerenciamento de orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers de prioridade ontológica, assegurando preservação inviolável do Tier 1 (Instruções Essenciais de Sistema) e estimativa de tokens conservadora com 10% de margem de segurança;
+  - Defesa ativa contra injeção e quebra de delimitadores em memórias de contexto pessoal (`sanitize_untrusted_memory_content`), neutralizando fechamento forçado de envelope e tokens de autoridade (`<system>`, `[INST]`, etc.).
 * **Próximo Marco:** Marco 8 — Voice v1 & Missions Foundation (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
-* **Base de Testes:** Mais de 419 testes automatizados aprovados no workspace.
+* **Base de Testes:** 488 testes automatizados aprovados no workspace (0 falhas).
 
 Consulte:
 

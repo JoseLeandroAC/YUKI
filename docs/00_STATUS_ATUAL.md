@@ -1,35 +1,31 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-11
-Status geral: Marco 7.1 (Endurecimento da Personal Intelligence + Diretrizes Fundamentais de Evolução) implementado, testado e validado; 419+ testes aprovados no workspace
+Status geral: Marco 7.2 (Hardening Final, Integridade e Validação Independente) implementado, testado e validado; 488 testes aprovados no workspace
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/marco-7.1-evolution"
+Branch de trabalho: "feature/marco-7.2-hardening"
 Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation) e o **Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução) e o **Marco 7.2 (Hardening Final, Integridade e Validação Independente)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
 - **Marco 7 (Memory v1):** Contratos canônicos (`MemoryRecord`, `MemoryCandidate`, `MemoryPolicy`), armazenamento persistente relacional com SQLite FTS5 (`unicode61 remove_diacritics 2`), triggers atômicos de sincronização, detecção de duplicatas e superseding, sanitização fail-closed de credenciais e direito ao esquecimento (`delete_permanently`);
 - **Marco 7 (Personal Context v1):** `PersonalContextBuilder` com orçamento estrito de caracteres/tokens e priorização em 5 camadas (Diretrizes, Identidade, Memória de Trabalho, Perfil/Preferências, Fatos/Episódica), auditado via `ContextBuilt`;
 - **Marco 7 (Personality v1):** Identidade estável de 3 camadas com salvaguardas ontológicas imutáveis contra simulação de consciência humana (`YUKI_CORE_IDENTITY_DIRECTIVES`), perfil tipado com padrão canônico `Yuki Default` e adaptação contextual dinâmica (`ContextUrgency`);
-- **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):**
-  1. Filtros aplicados no SQL antes de `LIMIT/OFFSET` em consultas FTS5;
-  2. `count()` independente de paginação;
-  3. Eliminação total de fallback de busca textual com fatos não relacionados;
-  4. Propagação de erros de banco com emissão de auditoria `MemoryRetrievalFailed`;
-  5. Memórias isoladas como dados não confiáveis fora da instrução de sistema (`Data != Instruction`);
-  6. Escopo lógico de proprietário obrigatório (`owner_id`) e isolamento multi-tenant;
-  7. Expansão da política sanitária contra credenciais/chaves e proteção contra vigilância íntima clandestina;
-  8. Orçamento contextual adaptativo considerando a proporção global da janela do modelo;
-  9. Sincronização interprocessos no Vault com `VaultProcessLock`;
-  10. Proteção atômica e permissões exclusivas Windows `share_mode(0)`;
-  11. Inicialização inequívoca de `vault init` com fail-closed e confirmação `RECRIAR`;
-  12. Alinhamento de documentação de status e formalização das Diretrizes de Evolução (ADR-022 a ADR-025 e propostas).
+- **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
+- **Marco 7.2 (Hardening Final, Integridade e Validação Independente):**
+  1. Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), eliminando heurísticas frágeis de tempo e prevenindo roubo de lock;
+  2. Proteção contra adoção silenciosa de senha arbitrária na migração de cofres legados vazios (`UnverifiableLegacyVault`), exigindo intervenção administrativa explícita (`initialize_unverifiable_legacy`);
+  3. Proteção nativa de permissões de arquivos (`0o600` em Unix e remoção de herança com concessão exclusiva ao usuário corrente via `icacls` no Windows);
+  4. Suíte de concorrência com asserção estrita de `ProcessLockBusy` em todas as plataformas;
+  5. Propagação estrita de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com emissão de `MemoryRetrievalFailed` e `YukiError::ExecutionFailed` sem fallback silencioso;
+  6. Orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers ontológicos, protegendo inviolavelmente as Instruções Essenciais de Sistema (Tier 1) e aplicando estimativa de tokens conservadora com 10% de margem de segurança;
+  7. Defesa ativa contra injeção e quebra de delimitadores em memórias (`sanitize_untrusted_memory_content`), neutralizando tags forçadas de envelope e tokens de autoridade (`<system>`, `[INST]`, etc.).
 
 A situação atual pode ser resumida como:
 
@@ -41,13 +37,13 @@ CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
 FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-RESEARCH V1, MARCO 6, MARCO 7 & MARCO 7.1
+RESEARCH V1, MARCOS 6, 7, 7.1 & 7.2
 ████████████████████████████████████████
 IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-419+ TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS)
+488 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS)
 
 
 ---
@@ -738,4 +734,32 @@ Resultados verificados do Marco 7.1:
 - Suíte geral de testes: 419+ testes ativos aprovados (0 falhas);
 - `cargo fmt --check`: aprovado sem desvios;
 - `cargo clippy --all-targets -- -D warnings`: aprovado com zero advertências;
+- `cargo build --release`: aprovado com sucesso.
+
+---
+
+24. Registro de Validação do Marco 7.2 (Hardening Final, Integridade e Validação Independente)
+
+O Marco 7.2 implementou e validou o endurecimento estrito de 7 áreas críticas levantadas pela auditoria e inspeção independente:
+1. **Bloqueio de Processo a Nível de Kernel do SO (`src/security/vault/store.rs`):** Substituição de verificações baseadas em idade de arquivo (5s) por travas nativas de SO. No Windows, utiliza `OpenOptionsExt::share_mode(0)` impedindo qualquer outro processo de abrir ou deletar o arquivo companion `.lock`. No Unix/Linux, utiliza POSIX `flock(LOCK_EX | LOCK_NB)` via `libc`. O kernel libera o lock automaticamente na morte do processo, eliminando falsos positivos e impedindo roubo de travas ativas.
+2. **Proteção de Migração de Cofre Legado Vazio (`UnverifiableLegacyVault`):** Quando um cofre legado não possui canary e está com zero entradas, não há como atestar a chave. Em vez de adotar silenciosamente qualquer senha fornecida, o cofre agora falha fechado com `VaultError::UnverifiableLegacyVault`. A recuperação requer intervenção administrativa explícita através de `CredentialVault::initialize_unverifiable_legacy(passphrase)`.
+3. **Restrição Nativa de Permissões de Arquivo (`restrict_file_permissions`):** No Unix/Linux, aplica modo `0o600`. No Windows, invoca `icacls` para remover herança (`/inheritance:r`) e conceder controle total exclusivamente ao usuário corrente (`/grant:r %USERNAME%:F`). Aplicado a arquivos do cofre, arquivos temporários de commit atômico (`.tmp`) e arquivos de trava (`.lock`).
+4. **Validação de Concorrência e Bloqueio Transplataforma (`tests/marco_7_1_validation.rs`):** Atualizada asserção do teste de concorrência para exigir `VaultError::ProcessLockBusy` em todas as plataformas (Windows e Unix).
+5. **Propagação Rigorosa de Erros de Memória no Core (`src/core/yuki_core.rs`):** Erros de armazenamento `MemoryError::Storage` no `retriever.retrieve` registram `EventType::MemoryRetrievalFailed` na auditoria durável e imediatamente retornam `Err(YukiError::ExecutionFailed(...))` sem qualquer fallback silencioso para lista vazia.
+6. **Orçamento Integral de Prompt Governamental (`src/context/prompt_budget.rs`):** Implementado `PromptBudgetManager` governando o orçamento do modelo entre 6 tiers ontológicos:
+   - Tier 1: Instruções Essenciais de Sistema (não truncáveis; falha fechada se orçamento for insuficiente);
+   - Tier 2: Diretrizes de Personalidade;
+   - Tier 3: Turno do Usuário;
+   - Tier 4: Resultados de Ferramentas;
+   - Tier 5: Histórico Conversacional;
+   - Tier 6: Memórias de Contexto Pessoal.
+   Aplica estimativa conservadora (1 token ≈ 3.5 caracteres) com margem de segurança de 10%.
+7. **Defesa Ativa contra Injeção de Delimitadores (`src/context/personal_context.rs`):** Sanitização ativa via `sanitize_untrusted_memory_content` que neutraliza tags de escape (`</operator_personal_context>`) e tokens de autoridade (`<system>`, `<developer>`, `[INST]`, etc.) em textos de memória de dados não confiáveis (`Data != Instruction`).
+
+Resultados verificados do Marco 7.2:
+- `tests/marco_7_2_hardening.rs`: 9/9 testes aprovados cobrindo os 7 itens de segurança e integridade;
+- `tests/marco_7_1_validation.rs`: 10/10 testes aprovados com asserção estrita de `ProcessLockBusy`;
+- Suíte geral de testes no workspace: 488 testes ativos aprovados (0 falhas);
+- `cargo fmt --all -- --check`: aprovado sem desvios de formatação;
+- `cargo clippy --workspace --all-targets -- -D warnings`: aprovado com zero advertências;
 - `cargo build --release`: aprovado com sucesso.

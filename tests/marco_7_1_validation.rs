@@ -400,15 +400,9 @@ fn test_vault_process_lock_mutual_exclusion() {
     let _start = std::time::Instant::now();
     let lock2_res = VaultProcessLock::acquire(&vault_path);
 
-    // Se estiver no Windows, deve retornar ProcessLockBusy após as tentativas
-    #[cfg(windows)]
-    {
-        assert!(matches!(lock2_res, Err(VaultError::ProcessLockBusy(_))));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = lock2_res;
-    }
+    // Em todas as plataformas (Windows com share_mode(0) e Unix com flock),
+    // a segunda tentativa concorrente deve falhar com ProcessLockBusy.
+    assert!(matches!(lock2_res, Err(VaultError::ProcessLockBusy(_))));
 
     // Libera o lock 1
     drop(lock1);

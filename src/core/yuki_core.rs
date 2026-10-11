@@ -328,7 +328,10 @@ impl YukiCore {
                     ))
                     .await?;
                     tracing::warn!("Falha ao recuperar contexto pessoal: {}", e);
-                    None
+                    return Err(YukiError::ExecutionFailed(format!(
+                        "Falha no armazenamento de memória: {}",
+                        e
+                    )));
                 }
             }
         } else {

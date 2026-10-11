@@ -1048,4 +1048,63 @@ A Yuki não é um projeto escolar ou protótipo limitado ao mínimo funcional; �
 - Suíte geral de testes: 419+ testes ativos aprovados (0 falhas).
 - Classificação: **MARCO 7.1 — IMPLEMENTADO, ADVERSARIALMENTE TESTADO E DOCUMENTADO**.
 
+---
+
+#### [Event Time: 2026-10-11 | Record Creation Time: 2026-10-11]
+### Marco 7.2 — Hardening Final, Integridade e Validação Independente
+
+- **Branch**: `feature/marco-7.2-hardening`
+- **Contexto**: Resolução das vulnerabilidades e lacunas de robustez identificadas durante a inspeção independente após a entrega do Marco 7.1, preparando a fundação da Yuki para os subsistemas avançados do Marco 8.
+
+##### 1. O que se pretendia
+Garantir que os contratos de segurança e integridade do cofre de credenciais, do subsistema de memória, do contexto pessoal e do isolamento ontológico operassem sem recorrer a heurísticas frágeis (como medição de idade de arquivo para exclusão mútua), sem permitir adoção acidental de senhas arbitrárias em migrações legadas, com permissões restritivas nativas de sistema operacional (POSIX e Windows DACL), com propagação intransigente de falhas de persistência e com orçamento integral de prompt em tiers ontológicos governados, além de defesas ativas contra injeções que tentem quebrar delimitadores de envelope.
+
+##### 2. O que foi implementado
+1. **Bloqueio de Processo a Nível de Kernel (`src/security/vault/store.rs`):**
+   - Substituição da checagem baseada em 5 segundos por locks nativos de sistema operacional no arquivo companion `.lock`.
+   - Windows: abertura exclusiva com `share_mode(0)` via `OpenOptionsExt`.
+   - Unix/Linux: POSIX `flock(LOCK_EX | LOCK_NB)` via crate `libc`.
+   - Garantia de que a morte súbita de um processo libera a trava no kernel imediatamente, sem permitir que outro processo roube um lock ativo de um processo saudável em execução.
+2. **Proteção de Migração de Cofre Legado Vazio (`UnverifiableLegacyVault`):**
+   - Cofres legados sem canary e sem entradas não permitem atestar a validade de uma senha arbitrária.
+   - O método `open` agora falha fechado com `VaultError::UnverifiableLegacyVault`.
+   - Criado método administrativo explícito `initialize_unverifiable_legacy(passphrase)` para requerer decisão consciente do operador.
+3. **Restrição de Permissões Nativa de Arquivos (`restrict_file_permissions`):**
+   - Unix/Linux: permissões `0o600` (leitura/escrita exclusiva do proprietário).
+   - Windows: execução do comando nativo `icacls` para remoção de herança (`/inheritance:r`) e concessão exclusiva ao usuário corrente (`/grant:r %USERNAME%:F`).
+   - Aplicado a arquivos de cofre, arquivos `.tmp` atômicos e arquivos `.lock`.
+4. **Atualização da Suíte de Concorrência (`tests/marco_7_1_validation.rs`):**
+   - O teste `test_vault_process_lock_mutual_exclusion` agora valida `ProcessLockBusy` em todas as plataformas.
+5. **Propagação Rigorosa de Erros de Memória no Core (`src/core/yuki_core.rs`):**
+   - Eliminação de qualquer fallback silencioso quando o armazenamento de memória falha.
+   - O `YukiCore` registra `EventType::MemoryRetrievalFailed` na auditoria durável e propaga `Err(YukiError::ExecutionFailed(...))` de forma aberta.
+6. **Orçamento Integral de Prompt em 6 Tiers Ontológicos (`src/context/prompt_budget.rs`):**
+   - Criação do `PromptBudgetManager`, `IntegralPromptBudgetConfig` e `PromptBudgetAudit`.
+   - Estruturado em 6 tiers de prioridade ontológica:
+     - Tier 1: Instruções Essenciais de Sistema (estritamente não-truncáveis; falha fechada se o orçamento for insuficiente);
+     - Tier 2: Diretrizes de Personalidade;
+     - Tier 3: Turno do Usuário;
+     - Tier 4: Resultados de Ferramentas;
+     - Tier 5: Histórico Conversacional;
+     - Tier 6: Memórias de Contexto Pessoal.
+   - Estimativa conservadora de tokens (1 token ≈ 3.5 caracteres) com margem de segurança de 10%.
+7. **Defesa Ativa contra Injeção de Delimitadores de Memória (`src/context/personal_context.rs`):**
+   - Sanitização de textos de memória recuperados via `sanitize_untrusted_memory_content`.
+   - Neutraliza escapes forçados de tag (`</operator_personal_context>`) e tokens de autoridade de LLM (`<system>`, `[INST]`, `<|im_start|>`, etc.) antes da montagem do envelope de dados não confiáveis (`Data != Instruction`).
+8. **Suíte Dedicada de Testes de Hardening (`tests/marco_7_2_hardening.rs`):**
+   - 9 testes cobrindo exaustivamente concorrência de kernel, migração segura, DACL/permissões, propagação de falha de banco, truncamento progressivo governado e imunidade a injeção adversarial.
+
+##### 3. Portões de Qualidade e Métricas
+- **Testes Unitários e de Integração:** 488 testes aprovados no workspace (0 falhas, 4 testes live opt-in ignorados).
+  - `tests/marco_7_2_hardening.rs`: 9/9 aprovados.
+  - `tests/marco_7_1_validation.rs`: 10/10 aprovados.
+  - `tests/vault_security.rs`: 11/11 aprovados.
+  - `tests/memory_security.rs`: 12/12 aprovados.
+  - `tests/security_research_audit.rs`: 20/20 aprovados.
+  - `tests/research_v1_final_audit.rs`: 23/23 aprovados.
+- **Formatação e Lints:** `cargo fmt --all -- --check` e `cargo clippy --workspace --all-targets -- -D warnings` aprovados com zero advertências.
+- **Compilação de Release:** `cargo build --release` aprovado com sucesso.
+- **Classificação:**
+  - **MARCO 7.2 (HARDENING FINAL, INTEGRIDADE E VALIDAÇÃO INDEPENDENTE) — IMPLEMENTADO, ADVERSARIALMENTE TESTADO E APROVADO**.
+
 
