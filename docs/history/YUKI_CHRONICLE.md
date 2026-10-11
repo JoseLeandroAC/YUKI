@@ -912,3 +912,102 @@ Com a validação dos provedores externos da Research v1 (Brave Search e LangSea
   - **CREDENTIAL VAULT V1 — IMPLEMENTADO E APROVADO**
   - **NATIVE SEARCH FOUNDATION — IMPLEMENTADO E APROVADO**
 
+---
+
+#### 2026-10-11 — Marco 7: Personal Intelligence Foundation
+- **Branch:** `feature/personal-intelligence-v1`
+- **Repositório:** `JoseLeandroAC/YUKI`
+
+##### 1. Contexto e Motivação
+Após a expansão de infraestrutura com busca nativa e cofre criptográfico no Marco 6, a Yuki necessitava iniciar sua fundação de inteligência pessoal soberana:
+1. Endurecer o Credential Vault v1 com validação antecipada de autenticação (canary), blindagem transacional e comandos administrativos seguros de linha de comando (`yuki vault`);
+2. Estabelecer o sistema de memória durável soberana (Memory v1) com busca textual/semântica local FTS5 BM25, deduplicação ativa, sanitização de segredos e direito ao esquecimento;
+3. Estruturar o contexto pessoal (Personal Context v1) com orçamento estrito de tokens e priorização governada em 5 camadas;
+4. Implementar a identidade e personalidade da Yuki (Personality v1) com 3 tiers, salvaguardas ontológicas imutáveis contra simulação de consciência humana e perfil "Yuki Default";
+5. Integrar memória, contexto e personalidade no loop de execução do `YukiCore` sem comprometer os invariantes constitucionais de segurança;
+6. Preparar os contratos para o Marco 8 (Voice v1 & Missions Foundation).
+
+##### 2. Etapa 1 — Credential Vault Hardening & Admin CLI
+- **Canary Upfront de Integridade (`YUKI_VAULT_CANARY_V1`):** Validação criptográfica imediata na abertura do cofre com tag AES-256-GCM, detectando senhas incorretas ou adulterações antes de tentar deserializar metadados ou credenciais.
+- **Limites Criptográficos e de Payload:**
+  - Iterações PBKDF2 limitadas a `10.000..=500.000` (padrão 100.000);
+  - Tamanho máximo de texto puro: 1 MiB (`1.048.576` bytes);
+  - Tamanho máximo de texto cifrado: 10 MiB (`10.485.760` bytes);
+  - Tamanho máximo do arquivo do cofre: 20 MiB (`20.971.520` bytes).
+- **Defesa contra Symlinks e Permissões:** Rejeição explícita de links simbólicos na persistência, mitigando ataques de substituição de arquivos; permissões estritas `0o600` em Unix.
+- **Transacionalidade Estrita:** Métodos `store`, `replace`, `revoke` e `delete` sincronizam atomicamente via arquivo temporário com `sync_all()` e `rename`.
+- **Migração Transparente:** Cofres legados sem canary do Marco 6 são migrados automaticamente de forma transparente no primeiro salvamento.
+- **Interface Administrativa CLI (`yuki vault`):**
+  - Comandos: `init`, `store <alias> <provider>`, `replace <alias>`, `list`, `status`, `revoke <alias>`, `delete <alias>`;
+  - Entrada de master password mascarada via `rpassword` (fixado em `=7.0.0` para estabilidade multiplataforma Windows GNU / Unix);
+  - Confirmação explícita do operador para ações destrutivas (`revoke`, `delete`).
+- Suíte `tests/vault_security.rs` expandida para 11 testes.
+
+##### 3. Etapa 2 — Memory v1 (Contratos Canônicos & SQLite FTS5)
+- **Contratos Canônicos (`src/contracts/memory.rs`):**
+  - Tipos e enums fortemente tipados: `MemoryRecord`, `MemoryId`, `MemoryType`, `MemorySource`, `MemoryConfidence`, `MemoryStatus`, `MemoryProvenance`, `MemoryCandidate`, `MemoryPolicy`, `MemoryQuery`;
+  - Traits `MemoryRepository` e `MemoryRetriever`.
+- **Invariante Constitucional Fundamental:**
+  ```
+  Model Output != Memory != Persistence
+  ```
+  O modelo ou o usuário nunca gravam diretamente no banco durável. Saídas inferidas geram `MemoryCandidate`, que deve ser submetido à avaliação da `MemoryPolicy` antes de persistir.
+- **Armazenamento Relacional & FTS5 BM25 (`SqliteMemoryStore`):**
+  - Tabela `memories` relacional com chave primária UUID e índices em status, tipo, confiança e data;
+  - Tabela virtual `memories_fts` FTS5 com tokenizador `unicode61 remove_diacritics 2`, garantindo busca fonética eficiente em português e inglês;
+  - Triggers SQLite atômicos de sincronização (`trg_memories_ai`, `trg_memories_au`, `trg_memories_ad`);
+  - Deduplicação inteligente e versionamento: registros com mesmo título e tipo são marcados como `superseded_by` dentro de uma transação atômica que respeita chaves estrangeiras;
+  - Sanitização de queries FTS5 contra injeções de sintaxe.
+- **Sanitização de Segredos:** `assert_no_secrets` valida candidatos contra padrões de senhas, tokens e chaves de API, rejeitando-os fail-closed com `MemoryError::ForbiddenContent`.
+- **Direito ao Esquecimento:** Suporte a `delete_permanently(id)`, expurgando registros física e irreversivelmente do banco e do índice FTS5.
+- Suíte `tests/memory_v1.rs` com 6 testes aprovados.
+
+##### 4. Etapa 3 — Personal Context v1
+- **Construção Estruturada do Contexto (`PersonalContextBuilder`):**
+  - Orçamento estrito em caracteres/tokens (`max_characters`), evitando context bloat e exaustão do modelo;
+  - 5 camadas hierárquicas de prioridade:
+    1. Diretrizes do sistema (`system_directives`);
+    2. Perfil do operador (`operator_profile`);
+    3. Memória de trabalho (`working_memory`);
+    4. Perfil e preferências consolidadas (`preferences`);
+    5. Fatos relevantes e episódios históricos (`relevant_facts`).
+- **Integração com `ContextBuilder`:** `ContextBuilder::build_with_personal_context` anexa a seção pessoal aos dados auditados e registra o evento `ContextBuilt` com metadados de proveniência.
+- Suíte `tests/personal_context.rs` com 2 testes aprovados.
+
+##### 5. Etapa 4 — Personality v1 (Identidade Estável & 3 Tiers)
+- **Camada 1 — Identidade Estável & Salvaguardas Ontológicas:**
+  - `YUKI_CORE_IDENTITY_DIRECTIVES`: conjunto imutável de diretrizes éticas e ontológicas;
+  - A Yuki é explícita sobre sua natureza como inteligência artificial soberana e **jamais simula consciência biológica, sofrimento humano, dor ou falsas emoções**.
+- **Camada 2 — Perfil de Personalidade:**
+  - `PersonalityProfile` com parâmetros tipados contínuos delimitados em `[0.0, 1.0]`: `warmth`, `formality`, `humor`, `expressiveness`, `proactivity`, `explanation_depth` e enum `ConversationalStyle` (`Collaborative`, `Direct`, `Analytical`, `Empathetic`, `Playful`);
+  - Perfil canônico `Yuki Default`: calor 0.7, formalidade 0.4, humor 0.3, expressividade 0.5, proatividade 0.6, profundidade 0.8, estilo `Collaborative`.
+- **Camada 3 — Adaptação Contextual de Urgência:**
+  - `ContextUrgency`: `Standard`, `TechnicalDeep`, `SecurityCritical`, `CreativeReflective`.
+  - `PersonalityPromptAdapter` injeta instruções dinâmicas no modelo sem desrespeitar as salvaguardas da Camada 1.
+- Suíte `tests/personality_v1.rs` com 3 testes aprovados.
+
+##### 6. Etapa 5 — Integração no YukiCore
+- `YukiCore` expandido com construtores `.with_memory(...)` e `.with_personality(...)`.
+- Injeção das diretrizes de identidade e contexto pessoal no prompt do modelo.
+- Extração automática de memórias declarativas ("Lembre-se de que...", "Minha preferência é...") e commit seguro via `MemoryController`.
+- Registro auditável dos eventos `PersonalityApplied` e `MemoryStored`.
+- Suíte `tests/memory_personality_integration.rs` com 4 testes aprovados.
+
+##### 7. Etapa 6 — Preparação para Voice & Missions (Marco 8)
+- Adição dos tipos de evento em `src/contracts/events.rs`: `MissionStarted`, `MissionStepCompleted`, `MissionApprovalRequested`, `MissionApprovalGranted`, `MissionApprovalDenied`, `MissionCompleted`, `MissionFailed`, `VoiceInputReceived`, `VoiceOutputProduced`.
+- Elaboração do documento de proposta técnica `docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`.
+
+##### 8. Portões de Qualidade e Métricas
+- **Testes:** Mais de 400 testes unitários e de integração executados e aprovados no workspace.
+  - `tests/vault_security.rs`: 11/11 aprovados.
+  - `tests/memory_v1.rs`: 6/6 aprovados.
+  - `tests/personal_context.rs`: 2/2 aprovados.
+  - `tests/personality_v1.rs`: 3/3 aprovados.
+  - `tests/memory_personality_integration.rs`: 4/4 aprovados.
+- **Formatação e Lints:** `cargo fmt --check` e `cargo clippy --all-targets -- -D warnings` aprovados com zero advertências.
+- **Compilação de Release:** `cargo build --release` executado com sucesso.
+- **Baselines Preservados:** `v0.1.0-foundation` e `v0.2.0-mvp1` estritamente íntegros.
+- **Classificação:**
+  - **MARCO 7 (PERSONAL INTELLIGENCE FOUNDATION) — IMPLEMENTADO, AUDITADO E APROVADO**
+
+

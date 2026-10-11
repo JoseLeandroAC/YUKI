@@ -1,20 +1,23 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-11
-Status geral: Marco 6 (Expansão de Infraestrutura: Credential Vault v1 + Native Search Foundation + Research Hardening) implementado, testado e validado; 383 testes aprovados no workspace
+Status geral: Marco 7 (Personal Intelligence Foundation: Credential Vault Hardened + Memory v1 + Personal Context v1 + Personality v1) implementado, testado e validado; 409+ testes aprovados no workspace
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/research-v1"
+Branch de trabalho: "feature/personal-intelligence-v1"
 Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5) e o **Marco 6 (Expansão de Infraestrutura: Credential Vault v1 + Native Search Foundation + Research Hardening)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura) e o **Marco 7 (Personal Intelligence Foundation)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
-- **Marco 6 (Research Hardening):** Leitura streaming de rede (< 512 KiB) com cancelamento prévio, validação estrita de endpoints em modo live, e sanitização/truncamento de mensagens de erro externas;
-- **Marco 6 (Credential Vault v1):** Criptografia em repouso AES-256-GCM + PBKDF2 (100.000 iterações), zeroização de material em memória, escrita atômica com permissões restritas, separação estrita de metadados, ciclo de vida CRUD/revogação fail-closed e `CompositeCredentialBroker`;
-- **Marco 6 (Native Search Foundation):** Primeiro módulo executável do ADR-021: indexador local (`.md`, `.txt`, `.rs`), defesa contra Path Traversal, filtro de arquivos secretos, delta updates via SHA-256, tabela virtual SQLite FTS5 (BM25 com tokenizador `unicode61`), motor de busca local e `NativeSearchProvider` (100% offline, `is_live() -> false`, `SourceKind::LocalWorkspace`).
+- **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
+- **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
+- **Marco 7 (Memory v1):** Contratos canônicos (`MemoryRecord`, `MemoryCandidate`, `MemoryPolicy`), armazenamento persistente relacional com SQLite FTS5 (`unicode61 remove_diacritics 2`), triggers atômicos de sincronização, detecção de duplicatas e superseding, sanitização fail-closed de credenciais e direito ao esquecimento (`delete_permanently`);
+- **Marco 7 (Personal Context v1):** `PersonalContextBuilder` com orçamento estrito de caracteres/tokens e priorização em 5 camadas (Diretrizes, Identidade, Memória de Trabalho, Perfil/Preferências, Fatos/Episódica), auditado via `ContextBuilt`;
+- **Marco 7 (Personality v1):** Identidade estável de 3 camadas com salvaguardas ontológicas imutáveis contra simulação de consciência humana (`YUKI_CORE_IDENTITY_DIRECTIVES`), perfil tipado com padrão canônico `Yuki Default` e adaptação contextual dinâmica (`ContextUrgency`);
+- **Marco 7 (Integração YukiCore & Preparação para Marco 8):** Integração no ciclo de execução governado, extração automática de memórias declarativas, eventos tipados para voz e missões e proposta técnica de referência para o Marco 8 (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
 
 A situação atual pode ser resumida como:
 
@@ -26,13 +29,13 @@ CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
 FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-RESEARCH V1 & MARCO 6 (EXPANSÃO DE INFRAESTRUTURA)
+RESEARCH V1, MARCO 6 & MARCO 7 (PERSONAL INTELLIGENCE)
 ████████████████████████████████████████
 IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-383 TESTES ATIVOS PASSANDO (4 LIVE OPT-IN IGNORADOS)
+409+ TESTES ATIVOS PASSANDO (4 LIVE OPT-IN IGNORADOS)
 
 
 ---
@@ -506,25 +509,30 @@ Uma capacidade só será considerada implementada quando houver implementação 
 │ Visão                       ✅               │
 │ Princípios                  ✅               │
 │ Arquitetura macro           ✅               │
-│ ADRs 006–017                ✅               │
+│ ADRs 006–021                ✅               │
 │ Contratos de implementação  ✅               │
 │ Foundation v0.1 / MVP-0     ✅               │
-│ Core (mínimo vertical slice)✅               │
-│ Context Builder (mínimo)    ✅               │
-│ Model Provider (Mock)       ✅               │
-│ Capability Registry (echo)  ✅               │
+│ Core (governed loop)        ✅               │
+│ Context Builder (5 camadas) ✅               │
+│ Model Provider (Mock/Gemini)✅               │
+│ Capability Registry         ✅               │
 │ Security Controller (tokens)✅               │
 │ Execution (isolado)         ✅               │
-│ Verification (básico)       ✅               │
-│ Audit Store (in-memory)     ✅               │
+│ Verification (dinâmica)     ✅               │
+│ Audit Store (SQLite durável)✅               │
 │ CLI & Diagnostics (health)  ✅               │
-│ Runtime assíncrono / I/O    🔴               │
-│ Provedores LLM Reais        🔴               │
-│ Credential Broker (ADR-008) 🔴               │
+│ Runtime assíncrono / I/O    ✅               │
+│ Credential Vault Hardened   ✅               │
+│ Research v1 (Marcos 1-5)    ✅               │
+│ Native Search Foundation    ✅               │
+│ Memory v1 (SQLite FTS5)     ✅               │
+│ Personal Context v1         ✅               │
+│ Personality v1 (3 Tiers)    ✅               │
+│ Voice v1 & Multimodal       🟡 (Proposta M8) │
+│ Missions & Autonomia        🟡 (Proposta M8) │
 │ Workflow durável            🔴               │
-│ Memory                      🔴               │
-│ Knowledge                   🔴               │
-│ Agents                      🔴               │
+│ Knowledge avançado          🔴               │
+│ Multi-Agentes               🔴               │
 │ Background Events           🔴               │
 │ Reconciliation              🔴               │
 │ Federation                  🔴               │
@@ -535,8 +543,8 @@ Uma capacidade só será considerada implementada quando houver implementação 
 Legenda:
 
 ✅ Implementado, auditado e consolidado
-🟡 Em definição
-🔴 Planejado para fases posteriores (MVP-1+)
+🟡 Em definição / proposta formalizada
+🔴 Planejado para fases posteriores
 
 ---
 
@@ -544,15 +552,14 @@ Legenda:
 
 O próximo marco oficial do projeto é:
 
-YUKI MVP-1
+YUKI MARCO 8 — VOICE V1 & MISSIONS FOUNDATION
 
-Objetivos do MVP-1:
-1. introduzir runtime assíncrono (Tokio) para I/O de rede sem bloqueio;
-2. implementar o primeiro Model Adapter externo real (Google Gemini / Vertex AI);
-3. implementar o Credential Broker formal conforme o ADR-008;
-4. desacoplar o Verification Engine via estratégias dinâmicas orientadas pelo manifesto da capability (ADR-009);
-5. implementar backend de persistência durável para o Event Store (ADR-013);
-6. expandir capacidades iniciais seguras e adicionar testes adversariais adicionais.
+Objetivos do Marco 8 (ver `docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`):
+1. implementar pipeline de áudio bidirecional STT/TTS (Speech-to-Text governado e Text-to-Speech expressivo);
+2. suporte híbrido a modelos de voz locais/edge (Whisper/Piper) e provedores cloud governados via Vault;
+3. implementar arquitetura de Missões com decomposição de objetivos em múltiplos passos (`MissionStep`);
+4. persistência relacional do ciclo de vida da missão e recuperação de estado após reinicializações;
+5. governança estrita com portão humano inegociável (*human-in-the-loop approvals*) para passos mutadores.
 
 ---
 
@@ -621,5 +628,47 @@ Resultados verificados:
 - `cargo test --all-targets`: 120 ativos aprovados, 1 ignorado (smoke live), 0 falhas;
 - `cargo check --all-targets`: aprovado sem erros;
 - `cargo fmt --all -- --check`: aprovado sem desvios;
+- `cargo clippy --all-targets -- -D warnings`: aprovado com zero warnings;
+- `cargo build --release`: aprovado com sucesso.
+
+---
+
+22. Registro de Validação do Marco 7 (Personal Intelligence Foundation)
+
+O Marco 7 concluiu a primeira fundação completa de inteligência pessoal e governança da Yuki:
+1. **Credential Vault Hardened & Admin CLI:**
+   - Canary upfront de integridade `YUKI_VAULT_CANARY_V1` com rejeição imediata de adulteração ou senha incorreta;
+   - Limites criptográficos estritos (10.000–500.000 iterações PBKDF2, até 1 MiB de texto puro, até 10 MiB de texto cifrado);
+   - Rejeição estrita de links simbólicos contra ataques de travessia;
+   - CLI administrativa completa: `yuki vault [init|store|replace|list|status|revoke|delete]`;
+   - Suíte `tests/vault_security.rs` com 11 testes aprovados.
+2. **Memory v1 (Armazenamento Relacional & FTS5 Soberano):**
+   - Esquema relacional durável em SQLite (`memories`) e tabela virtual FTS5 (`memories_fts`) com tokenizador `unicode61 remove_diacritics 2`;
+   - Triggers atômicos de sincronização (`trg_memories_ai`, `trg_memories_au`, `trg_memories_ad`);
+   - Detecção ativa de duplicatas e superseding automático dentro de transação atômica;
+   - Invariante estrita: `Model Output != Memory != Persistence`;
+   - Sanitização fail-closed de credenciais via `MemoryPolicy`;
+   - Direito ao esquecimento com exclusão física permanente (`delete_permanently`);
+   - Suíte `tests/memory_v1.rs` com 6 testes aprovados.
+3. **Personal Context v1 (Orçamento & 5 Camadas de Priorização):**
+   - Construção estruturada do contexto pessoal (`PersonalContext`) em 5 camadas (Diretrizes, Identidade, Memória de Trabalho, Perfil/Preferências, Episódica);
+   - Limite estrito de orçamento em caracteres/tokens prevenindo poluição de contexto;
+   - Integração com `ContextBuilder` e emissão de evento de auditoria `ContextBuilt`;
+   - Suíte `tests/personal_context.rs` com 2 testes aprovados.
+4. **Personality v1 (Identidade Estável & 3 Tiers):**
+   - Tier 1: Diretrizes ontológicas imutáveis contra simulação de consciência humana e dor biológica;
+   - Tier 2: Perfil tipado com parâmetros contínuos [0.0..1.0] e padrão canônico `Yuki Default`;
+   - Tier 3: Adaptador contextual de urgência (`ContextUrgency`) dinâmico;
+   - Suíte `tests/personality_v1.rs` com 3 testes aprovados.
+5. **Integração no YukiCore & Preparação para Marco 8:**
+   - Conexão do `MemoryController`, `DefaultMemoryRetriever` e `PersonalityProfile` no loop governado;
+   - Emissão auditada de `PersonalityApplied` e `MemoryStored`;
+   - Adição de eventos tipados em `src/contracts/events.rs` para voz e missões;
+   - Elaboração da proposta técnica `docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`;
+   - Suíte `tests/memory_personality_integration.rs` com 4 testes aprovados.
+
+Resultados verificados do Marco 7:
+- `cargo test --all-targets`: 409+ testes aprovados (0 falhas, 4 live ignorados);
+- `cargo fmt --check`: aprovado sem desvios;
 - `cargo clippy --all-targets -- -D warnings`: aprovado com zero warnings;
 - `cargo build --release`: aprovado com sucesso.

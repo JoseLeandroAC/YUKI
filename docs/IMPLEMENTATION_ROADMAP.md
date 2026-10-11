@@ -55,6 +55,12 @@ Yuki MVP-1 (Runtime Assíncrono, Credential Broker, Persistência Local, Capacid
 Yuki Research v1 & Marco 6 (Pesquisa Governamental, Credential Vault v1 & Native Search Foundation)
 ████████████████████████████████████████  implementado e verificado (383 testes)
 
+Yuki Marco 7 (Personal Intelligence Foundation: Vault Hardened, Memory v1, Personal Context v1, Personality v1)
+████████████████████████████████████████  implementado e validado (409+ testes)
+
+Yuki Marco 8 (Voice v1 & Missions Foundation)
+🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)
+
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
 
@@ -1599,6 +1605,13 @@ M4 — Continuous Runtime
 M5 — Distributed Runtime
 M6 — Physical Integration
 M7 — Controlled Evolution
+
+### Marcos da Implementação Atual (Engenharia de Plataforma)
+- **Marco 1 a 4 (Foundation & MVP-1):** Core assíncrono, Model Gateway, Verificação dinâmica, persistência SQLite e suíte adversarial (v0.1.0 e v0.2.0 consolidados).
+- **Research v1 (Marcos 1 a 5):** Recuperação governada, Brave Search e LangSearch, SSRF guard, Content-Encoding, Registro de Fontes e Citações Verificáveis.
+- **Marco 6 (Infraestrutura):** Credential Vault v1, Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador seguro, zero rede).
+- **Marco 7 (Personal Intelligence Foundation):** Credential Vault Hardened (canary upfront, limites e Admin CLI `yuki vault`), Memory v1 (SQLite FTS5 BM25, superseding e direito ao esquecimento), Personal Context v1 (orçamento estrito em 5 camadas), Personality v1 (identidade estável de 3 camadas com salvaguardas ontológicas e perfil `Yuki Default`), e integração ao pipeline governado.
+- **Marco 8 (Voice v1 & Missions Foundation):** Proposta técnica em `docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md` (STT/TTS governado e arquitetura de missões de longo prazo orientadas a metas com portões human-in-the-loop).
 
 ---
 

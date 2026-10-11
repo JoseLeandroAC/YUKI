@@ -1621,6 +1621,34 @@ ADR-016 — ACCEPTED
 
 Versão: 1.0
 
-Estado: Arquitetura aprovada.
+Estado: Arquitetura aprovada e concretizada (Marco 7).
 
 Implementações concretas, schemas definitivos, tecnologias de retrieval, mecanismos de compressão, armazenamento vetorial/grafo, sincronização contextual e adaptadores de modelos permanecem sujeitos a decisões posteriores e não constituem dependências constitucionais deste ADR.
+
+---
+
+48. Realização Concreta — Marco 7: Personal Intelligence Foundation
+
+No Marco 7 (Personal Intelligence Foundation), o ADR-016 teve sua primeira implementação funcional soberana, validada e coberta por testes automatizados:
+
+1. **Typed Context Object Realizado (`PersonalContext`):**
+   - Implementado em `src/context/personal_context.rs`, estruturado em 5 camadas rigorosamente priorizadas:
+     * Camada 1: Diretrizes e restrições imutáveis do operador (`system_directives`).
+     * Camada 2: Perfil do operador e tom relacional (`operator_profile`).
+     * Camada 3: Memória de trabalho (`working_memory`).
+     * Camada 4: Perfil e preferências consolidadas (`preferences`).
+     * Camada 5: Fatos e episódios históricos (`relevant_facts`).
+   - Construído pelo `PersonalContextBuilder` com orçamento estrito de tokens e caracteres (`max_characters`), prevenindo context bloat e exaustão de contexto do modelo.
+
+2. **Memória Soberana Durável (`SqliteMemoryStore`):**
+   - Implementado em `src/memory/store.rs`, utilizando SQLite relacional com tabela virtual FTS5 e ranking BM25 (`unicode61 remove_diacritics 2`), triggers atômicos de sincronização e detecção ativa de duplicatas e superseding (`superseded_by`).
+
+3. **Governança Estrita de Escrita (`MemoryController` & `MemoryPolicy`):**
+   - Concretização da invariante constitucional:
+     ```
+     Model Output != Memory != Persistence
+     ```
+   - O modelo ou o usuário nunca escrevem diretamente no banco durável. Saídas produzem apenas `MemoryCandidate`; a persistência é governada pelo `MemoryController`, que avalia limiares de confiança, limites de tamanho e sanitização fail-closed de credenciais/segredos via `assert_no_secrets`.
+
+4. **Direito ao Esquecimento e Revogação:**
+   - Suporte a soft-revocation (`revoke`), arquivamento (`archive`) e expurgo físico permanente (`delete_permanently`), garantindo soberania total do operador sobre seus dados.

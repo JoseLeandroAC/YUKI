@@ -43,12 +43,14 @@ O objetivo não é criar apenas um chatbot, mas uma plataforma capaz de:
 
 O projeto encontra-se na fase de:
 
-**Implementação e Expansão de Infraestrutura.**
+**Personal Intelligence Foundation & Expansão de Capacidades.**
 
 * **Foundation v0.1 & MVP-1 Runtime:** Concluídos e validados (ADRs 006 a 019).
 * **Research v1 (Marcos 1 a 5):** Recuperação governada, SSRF guard, extração e descompressão segura de conteúdo, Brave Search e LangSearch providers, registro de fontes e citações verificáveis (ADR-020).
 * **Marco 6 (Expansão de Infraestrutura):** Credential Vault v1 (AES-256-GCM + PBKDF2, zeroize, SecretStore, CompositeCredentialBroker), Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede), e endurecimento de transporte (ADR-008 e ADR-021).
-* **Base de Testes:** 383 testes automatizados aprovados no workspace.
+* **Marco 7 (Personal Intelligence Foundation):** Credential Vault Hardened (canary upfront, limites de iteração e payload, mitigação de symlinks e Admin CLI `yuki vault`), Memory v1 (SQLite FTS5 BM25, triggers de sincronização, deduplicação e superseding, sanitização fail-closed de segredos e direito ao esquecimento), Personal Context v1 (orçamento estrito de tokens em 5 camadas priorizadas), e Personality v1 (identidade estável de 3 camadas com salvaguardas ontológicas e perfil "Yuki Default").
+* **Próximo Marco:** Marco 8 — Voice v1 & Missions Foundation (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
+* **Base de Testes:** Mais de 400 testes automatizados aprovados no workspace.
 
 Consulte:
 
@@ -127,6 +129,57 @@ Consulte:
 ### Catálogo
 
 * `docs/16_MASTER_CAPABILITY_CATALOG.md`
+
+## Personal Intelligence & Administração
+
+A partir do Marco 7, a Yuki opera com inteligência pessoal soberana ancorada em persistência local durável, governança rigorosa e identidade estável:
+
+### 1. Administração do Credential Vault (`yuki vault`)
+Gerenciamento soberano de segredos criptografados em repouso (AES-256-GCM + PBKDF2):
+```bash
+# Inicializar um novo cofre criptográfico com canary de integridade
+yuki vault init
+
+# Armazenar uma nova credencial com mascaramento de senha
+yuki vault store <alias> <provedor>
+
+# Substituir o segredo de uma credencial existente
+yuki vault replace <alias>
+
+# Listar metadados das credenciais (nunca expõe segredos)
+yuki vault list
+
+# Consultar status operacional e integridade do cofre
+yuki vault status
+
+# Revogar uma credencial (acesso negado fail-closed)
+yuki vault revoke <alias>
+
+# Exclusão física permanente
+yuki vault delete <alias>
+```
+
+### 2. Memória Persistente Soberana (Memory v1)
+- Armazenamento em SQLite com tabela virtual FTS5 e ranking BM25 (`unicode61 remove_diacritics 2`).
+- Triggers atômicos de sincronização (`trg_memories_ai`, `trg_memories_au`, `trg_memories_ad`).
+- Deduplicação inteligente e versionamento (`superseded_by`).
+- Invariante inegociável: `Model Output != Memory != Persistence` — gravações exigem avaliação sanitária e aprovação de política governada (`MemoryPolicy`).
+- Sanitização fail-closed contra vazamento de credenciais em memórias.
+- Garantia de direito ao esquecimento com exclusão física permanente (`delete_permanently`).
+
+### 3. Contexto Pessoal em 5 Camadas (Personal Context v1)
+Priorização governada por orçamento estrito de tokens:
+1. **Camada 1 (Crítica):** Diretrizes e restrições imutáveis do operador.
+2. **Camada 2 (Identidade):** Perfil do operador e tom relacional.
+3. **Camada 3 (Memória de Trabalho):** Fatos imediatos e tarefas em andamento.
+4. **Camada 4 (Perfil e Preferências):** Preferências consolidadas de comunicação e ferramentas.
+5. **Camada 5 (Episódica e Fatos):** Memórias históricas recuperadas semanticamente/textualmente.
+
+### 4. Personalidade Estável e Salvaguardas Ontológicas (Personality v1)
+Arquitetura em 3 níveis:
+- **Tier 1 (Core Identity):** Diretrizes ontológicas imutáveis (`YUKI_CORE_IDENTITY_DIRECTIVES`). A Yuki jamais simula sofrimento humano, dor ou consciência biológica.
+- **Tier 2 (Personality Profile):** Parâmetros tipados (warmth, formality, humor, expressiveness, proactivity, explanation depth) e estilo conversacional, com o perfil canônico `Yuki Default`.
+- **Tier 3 (Context Urgency):** Adaptação contextual dinâmica (Standard, TechnicalDeep, SecurityCritical, CreativeReflective) regulando densidade técnica e sobriedade.
 
 ## Desenvolvimento
 
