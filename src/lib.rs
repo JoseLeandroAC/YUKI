@@ -4,6 +4,7 @@ pub mod context;
 pub mod contracts;
 pub mod core;
 pub mod execution;
+pub mod memory;
 pub mod models;
 pub mod persistence;
 pub mod security;
