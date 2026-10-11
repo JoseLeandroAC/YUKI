@@ -767,5 +767,80 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - Nenhuma requisição à internet pública ou consumo de cotas de APIs externas realizado nesta etapa.
 - Classificação: **CONTENT-ENCODING — CORRIGIDO OFFLINE**.
 
+---
 
+#### [2026-10-11] Research v1 — Marco 5: LangSearch Provider + Arquitetura Yuki Native Search
 
+##### 1. Contexto e Objetivos do Marco 5
+- Implementado o Marco 5 da Yuki Research v1 na branch `feature/research-v1`, expandindo a autonomia e independência de fornecedores de busca textual da Yuki através de duas frentes complementares:
+  1. **Parte A — Provedor LangSearch**: Integração de um novo adaptador governado para a API oficial LangSearch (REST POST `/v1/web-search`), operando como alternativa plugável ao `BraveSearchProvider` sob o mesmo trait `SearchProvider` e governança perimetral `egress:web_search`.
+  2. **Parte B — Arquitetura Yuki Native Search (ADR-021)**: Formalização do desenho arquitetural completo para indexação e busca soberana local (SQLite FTS5 + BM25), rastreamento web governado e recuperação híbrida via *Reciprocal Rank Fusion (RRF)*.
+- Preservação estrita das invariantes constitucionais: `Data != Instruction`, `Verification != Truth`, `Capability != Authorization`, `Offline First, Network On-Demand`, `Storage != Authority`.
+
+##### 2. Implementação do Adaptador LangSearch (`src/capabilities/research/langsearch.rs`)
+- **Tipos de Transporte Seguros e Isolados**:
+  - `LangSearchWireRequest`: modelagem tipada do payload JSON da requisição POST com `query`, `count`, `freshness` (mapeamento canônico: `day`, `week`, `month`, `noLimit`) e `summary: false`.
+  - `LangSearchWireResponse`: parsing estrito do JSON de resposta (`code`, `msg`, `data.webPages.value`), com validação de status de aplicação (`code == 200`) e captura de mensagens de erro.
+- **Configuração e Governança (`LangSearchConfig`)**:
+  - Desabilitado por padrão (`live_enabled == false`, fail-closed). A presença de chave não autoriza live mode sem consentimento explícito (`YUKI_RESEARCH_LIVE_ENABLED=true`).
+  - Resolução de segredo via `CredentialBroker` com `SecretRef` canônica (`secret://env/YUKI_LANGSEARCH_API_KEY`, alias `cred_langsearch_primary`).
+  - Imunidade a vazamentos: chave nunca interpolada em URLs, logs, traces ou mensagens de erro.
+  - Cliente HTTP construído com `.no_proxy()` (prevenção contra evasão por proxies de ambiente), `.redirect(Policy::none())` e timeouts atrelados ao orçamento do turno.
+- **Isolamento de Runtime Assíncrono (`run_async`)**:
+  - Execução da requisição HTTP isolada em thread dedicada com runtime `current_thread` próprio, propagando explicitamente `CURRENT_TURN_CONTEXT` e `CURRENT_TURN_BUDGET`, com verificação dupla de prazo (*deadline*).
+- **Tratamento de Dados e Sanitização de Resultados**:
+  - Respostas delimitadas ao teto defensivo de 512 KiB.
+  - Filtragem estrita de URLs (apenas `http://` e `https://`; descarte imediato de `javascript:`, `file:`, `data:`).
+  - Sanitização de títulos (máximo 200 caracteres) e snippets (máximo 1000 caracteres).
+  - Atribuição sequencial de `cite_id` (`src:1`, `src:2`, ...) e classificação rigorosa como `SourceKind::AggregatedSnippet`.
+
+##### 3. Seleção Determinística de Provedores (`src/capabilities/research/mod.rs`)
+- Criado o enum tipado `SearchProviderChoice` com variantes `Mock`, `Brave` e `LangSearch`.
+- Precedência estrita na leitura de variáveis de ambiente:
+  1. `YUKI_RESEARCH_SEARCH_PROVIDER` (específico para provedor de busca textual);
+  2. `YUKI_RESEARCH_PROVIDER` (compatibilidade retroativa);
+  3. Padrão incondicional: `MockSearchProvider` (zero rede, zero credenciais).
+- Construtor `resolve_search_provider_from_env_with_tracker` instancia determinística e isoladamente o provedor correspondente sem fallback silencioso entre serviços externos.
+
+##### 4. Formalização do ADR-021: Yuki Native Search & Hybrid Retrieval
+- Documentado em `docs/adr/ADR-021_YUKI_NATIVE_SEARCH_ARCHITECTURE_AND_HYBRID_RETRIEVAL.md`:
+  - **Tríade Operacional**: Local Search (offline sobre workspace e docs locais), External Search (APIs governadas sob demanda) e Hybrid Retrieval (fusão recíproca RRF).
+  - **Componentes**: Native Search Orchestrator, Governed Crawler & Fetch Engine (robots.txt, politeness delay >= 1000ms, profundidade máxima 2, SSRF guard), Document Processor & Chunking Pipeline, SQLite FTS5 (BM25) e Vector Storage, Evidence Resolver & Source Registry.
+  - **Governança**: Nova permissão dedicada `egress:native_crawl`, isolamento de espaço de trabalho, quotas de disco e política de eviction LRU.
+  - **Roadmap Modular**: Marco 5A (SQLite FTS5 Local Search & Document Indexer), Marco 5B (Governed Web Crawler), Marco 5C (Local Vector Embeddings & RRF Fusion) e Marco 5D (Incremental Sync & File Watcher).
+
+##### 5. Nova Suíte Dedicada de Testes Offline (`tests/capability_research_langsearch.rs`)
+- 22 testes determinísticos e 100% offline cobrindo:
+  1. Resposta válida com múltiplos resultados;
+  2. Resposta válida com resultados vazios;
+  3. Tratamento de campos opcionais ausentes ou nulos;
+  4. Payload JSON corrompido ou malformado tratado graciosamente;
+  5. Erros HTTP 401/403 tratados com falha segura;
+  6. Limite de taxa HTTP 429 reportado como rate limit;
+  7. Instabilidade HTTP 5xx no servidor remoto tratada;
+  8. Timeout da requisição estritamente cumprido;
+  9. Resposta excedendo 512 KiB abortada;
+  10. Ausência de credencial opera em fail-secure;
+  11. Material da credencial nunca vaza em erros, logs ou formatters;
+  12. Security Controller nega execução sem permissão `egress:web_search`;
+  13. Security Controller autoriza quando `egress:web_search` está concedida;
+  14. Orçamento de turno (`max_searches`) rigorosamente respeitado;
+  15. Isolamento de concorrência entre buscas simultâneas em paralelo;
+  16. Injeção de prompt no snippet tratada como dado passivo (`Data != Instruction`);
+  17. URLs com esquemas proibidos (`javascript:`, `file:`) filtradas;
+  18. Preservação de integridade de proveniência e IDs `src:N`;
+  19. Intercambialidade com `BraveSearchProvider` via trait `SearchProvider`;
+  20. Seleção determinística de provedor via variáveis de ambiente;
+  21. Execução governada de ponta a ponta integrada ao `YukiCore`;
+  22. Erros de nível de aplicação (`code != 200` no corpo JSON) tratados corretamente.
+
+##### 6. Portões de Qualidade Aprovados
+- `cargo test`: 367 testes unitários e de integração aprovados no workspace (0 falhas, 4 testes live ignorados).
+- `cargo fmt --check`: 100% aprovado.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `cargo build --release`: compilação limpa e concluída com sucesso.
+- Baselines congelados `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
+- Nenhuma requisição à internet pública ou consumo de cotas de APIs externas realizado nesta etapa.
+- Classificação:
+  - **LANGSEARCH PROVIDER — PRONTO PARA VALIDAÇÃO LIVE**
+  - **YUKI NATIVE SEARCH — ARQUITETURA PROPOSTA (ADR-021)**
