@@ -10,14 +10,21 @@ use crate::contracts::identifiers::{
     now_utc, AttemptId, CapabilityId, CausationId, CorrelationId, EvidenceId, OperationId, TurnId,
 };
 use crate::contracts::input::UserInput;
+use crate::contracts::memory::{
+    MemoryCandidate, MemoryPolicy, MemoryRecord, MemoryRepository, MemoryRetriever,
+};
 use crate::contracts::output::YukiResult;
 use crate::contracts::verification::Evidence;
 use crate::execution::executor::Executor;
+use crate::memory::policy::MemoryController;
+use crate::memory::retriever::DefaultMemoryRetriever;
 use crate::models::config::ModelGatewayConfig;
 use crate::models::mock::MockModelProvider;
 use crate::models::proposal_parser::ProposalParser;
 use crate::models::provider::{HealthStatus, ModelProvider, ModelRequest};
 use crate::persistence::sqlite::SqliteAuditStore;
+use crate::personality::adapter::PersonalityPromptAdapter;
+use crate::personality::profile::PersonalityProfile;
 use crate::security::authorization::SecurityController;
 use crate::verification::verifier::Verifier;
 use std::sync::Arc;
@@ -57,6 +64,10 @@ pub struct YukiCore {
     pub persistent_audit: Option<Arc<SqliteAuditStore>>,
     pub model_config: ModelGatewayConfig,
     pub research_budget_tracker: Option<Arc<crate::contracts::research::ResearchBudgetTracker>>,
+    pub memory_repository: Option<Arc<dyn MemoryRepository>>,
+    pub memory_retriever: Option<Arc<dyn MemoryRetriever>>,
+    pub memory_controller: Option<Arc<MemoryController>>,
+    pub personality_profile: PersonalityProfile,
 }
 
 impl YukiCore {
@@ -71,6 +82,10 @@ impl YukiCore {
             persistent_audit: None,
             model_config: ModelGatewayConfig::default(),
             research_budget_tracker: None,
+            memory_repository: None,
+            memory_retriever: None,
+            memory_controller: None,
+            personality_profile: PersonalityProfile::yuki_default(),
         }
     }
 
@@ -92,7 +107,33 @@ impl YukiCore {
             persistent_audit: None,
             model_config: ModelGatewayConfig::default(),
             research_budget_tracker: None,
+            memory_repository: None,
+            memory_retriever: None,
+            memory_controller: None,
+            personality_profile: PersonalityProfile::yuki_default(),
         }
+    }
+
+    pub fn with_memory(
+        mut self,
+        repository: Arc<dyn MemoryRepository>,
+        policy: Option<MemoryPolicy>,
+    ) -> Self {
+        let retriever: Arc<dyn MemoryRetriever> =
+            Arc::new(DefaultMemoryRetriever::new(Arc::clone(&repository)));
+        let controller = Arc::new(MemoryController::new(
+            Arc::clone(&repository),
+            policy.unwrap_or_default(),
+        ));
+        self.memory_repository = Some(repository);
+        self.memory_retriever = Some(retriever);
+        self.memory_controller = Some(controller);
+        self
+    }
+
+    pub fn with_personality(mut self, profile: PersonalityProfile) -> Self {
+        self.personality_profile = profile;
+        self
     }
 
     pub fn with_persistent_audit(mut self, persistent_store: Arc<SqliteAuditStore>) -> Self {
@@ -254,13 +295,42 @@ impl YukiCore {
         ))
         .await?;
 
-        // 2. Build Context Object (Deterministic and synchronous)
+        // 2. Build Personal Context & Context Object (Marco 7 - Personal Intelligence)
+        let personal_context = if let Some(ref retriever) = self.memory_retriever {
+            let p_builder = crate::context::personal_context::PersonalContextBuilder::new(
+                Arc::clone(retriever),
+            );
+            match p_builder.build(&input.content) {
+                Ok(pctx) => {
+                    self.record_audit_async(AuditEvent::new(
+                        EventType::MemoryRetrieved,
+                        correlation_id.clone(),
+                        CausationId::new(request_id.to_string()),
+                        serde_json::json!({
+                            "retrieved_count": pctx.referenced_memory_ids.len(),
+                            "referenced_ids": pctx.referenced_memory_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+                        }),
+                        "memory_retriever",
+                    ))
+                    .await?;
+                    Some(pctx)
+                }
+                Err(e) => {
+                    tracing::warn!("Falha ao recuperar contexto pessoal: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let context_req = ContextRequest {
             purpose: "user_turn".to_string(),
             user_input: input.content.clone(),
             source: "user".to_string(),
         };
-        let context = ContextBuilder::build(&context_req)?;
+        let context =
+            ContextBuilder::build_with_personal_context(&context_req, personal_context.clone())?;
 
         self.record_audit_async(AuditEvent::new(
             EventType::ContextBuilt,
@@ -268,7 +338,8 @@ impl YukiCore {
             CausationId::new(request_id.to_string()),
             serde_json::json!({
                 "context_id": context.context_id.0,
-                "purpose": context.purpose
+                "purpose": context.purpose,
+                "has_personal_context": personal_context.is_some()
             }),
             "context_builder",
         ))
@@ -280,6 +351,34 @@ impl YukiCore {
             context.context_id.clone(),
             context.purpose.clone(),
         );
+
+        // Personality Synthesis (Marco 7 - 3-Tier Identity)
+        let personality_prompt = PersonalityPromptAdapter::render_for_user_input(
+            &self.personality_profile,
+            &input.content,
+        );
+        let system_instruction = if let Some(ref pc) = personal_context {
+            format!(
+                "{}\n\n### CONTEXTO PESSOAL DO OPERADOR:\n{}",
+                personality_prompt,
+                pc.to_prompt_section()
+            )
+        } else {
+            personality_prompt
+        };
+        model_req.system_instruction = Some(system_instruction);
+
+        self.record_audit_async(AuditEvent::new(
+            EventType::PersonalityApplied,
+            correlation_id.clone(),
+            CausationId::new(request_id.to_string()),
+            serde_json::json!({
+                "profile_name": self.personality_profile.name,
+                "conversational_style": format!("{:?}", self.personality_profile.conversational_style),
+            }),
+            "personality_adapter",
+        ))
+        .await?;
         // Capability Projection: Project eligible registered capabilities into provider-neutral declarations
         model_req.available_capabilities = self
             .capability_registry
@@ -410,7 +509,7 @@ impl YukiCore {
 
                 self.record_audit_async(AuditEvent::new(
                     EventType::ResponseProduced,
-                    correlation_id,
+                    correlation_id.clone(),
                     CausationId::new(request_id.to_string()),
                     serde_json::json!({
                         "status": "DirectText",
@@ -420,6 +519,36 @@ impl YukiCore {
                     "yuki_core",
                 ))
                 .await?;
+
+                // Etapa 6: Avaliação e persistência de memórias candidatas via MemoryController
+                if let Some(ref controller) = self.memory_controller {
+                    if let Some(candidate) = extract_user_memory_candidate(&input.content) {
+                        match controller.evaluate_and_commit(&candidate) {
+                            Ok(stored_mem) => {
+                                self.record_audit_async(AuditEvent::new(
+                                    EventType::MemoryStored,
+                                    correlation_id,
+                                    CausationId::new(request_id.to_string()),
+                                    serde_json::json!({
+                                        "memory_id": stored_mem.id.as_str(),
+                                        "title": stored_mem.title,
+                                        "memory_type": format!("{:?}", stored_mem.memory_type),
+                                        "source": format!("{:?}", stored_mem.source),
+                                    }),
+                                    "memory_controller",
+                                ))
+                                .await?;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Candidato a memória rejeitado pela política: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+
                 return Ok(res);
             };
 
@@ -849,6 +978,38 @@ impl YukiCore {
             ))),
         }
     }
+
+    /// Avalia e persiste um candidato a memória explicitamente através do MemoryController governado.
+    pub async fn commit_memory_candidate(
+        &self,
+        candidate: &MemoryCandidate,
+        correlation_id: &CorrelationId,
+        causation_id: &CausationId,
+    ) -> Result<MemoryRecord, YukiError> {
+        let controller = self.memory_controller.as_ref().ok_or_else(|| {
+            YukiError::ExecutionFailed("MemoryController não configurado no YukiCore".to_string())
+        })?;
+
+        let stored = controller
+            .evaluate_and_commit(candidate)
+            .map_err(|e| YukiError::ExecutionFailed(format!("Erro ao avaliar memória: {}", e)))?;
+
+        self.record_audit_async(AuditEvent::new(
+            EventType::MemoryStored,
+            correlation_id.clone(),
+            causation_id.clone(),
+            serde_json::json!({
+                "memory_id": stored.id.as_str(),
+                "title": stored.title,
+                "memory_type": format!("{:?}", stored.memory_type),
+                "source": format!("{:?}", stored.source),
+            }),
+            "memory_controller",
+        ))
+        .await?;
+
+        Ok(stored)
+    }
 }
 
 impl Default for YukiCore {
@@ -872,4 +1033,62 @@ fn format_execution_output(output: &serde_json::Value) -> String {
         }
     }
     serde_json::to_string(output).unwrap_or_else(|_| output.to_string())
+}
+
+/// Extrai candidato a memória declarado diretamente pelo usuário através de comandos em linguagem natural.
+fn extract_user_memory_candidate(input: &str) -> Option<MemoryCandidate> {
+    let lower = input.trim().to_lowercase();
+    let prefixes = [
+        (
+            "lembre-se de que ",
+            crate::contracts::memory::MemoryType::Fact,
+        ),
+        ("lembre-se que ", crate::contracts::memory::MemoryType::Fact),
+        ("lembre-se: ", crate::contracts::memory::MemoryType::Fact),
+        ("lembre-se ", crate::contracts::memory::MemoryType::Fact),
+        ("memorize: ", crate::contracts::memory::MemoryType::Fact),
+        (
+            "minha preferência é: ",
+            crate::contracts::memory::MemoryType::Preference,
+        ),
+        (
+            "minha preferência é ",
+            crate::contracts::memory::MemoryType::Preference,
+        ),
+        (
+            "instrução fixa: ",
+            crate::contracts::memory::MemoryType::Instruction,
+        ),
+        (
+            "instrução: ",
+            crate::contracts::memory::MemoryType::Instruction,
+        ),
+    ];
+
+    for (prefix, mem_type) in prefixes {
+        if lower.starts_with(prefix) {
+            let content = input.trim()[prefix.len()..].trim().to_string();
+            if !content.is_empty() {
+                let title = match mem_type {
+                    crate::contracts::memory::MemoryType::Preference => {
+                        "Preferência do Usuário".to_string()
+                    }
+                    crate::contracts::memory::MemoryType::Instruction => {
+                        "Instrução Fixa do Usuário".to_string()
+                    }
+                    _ => "Fato Declarado pelo Usuário".to_string(),
+                };
+                return Some(MemoryCandidate::new(
+                    mem_type,
+                    crate::contracts::memory::MemorySource::UserDeclared,
+                    crate::contracts::memory::MemoryConfidence::High,
+                    title,
+                    content,
+                    vec!["user_declared".to_string()],
+                    "Instrução explícita de memorização pelo usuário",
+                ));
+            }
+        }
+    }
+    None
 }

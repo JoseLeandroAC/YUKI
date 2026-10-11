@@ -23,6 +23,19 @@ pub enum EventType {
     VaultCredentialStored,
     VaultCredentialRevoked,
     VaultCredentialAccessed,
+    MemoryRetrieved,
+    MemoryStored,
+    MemoryRevoked,
+    PersonalityApplied,
+    MissionStarted,
+    MissionStepCompleted,
+    MissionApprovalRequested,
+    MissionApprovalGranted,
+    MissionApprovalDenied,
+    MissionCompleted,
+    MissionFailed,
+    VoiceInputReceived,
+    VoiceOutputProduced,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
