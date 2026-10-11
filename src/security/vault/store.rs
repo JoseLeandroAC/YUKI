@@ -171,9 +171,7 @@ impl VaultProcessLock {
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         if let Ok(meta) = fs::metadata(&lock_path) {
                             if let Ok(elapsed) = meta.modified().and_then(|m| {
-                                m.elapsed().map_err(|_| {
-                                    std::io::Error::new(std::io::ErrorKind::Other, "time error")
-                                })
+                                m.elapsed().map_err(|_| std::io::Error::other("time error"))
                             }) {
                                 if elapsed > std::time::Duration::from_secs(5) {
                                     let _ = fs::remove_file(&lock_path);
