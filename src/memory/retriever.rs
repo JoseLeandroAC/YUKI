@@ -93,6 +93,22 @@ impl MemoryRetriever for DefaultMemoryRetriever {
             }
         }
 
+        // 5. Se ainda houver orçamento restante, trazer episódios recentes
+        if results.len() < max_items {
+            let recent_episodes_query = MemoryQuery {
+                statuses: Some(vec![MemoryStatus::Active]),
+                memory_types: Some(vec![MemoryType::Episode]),
+                limit: max_items - results.len(),
+                ..Default::default()
+            };
+
+            for mem in self.repository.query(&recent_episodes_query)? {
+                if seen_ids.insert(mem.id.clone()) {
+                    results.push(mem);
+                }
+            }
+        }
+
         // Truncar para respeitar rigorosamente o orçamento de itens
         results.truncate(max_items);
         Ok(results)
