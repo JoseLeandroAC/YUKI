@@ -59,14 +59,14 @@ O projeto encontra-se na fase de:
     - **Proposta:** Yuki Ambient Intelligence & Security (`docs/proposals/YUKI_AMBIENT_INTELLIGENCE_AND_SECURITY.md`);
     - **Proposta:** OperatorProfile v1 (`docs/proposals/OPERATOR_PROFILE_V1.md`).
 * **Marco 7.2 (Hardening Final, Integridade e Validação Independente):**
-  - Implementação de bloqueio de processo no nível de kernel do sistema operacional (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), eliminando heurísticas frágeis de tempo e prevenindo roubo de lock;
+  - Implementação de bloqueio de processo no nível de kernel do sistema operacional (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), validado contra 5 cenários multiprocesso reais entre processos independentes de SO (exclusão mútua com `ProcessLockBusy`, lock mantido > 6s sem roubo ou expiração indevida, liberação normal, crash abrupto por `abort()` com liberação imediata pelo kernel, e múltiplos escritores concorrentes com recarregamento sob lock preservando integridade);
   - Proteção contra adoção silenciosa de senhas arbitrárias em migração de cofres legados vazios (`UnverifiableLegacyVault`), exigindo intervenção administrativa explícita (`initialize_unverifiable_legacy`);
-  - Proteção de permissões de arquivos restritas nativas no Vault (`0o600` em Unix e remoção de herança com concessão exclusiva ao usuário corrente via `icacls` no Windows);
+  - Proteção de permissões de arquivos restritas e verificáveis no Vault (`0o600` em Unix com checagem de modo pós-aplicação; e obtenção do SID exato via `whoami /user`, remoção de herança `/inheritance:r` e concessão exclusiva `/grant:r <target>:(F)` com verificação ativa de permissões efetivas no Windows; além de arquivos temporários criados diretamente com `share_mode(0)` e `mode(0o600)`);
   - Propagação rigorosa de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com registro de auditoria `MemoryRetrievalFailed` e retorno de `YukiError::ExecutionFailed` sem fallback silencioso;
-  - Gerenciamento de orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers de prioridade ontológica, assegurando preservação inviolável do Tier 1 (Instruções Essenciais de Sistema) e estimativa de tokens conservadora com 10% de margem de segurança;
-  - Defesa ativa contra injeção e quebra de delimitadores em memórias de contexto pessoal (`sanitize_untrusted_memory_content`), neutralizando fechamento forçado de envelope e tokens de autoridade (`<system>`, `[INST]`, etc.).
+  - Gerenciamento de orçamento integral de prompt (`PromptBudgetManager`) integrado diretamente no fluxo de produção de `YukiCore::process_input_internal`, estruturado em 6 tiers de prioridade ontológica com preservação inviolável do Tier 1 (Instruções Essenciais de Sistema), contabilização exata de delimitadores e avisos sem mascaramento por `saturating_sub`, e falha fechada com erros tipados (`UserTurnExceedsBudget`, `EssentialInstructionsExceedBudget`);
+  - Defesa ativa contra injeção e quebra de delimitadores em memórias de contexto pessoal (`sanitize_untrusted_memory_content`), com neutralização insensível a maiúsculas/minúsculas e tolerante a espaços para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`).
 * **Próximo Marco:** Marco 8 — Voice v1 & Missions Foundation (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
-* **Base de Testes:** 488 testes automatizados aprovados no workspace (0 falhas).
+* **Base de Testes:** Suíte completa aprovada no workspace (0 falhas).
 
 Consulte:
 

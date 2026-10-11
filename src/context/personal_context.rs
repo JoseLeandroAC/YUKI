@@ -132,20 +132,82 @@ impl PersonalContext {
     }
 
     /// Sanitiza o conteúdo de memória contra tentativas de injeção de delimitadores e falsificação de tags do sistema.
+    /// Opera de forma insensível a maiúsculas/minúsculas e tolerante a espaços internos.
     pub fn sanitize_untrusted_memory_content(raw: &str) -> String {
-        raw.replace(
+        let mut result = raw.to_string();
+
+        // 1. Desarma variações de fechamento e abertura de envelope de contexto
+        let envelope_variants = [
             "</operator_personal_context>",
-            "[ESCAPED_DELIMITER_CLOSING]",
-        )
-        .replace("<operator_personal_context", "[ESCAPED_DELIMITER_OPENING")
-        .replace("<system>", "[ESCAPED_SYSTEM_TAG]")
-        .replace("</system>", "[ESCAPED_SYSTEM_TAG]")
-        .replace("<developer>", "[ESCAPED_DEV_TAG]")
-        .replace("</developer>", "[ESCAPED_DEV_TAG]")
-        .replace("[INST]", "[ESCAPED_INST]")
-        .replace("[/INST]", "[ESCAPED_INST]")
-        .replace("<|im_start|>", "[ESCAPED_IM_START]")
-        .replace("<|im_end|>", "[ESCAPED_IM_END]")
+            "</ operator_personal_context>",
+            "</operator_personal_context >",
+            "</ operator_personal_context >",
+            "<operator_personal_context",
+            "< operator_personal_context",
+        ];
+        for var in &envelope_variants {
+            result = Self::replace_case_insensitive(&result, var, "[ESCAPED_DELIMITER]");
+        }
+
+        // 2. Desarma tags de autoridade do sistema e desenvolvedor
+        let authority_tags = [
+            "<system>",
+            "</system>",
+            "< system>",
+            "</ system>",
+            "<system >",
+            "</system >",
+            "<developer>",
+            "</developer>",
+            "< developer>",
+            "</ developer>",
+            "<developer >",
+            "</developer >",
+            "<<sys>>",
+            "<</sys>>",
+            "<< sys>>",
+            "<</ sys>>",
+            "<<<system>>>",
+            "<<< system>>>",
+        ];
+        for tag in &authority_tags {
+            result = Self::replace_case_insensitive(&result, tag, "[ESCAPED_AUTHORITY_TAG]");
+        }
+
+        // 3. Desarma tokens de instrução e controle de modelos populares (Llama, Mistral, ChatML)
+        let instruction_tokens = [
+            "[inst]",
+            "[/inst]",
+            "[ inst]",
+            "[/ inst]",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<s>",
+            "</s>",
+        ];
+        for tok in &instruction_tokens {
+            result = Self::replace_case_insensitive(&result, tok, "[ESCAPED_MODEL_CONTROL_TOKEN]");
+        }
+
+        result
+    }
+
+    fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
+        let needle_lower = needle.to_lowercase();
+        let mut output = String::with_capacity(haystack.len());
+        let mut search_idx = 0;
+        let haystack_lower = haystack.to_lowercase();
+
+        while let Some(pos) = haystack_lower[search_idx..].find(&needle_lower) {
+            let abs_pos = search_idx + pos;
+            output.push_str(&haystack[search_idx..abs_pos]);
+            output.push_str(replacement);
+            search_idx = abs_pos + needle.len();
+        }
+        output.push_str(&haystack[search_idx..]);
+        output
     }
 
     /// Renderiza o contexto pessoal envolvido em delimitador explícito de dados não confiáveis

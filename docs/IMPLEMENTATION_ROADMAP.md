@@ -62,7 +62,7 @@ Yuki Marco 7.1 (Endurecimento da Personal Intelligence & Diretrizes de Longo Pra
 ████████████████████████████████████████  implementado e validado (419+ testes, 12 correções técnicas, ADRs 022 a 025)
 
 Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente)
-████████████████████████████████████████  implementado e validado (488 testes, locks de kernel, proteção DACL, orçamento integral 6 tiers)
+████████████████████████████████████████  implementado e validado (concorrência multiprocesso 5 cenários, permissões DACL/0600 verificadas, orçamento integral de prompt em produção)
 
 Yuki Marco 8 (Voice v1 & Missions Foundation)
 🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)

@@ -105,30 +105,163 @@ fn lock_path_for(target_path: &Path) -> PathBuf {
     target_path.with_file_name(format!("{}.lock", file_name))
 }
 
-/// Aplica permissões restritas em arquivos sensíveis do Vault.
-/// - No Unix: modo 0o600 (leitura/escrita exclusiva para o proprietário).
-/// - No Windows: remove herança de ACL e concede controle total exclusivamente ao usuário atual.
+/// Obtém a identidade do usuário atual no Windows (SID nativo ou Conta).
+#[cfg(windows)]
+fn get_windows_user_target() -> Result<String, VaultError> {
+    // 1. Tenta obter o SID nativo do usuário via `whoami /user /fo csv /nh`
+    if let Ok(output) = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let parts: Vec<&str> = stdout.trim().split(',').collect();
+            if parts.len() >= 2 {
+                let sid = parts[1].trim().trim_matches('"');
+                if sid.starts_with("S-1-") {
+                    return Ok(format!("*{}", sid));
+                }
+            }
+        }
+    }
+
+    // 2. Fallback para USERDOMAIN\USERNAME
+    if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        let domain = domain.trim();
+        let user = user.trim();
+        if !domain.is_empty() && !user.is_empty() {
+            return Ok(format!("{}\\{}", domain, user));
+        }
+    }
+
+    // 3. Fallback para USERNAME
+    if let Ok(user) = std::env::var("USERNAME") {
+        let user = user.trim();
+        if !user.is_empty() {
+            return Ok(user.to_string());
+        }
+    }
+
+    Err(VaultError::Io(
+        "Não foi possível determinar a identidade do usuário do Windows para aplicar permissões restritas"
+            .to_string(),
+    ))
+}
+
+/// Aplica permissões restritas e verificáveis em arquivos sensíveis do Vault.
+/// - No Unix: modo 0o600 (leitura/escrita exclusiva para o proprietário) com verificação de metadados pós-aplicação.
+/// - No Windows: remove herança de ACL e concede controle total exclusivamente ao usuário/SID atual via `icacls`,
+///   com verificação das permissões efetivas.
 pub fn restrict_file_permissions(path: &Path) -> Result<(), VaultError> {
+    if !path.exists() {
+        return Err(VaultError::Io(format!(
+            "Arquivo inexistente ao tentar restringir permissões: '{}'",
+            path.display()
+        )));
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o600);
-        let _ = fs::set_permissions(path, perms);
+        fs::set_permissions(path, perms).map_err(|e| {
+            VaultError::Io(format!(
+                "Falha ao definir permissões 0600 em '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let meta = fs::metadata(path).map_err(|e| {
+            VaultError::Io(format!(
+                "Falha ao inspecionar metadados pós-aplicação em '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let mode = meta.permissions().mode();
+        if mode & 0o777 != 0o600 {
+            return Err(VaultError::Io(format!(
+                "Permissões verificadas em '{}' divergentes do modo esperado 0600 (obtido: {:o})",
+                path.display(),
+                mode & 0o777
+            )));
+        }
+
         Ok(())
     }
 
     #[cfg(windows)]
     {
-        if let Ok(username) = std::env::var("USERNAME") {
-            let path_str = path.to_string_lossy().to_string();
-            let grant_arg = format!("{}:F", username);
-            let _ = std::process::Command::new("icacls")
-                .arg(&path_str)
-                .arg("/inheritance:r")
-                .arg("/grant:r")
-                .arg(&grant_arg)
-                .output();
+        let target = get_windows_user_target()?;
+        let grant_arg = format!("{}:(F)", target);
+
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(&grant_arg)
+            .output()
+            .map_err(|e| {
+                VaultError::Io(format!(
+                    "Falha ao executar icacls em '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(VaultError::Io(format!(
+                "icacls falhou em '{}' com status {}: {} {}",
+                path.display(),
+                output.status,
+                stderr.trim(),
+                stdout.trim()
+            )));
         }
+
+        let stdout_apply = String::from_utf8_lossy(&output.stdout);
+        if stdout_apply.contains("falha no processamento de 1")
+            || stdout_apply.contains("Failed processing 1")
+        {
+            return Err(VaultError::Io(format!(
+                "icacls reportou falha no processamento de '{}': {}",
+                path.display(),
+                stdout_apply.trim()
+            )));
+        }
+
+        // Verificação das permissões efetivas após aplicação
+        let verify_output = std::process::Command::new("icacls")
+            .arg(path)
+            .output()
+            .map_err(|e| {
+                VaultError::Io(format!(
+                    "Falha ao verificar permissões efetivas com icacls em '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+        if !verify_output.status.success() {
+            return Err(VaultError::Io(format!(
+                "icacls falhou ao inspecionar permissões efetivas de '{}'",
+                path.display()
+            )));
+        }
+
+        let verify_stdout = String::from_utf8_lossy(&verify_output.stdout);
+        if !verify_stdout.contains(":(F)") && !verify_stdout.contains(":(OI)(CI)(F)") {
+            return Err(VaultError::Io(format!(
+                "Permissão de controle total não foi verificada na saída do icacls para '{}': {}",
+                path.display(),
+                verify_stdout.trim()
+            )));
+        }
+
         Ok(())
     }
 
@@ -182,7 +315,7 @@ impl VaultProcessLock {
             loop {
                 match opts.open(&lock_path) {
                     Ok(file) => {
-                        let _ = restrict_file_permissions(&lock_path);
+                        restrict_file_permissions(&lock_path)?;
                         return Ok(Self { _file: file });
                     }
                     Err(e)
@@ -211,11 +344,11 @@ impl VaultProcessLock {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::OpenOptionsExt;
             use std::os::unix::io::AsRawFd;
 
             let mut opts = fs::OpenOptions::new();
-            opts.read(true).write(true).create(true);
+            opts.read(true).write(true).create(true).mode(0o600);
 
             let file = opts.open(&lock_path).map_err(|e| {
                 VaultError::Io(format!(
@@ -224,7 +357,7 @@ impl VaultProcessLock {
                     e
                 ))
             })?;
-            let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+            restrict_file_permissions(&lock_path)?;
 
             let fd = file.as_raw_fd();
             let start = std::time::Instant::now();
@@ -496,6 +629,14 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
+                    *entries_guard = disk_file.entries;
+                }
+            }
+        }
+
         let mut staged = entries_guard.clone();
         staged.insert(alias.to_string(), entry);
 
@@ -544,6 +685,14 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
+                    *entries_guard = disk_file.entries;
+                }
+            }
+        }
+
         let existing = entries_guard
             .get(alias)
             .ok_or_else(|| VaultError::NotFound(alias.to_string()))?;
@@ -590,9 +739,30 @@ impl CredentialVault {
             .read()
             .map_err(|_| VaultError::Io("Lock de leitura envenenado".to_string()))?;
 
-        let entry = entries
-            .get(alias)
-            .ok_or_else(|| VaultError::NotFound(alias.to_string()))?;
+        let entry = match entries.get(alias) {
+            Some(e) => e.clone(),
+            None => {
+                drop(entries);
+                if self.path.exists() {
+                    let _proc_lock = VaultProcessLock::acquire(&self.path)?;
+                    let mut write_guard = self
+                        .entries
+                        .write()
+                        .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+                    if let Ok(content) = fs::read_to_string(&self.path) {
+                        if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
+                            *write_guard = disk_file.entries;
+                        }
+                    }
+                    write_guard
+                        .get(alias)
+                        .cloned()
+                        .ok_or_else(|| VaultError::NotFound(alias.to_string()))?
+                } else {
+                    return Err(VaultError::NotFound(alias.to_string()));
+                }
+            }
+        };
 
         match entry.metadata.status {
             CredentialStatus::Active => {}
@@ -629,6 +799,14 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
+                    *entries_guard = disk_file.entries;
+                }
+            }
+        }
+
         let mut staged = entries_guard.clone();
         let entry = staged
             .get_mut(alias)
@@ -664,6 +842,14 @@ impl CredentialVault {
             .entries
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+
+        if self.path.exists() {
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
+                    *entries_guard = disk_file.entries;
+                }
+            }
+        }
 
         let mut staged = entries_guard.clone();
         if staged.remove(alias).is_none() {
@@ -769,18 +955,24 @@ impl CredentialVault {
                 })?
             };
 
-            #[cfg(not(windows))]
+            #[cfg(unix)]
+            let mut file = {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true).mode(0o600);
+                opts.open(&tmp_path).map_err(|e| {
+                    VaultError::Io(format!("Falha ao criar arquivo temporário do vault: {}", e))
+                })?
+            };
+
+            #[cfg(not(any(windows, unix)))]
             let mut file = File::create(&tmp_path).map_err(|e| {
                 VaultError::Io(format!("Falha ao criar arquivo temporário do vault: {}", e))
             })?;
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
-            }
-
-            let _ = restrict_file_permissions(&tmp_path);
+            restrict_file_permissions(&tmp_path).inspect_err(|_| {
+                let _ = fs::remove_file(&tmp_path);
+            })?;
 
             file.write_all(serialized.as_bytes()).map_err(|e| {
                 let _ = fs::remove_file(&tmp_path);
@@ -798,7 +990,7 @@ impl CredentialVault {
             VaultError::Io(format!("Falha no rename atômico do vault: {}", e))
         })?;
 
-        let _ = restrict_file_permissions(target_path);
+        restrict_file_permissions(target_path)?;
 
         Ok(())
     }
