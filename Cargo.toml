@@ -20,6 +20,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
 flate2 = "1.1.10"
 brotli = "9.0.0"
+aes-gcm = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+getrandom = "0.2"
 
 
 

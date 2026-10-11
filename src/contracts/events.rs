@@ -20,6 +20,9 @@ pub enum EventType {
     CitationResolved,
     CitationRejected,
     SynthesisCompleted,
+    VaultCredentialStored,
+    VaultCredentialRevoked,
+    VaultCredentialAccessed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

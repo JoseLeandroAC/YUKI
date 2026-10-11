@@ -43,9 +43,12 @@ O objetivo não é criar apenas um chatbot, mas uma plataforma capaz de:
 
 O projeto encontra-se na fase de:
 
-**Arquitetura e especificação conceitual.**
+**Implementação e Expansão de Infraestrutura.**
 
-A implementação do MVP ainda será iniciada após a definição suficiente da arquitetura fundamental.
+* **Foundation v0.1 & MVP-1 Runtime:** Concluídos e validados (ADRs 006 a 019).
+* **Research v1 (Marcos 1 a 5):** Recuperação governada, SSRF guard, extração e descompressão segura de conteúdo, Brave Search e LangSearch providers, registro de fontes e citações verificáveis (ADR-020).
+* **Marco 6 (Expansão de Infraestrutura):** Credential Vault v1 (AES-256-GCM + PBKDF2, zeroize, SecretStore, CompositeCredentialBroker), Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede), e endurecimento de transporte (ADR-008 e ADR-021).
+* **Base de Testes:** 383 testes automatizados aprovados no workspace.
 
 Consulte:
 

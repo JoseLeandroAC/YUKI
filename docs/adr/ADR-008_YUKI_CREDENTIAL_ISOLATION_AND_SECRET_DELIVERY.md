@@ -1920,4 +1920,35 @@ Ou, de forma ainda mais direta:
 
 A arquitetura de isolamento e entrega de credenciais passa a fazer parte da arquitetura oficial da Yuki.
 
+---
+
+# 85. Implementação: Yuki Credential Vault v1 (Marco 6)
+
+Em atendimento às diretrizes do ADR-008, o **Marco 6** introduziu a primeira implementação operacional do cofre criptográfico soberano da plataforma:
+
+### 85.1 Criptografia Autenticada e Derivação de Chave
+- **Cifra:** AES-256-GCM (Authenticated Encryption with Associated Data).
+- **Nonce:** 12 bytes gerados por CSPRNG do sistema (`getrandom`), únicos por operação.
+- **KDF:** PBKDF2-HMAC-SHA256 com 100.000 iterações e salt aleatório de 16 bytes.
+- **Zeroização em Memória:** As chaves derivadas e buffers de texto claro utilizam o trait `Zeroize` e `ZeroizeOnDrop` do crate `zeroize`, sendo limpos imediatamente ao saírem de escopo.
+
+### 85.2 Persistência Atômica e Separação de Metadados
+- Arquivo do cofre estruturado em formato versionado (versão 1).
+- Escrita atômica utilizando arquivo temporário (`.tmp.<timestamp>.<counter>`), com chamada explícita de `file.sync_all()` antes da operação de substituição atômica (`rename`).
+- Permissões restritas no sistema de arquivos (`0o600` em ambientes Unix).
+- `CredentialMetadata` armazena exclusivamente informações não-sensíveis (`alias`, `provider`, `status`, `created_at`, `updated_at`, `description`), NUNCA armazenando chaves, senhas, texto cifrado, salt ou nonce.
+
+### 85.3 Ciclo de Vida e Fail-Closed
+- Suporte a operações CRUD (`store`, `get`, `revoke`, `delete`, `list_metadata`, `is_active`).
+- Revogação explícita com recusa imediata de requisições subsequentes (`CredentialError::AccessDenied`).
+- Falha fechada em caso de senha incorreta ou texto cifrado corrompido/adulterado (verificação estrita da tag GCM).
+
+### 85.4 Integração Arquitetural
+- Abstração `SecretStore` e adaptador `VaultSecretStore` implementando `CredentialBroker`.
+- `CompositeCredentialBroker` suportando resolução transparente de referências:
+  - `secret://env/<VAR>` -> resolvido via variáveis de ambiente;
+  - `secret://vault/<ALIAS>` -> resolvido via Credential Vault.
+- Novos eventos de auditoria: `VaultCredentialStored`, `VaultCredentialRevoked`, `VaultCredentialAccessed`, garantidos contra vazamento de segredos via `assert_no_secrets()`.
+
 **Fim do ADR-008**
+

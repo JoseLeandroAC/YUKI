@@ -34,6 +34,7 @@ pub enum SearchProviderChoice {
     Mock,
     Brave,
     LangSearch,
+    Native,
 }
 
 impl SearchProviderChoice {
@@ -51,6 +52,7 @@ impl SearchProviderChoice {
         match name.as_str() {
             "brave" => Self::Brave,
             "langsearch" => Self::LangSearch,
+            "native" => Self::Native,
             _ => Self::Mock,
         }
     }
@@ -60,9 +62,10 @@ impl SearchProviderChoice {
 ///
 /// REGRAS DE GOVERNANÇA:
 /// 1. Padrão incondicional: `MockSearchProvider` (zero rede, zero credenciais).
-/// 2. `YUKI_RESEARCH_SEARCH_PROVIDER=brave` ou `YUKI_RESEARCH_PROVIDER=brave`: instancia `BraveSearchProvider`.
-/// 3. `YUKI_RESEARCH_SEARCH_PROVIDER=langsearch` ou `YUKI_RESEARCH_PROVIDER=langsearch`: instancia `LangSearchProvider`.
-/// 4. A configuração de provedor real NÃO ativa consultas de rede sem `YUKI_RESEARCH_LIVE_ENABLED=true`.
+/// 2. `YUKI_RESEARCH_SEARCH_PROVIDER=brave`: instancia `BraveSearchProvider`.
+/// 3. `YUKI_RESEARCH_SEARCH_PROVIDER=langsearch`: instancia `LangSearchProvider`.
+/// 4. `YUKI_RESEARCH_SEARCH_PROVIDER=native`: instancia `NativeSearchProvider` (zero rede, busca local FTS5).
+/// 5. A configuração de provedor real NÃO ativa consultas de rede sem `YUKI_RESEARCH_LIVE_ENABLED=true`.
 pub fn resolve_search_provider_from_env_with_tracker(
     credential_broker: Arc<dyn CredentialBroker>,
     tracker: Option<Arc<ResearchBudgetTracker>>,
@@ -94,6 +97,38 @@ pub fn resolve_search_provider_from_env_with_tracker(
                 Err(e) => {
                     tracing::warn!(
                         "Falha ao configurar LangSearchProvider ({}). Recuando para MockSearchProvider.",
+                        e
+                    );
+                    Arc::new(MockSearchProvider::new())
+                }
+            }
+        }
+        SearchProviderChoice::Native => {
+            let db_path_str = std::env::var("YUKI_NATIVE_SEARCH_DB_PATH")
+                .unwrap_or_else(|_| "data/search_index.db".to_string());
+
+            let conn_res = if db_path_str == ":memory:" {
+                rusqlite::Connection::open_in_memory()
+            } else {
+                let p = std::path::PathBuf::from(&db_path_str);
+                if let Some(parent) = p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                rusqlite::Connection::open(&p)
+            };
+
+            match conn_res {
+                Ok(conn) => {
+                    let _ = crate::capabilities::native_search::initialize_search_schema(&conn);
+                    let engine =
+                        Arc::new(crate::capabilities::native_search::LocalSearchEngine::new(
+                            Arc::new(std::sync::Mutex::new(conn)),
+                        ));
+                    Arc::new(crate::capabilities::native_search::NativeSearchProvider::new(engine))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Falha ao abrir SQLite para NativeSearchProvider ({}). Recuando para MockSearchProvider.",
                         e
                     );
                     Arc::new(MockSearchProvider::new())

@@ -603,3 +603,25 @@ Para solucionar a causa-raiz preservando integralmente os princípios ontológic
   16. Registro fiel de bytes descomprimidos no `ResearchBudgetTracker`.
 - Base total de testes da plataforma expandida para 345 testes offline com 100% de aprovação.
 - Classificação: **CONTENT-ENCODING — CORRIGIDO OFFLINE**.
+
+---
+
+## 13. Endurecimento Pós-Validação (Research Hardening — Marco 6)
+
+Com base nas lições aprendidas nos testes live e nas auditorias de segurança, o **Marco 6** introduziu endurecimentos complementares para a camada de pesquisa:
+
+### 13.1 Recepção Streaming Delimitada com Aborto Prévio (< 512 KiB)
+- Nos provedores `LangSearchProvider` e `BraveSearchProvider`, a leitura de rede foi migrada de buffering integral (`resp.bytes().await`) para streaming de blocos incrementais (`while let Some(chunk) = resp.chunk().await`).
+- A contagem cumulativa de bytes recebidos da rede é verificada a cada bloco recebido.
+- Se o acumulador ultrapassar 512 KiB (`524,288` bytes), a recepção é abortada imediatamente antes de alocar memória para o restante da resposta, protegendo a plataforma contra ataques de consumo de banda e exaustão de memória.
+
+### 13.2 Validação Estrita de Endpoint em Modo Live
+- Em modo live (`is_live() == true`), os provedores rejeitam qualquer requisição não-HTTPS ou direcionada a domínios não confiáveis.
+- Para LangSearch, apenas `api.langsearch.com` e `langsearch.com` sob `https://` são autorizados em produção.
+- Endpoints de loopback (`127.0.0.1`, `localhost`) são permitidos exclusivamente em testes offline com simulação local controlada.
+
+### 13.3 Sanitização e Delimitação de Mensagens de Erro Externas
+- Respostas de erro originadas de serviços externos passam por `sanitize_external_error_message`.
+- Caracteres de controle ASCII (que poderiam corromper logs ou terminais) são removidos.
+- Mensagens de erro são limitadas a um tamanho máximo de 200 caracteres com reticências (`...`), prevenindo poluição de logs e vetores de injeção secundária.
+

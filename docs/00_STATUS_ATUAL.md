@@ -1,42 +1,39 @@
 Yuki — Status Atual do Projeto
 
-Última atualização: 2026-10-03
-Status geral: MVP-1 Marco 4 implementado, testado e validado; suíte adversarial completa e empacotamento OCI pronto para auditoria de fechamento
+Última atualização: 2026-10-11
+Status geral: Marco 6 (Expansão de Infraestrutura: Credential Vault v1 + Native Search Foundation + Research Hardening) implementado, testado e validado; 383 testes aprovados no workspace
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/mvp-1-runtime" (PR #3 aberto em draft para "main")
-Baseline Foundation: "v0.1.0-foundation" (congelada e preservada em 654c1812f40d6c903e67fd6f86f4b83e06e14b8c)
+Branch de trabalho: "feature/research-v1"
+Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os quatro marcos de desenvolvimento do **MVP-1 (Runtime Soberano & Modelo Operacional Mínimo)**:
-- **Marco 1:** Runtime Assíncrono Tokio, Pipeline Assíncrono com Timeout e Cancelamento;
-- **Marco 2:** Credential Broker Nível 1, Model Gateway/Router, Adapter Gemini e Provedor Mock;
-- **Marco 3:** Verificação Dinâmica desacoplada, Registry de Estratégias, Persistência Local Durável SQLite com Migrações;
-- **Marco 4:** Expansão Segura de Capacidades (`system.time`, `system.info`), Validação de Pré-Autorização Fail-Closed, Integridade Estrita de Parâmetros, Suíte Adversarial Completa (34 testes) e Empacotamento OCI/Docker Multi-Stage.
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5) e o **Marco 6 (Expansão de Infraestrutura: Credential Vault v1 + Native Search Foundation + Research Hardening)**:
+- **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
+- **Marco 6 (Research Hardening):** Leitura streaming de rede (< 512 KiB) com cancelamento prévio, validação estrita de endpoints em modo live, e sanitização/truncamento de mensagens de erro externas;
+- **Marco 6 (Credential Vault v1):** Criptografia em repouso AES-256-GCM + PBKDF2 (100.000 iterações), zeroização de material em memória, escrita atômica com permissões restritas, separação estrita de metadados, ciclo de vida CRUD/revogação fail-closed e `CompositeCredentialBroker`;
+- **Marco 6 (Native Search Foundation):** Primeiro módulo executável do ADR-021: indexador local (`.md`, `.txt`, `.rs`), defesa contra Path Traversal, filtro de arquivos secretos, delta updates via SHA-256, tabela virtual SQLite FTS5 (BM25 com tokenizador `unicode61`), motor de busca local e `NativeSearchProvider` (100% offline, `is_live() -> false`, `SourceKind::LocalWorkspace`).
 
 A situação atual pode ser resumida como:
 
 ARQUITETURA
 ████████████████████████████████████████
-DEFINIDA E DOCUMENTADA (ADRs 006 a 019)
+DEFINIDA E DOCUMENTADA (ADRs 006 a 021)
 
-CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1)
+CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
-FROZEN / IMUTÁVEIS (v0.1.0-foundation)
+FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-MVP-1 (MARCOS 1, 2, 3 E 4)
+RESEARCH V1 & MARCO 6 (EXPANSÃO DE INFRAESTRUTURA)
 ████████████████████████████████████████
-IMPLEMENTADOS E VERIFICADOS
+IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-120/120 TESTES ATIVOS PASSANDO (1 LIVE GEMINI IGNORADO)
+383 TESTES ATIVOS PASSANDO (4 LIVE OPT-IN IGNORADOS)
 
-EMPACOTAMENTO OCI / DOCKER
-████████████████████████████████████████
-CONCLUÍDO (MULTI-STAGE, HARDENED, NON-ROOT)
 
 ---
 

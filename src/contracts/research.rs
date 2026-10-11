@@ -14,6 +14,8 @@ pub enum SourceKind {
     DirectSource,
     /// Fonte espelho ou conteúdo não verificável independentemente.
     UnverifiedMirror,
+    /// Conteúdo indexado a partir do workspace local seguro (Marco 6 / ADR-021).
+    LocalWorkspace,
 }
 
 use crate::contracts::identifiers::{EvidenceId, ObservationId, TurnId};

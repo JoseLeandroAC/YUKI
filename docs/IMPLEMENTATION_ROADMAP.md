@@ -52,6 +52,9 @@ Foundation v0.1 / MVP-0 (Código & Testes)
 Yuki MVP-1 (Runtime Assíncrono, Credential Broker, Persistência Local, Capacidades & Suíte Adversarial)
 ████████████████████████████████████████  implementado e validado (Marcos 1 a 4: 120 testes)
 
+Yuki Research v1 & Marco 6 (Pesquisa Governamental, Credential Vault v1 & Native Search Foundation)
+████████████████████████████████████████  implementado e verificado (383 testes)
+
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
 

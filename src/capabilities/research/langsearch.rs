@@ -287,13 +287,15 @@ impl SearchProvider for LangSearchProvider {
                 ))
             })?;
 
-        // 4. Montagem da URL e parâmetros validados
+        // 4. Montagem da URL e validação perimetral do endpoint de destino
         let url = reqwest::Url::parse(&self.config.endpoint).map_err(|e| {
             YukiError::InvalidRequest(format!(
                 "Endpoint inválido configurado para LangSearch: {}",
                 e
             ))
         })?;
+
+        validate_langsearch_endpoint_security(&url, self.config.live_enabled)?;
 
         // Mapeamento canônico de freshness do ADR-020 para LangSearch API ("day", "week", "month", "noLimit")
         let freshness_mapped = match input.freshness.as_str() {
@@ -316,10 +318,10 @@ impl SearchProvider for LangSearchProvider {
         let client = self.client.clone();
         let url_clone = url.clone();
 
-        // 5. Execução HTTP isolada
+        // 5. Execução HTTP isolada com streaming delimitado e proteção contra OOM
         let wire_response = self.run_async(
             async move {
-                let resp = client
+                let mut resp = client
                     .post(url_clone)
                     .header("Authorization", format!("Bearer {}", token))
                     .header("Content-Type", "application/json")
@@ -334,15 +336,13 @@ impl SearchProvider for LangSearchProvider {
                                 "Timeout na requisição ao provedor de busca".to_string(),
                             )
                         } else if e.is_connect() {
-                            YukiError::ExecutionFailed(format!(
-                                "Falha de conexão de rede com provedor de busca: {}",
-                                e
-                            ))
+                            YukiError::ExecutionFailed(
+                                "Falha de conexão de rede com provedor de busca".to_string(),
+                            )
                         } else {
-                            YukiError::ExecutionFailed(format!(
-                                "Erro na requisição ao provedor de busca: {}",
-                                e
-                            ))
+                            YukiError::ExecutionFailed(
+                                "Erro de transporte na requisição ao provedor de busca".to_string(),
+                            )
                         }
                     })?;
 
@@ -376,6 +376,7 @@ impl SearchProvider for LangSearchProvider {
                     )));
                 }
 
+                // Verificação antecipada de Content-Length se informado
                 if let Some(len) = resp.content_length() {
                     if len > max_response_bytes as u64 {
                         return Err(YukiError::ExecutionFailed(format!(
@@ -385,18 +386,26 @@ impl SearchProvider for LangSearchProvider {
                     }
                 }
 
-                let body_bytes = resp.bytes().await.map_err(|e| {
-                    YukiError::ExecutionFailed(format!(
-                        "Falha ao ler dados da resposta de busca: {}",
-                        e
-                    ))
-                })?;
-
-                if body_bytes.len() > max_response_bytes {
-                    return Err(YukiError::ExecutionFailed(format!(
-                        "Corpo da resposta de busca excedeu limite de {} bytes",
-                        max_response_bytes
-                    )));
+                // Leitura streaming incremental com teto rigoroso para prevenção de OOM
+                let mut body_bytes = Vec::new();
+                while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                    if e.is_timeout() {
+                        YukiError::ExecutionFailed(
+                            "Timeout durante leitura do stream de resposta de busca".to_string(),
+                        )
+                    } else {
+                        YukiError::ExecutionFailed(
+                            "Falha ao ler dados da resposta de busca".to_string(),
+                        )
+                    }
+                })? {
+                    if body_bytes.len() + chunk.len() > max_response_bytes {
+                        return Err(YukiError::ExecutionFailed(format!(
+                            "Corpo da resposta de busca excedeu limite de {} bytes",
+                            max_response_bytes
+                        )));
+                    }
+                    body_bytes.extend_from_slice(&chunk);
                 }
 
                 let parsed: LangSearchWireResponse =
@@ -407,16 +416,17 @@ impl SearchProvider for LangSearchProvider {
                         ))
                     })?;
 
-                // Validação de integridade do payload de nível de aplicação
+                // Validação de integridade do payload com higienização estrita de mensagem
                 if let Some(code) = parsed.code {
                     if code != 200 {
-                        let msg = parsed
+                        let raw_msg = parsed
                             .msg
                             .as_deref()
                             .unwrap_or("Falha reportada na resposta de busca");
+                        let sanitized_msg = sanitize_external_error_message(raw_msg);
                         return Err(YukiError::ExecutionFailed(format!(
                             "Provedor de busca retornou erro de aplicação (code {}): {}",
-                            code, msg
+                            code, sanitized_msg
                         )));
                     }
                 }
@@ -491,5 +501,80 @@ impl SearchProvider for LangSearchProvider {
             results_count: results.len(),
             results,
         })
+    }
+}
+
+/// Valida que o endpoint configurado é seguro antes de enviar credenciais ou tráfego.
+///
+/// REGRAS DE SEGURANÇA:
+/// 1. Em modo live (`live_enabled == true`), aceita exclusivamente hosts confiáveis (`api.langsearch.com` / `langsearch.com`).
+/// 2. Esquema deve ser estritamente HTTPS em modo live.
+/// 3. Em ambientes de teste locais (loopback `127.0.0.1`, `localhost`), permite HTTP exclusivamente para servidores mock efêmeros.
+/// 4. Rejeita esquemas inseguros (`http://`, `file://`, `ftp://`) contra servidores remotos externos.
+pub(crate) fn validate_langsearch_endpoint_security(
+    url: &reqwest::Url,
+    live_enabled: bool,
+) -> Result<(), YukiError> {
+    let host = url.host_str().ok_or_else(|| {
+        YukiError::SecurityViolation("Endpoint de busca não possui host válido".to_string())
+    })?;
+
+    // Permitir loopback local em testes unitários/offline controlados
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        return Ok(());
+    }
+
+    // Se live_enabled está ativo, exige HTTPS e valida domínio oficial
+    if live_enabled {
+        if url.scheme() != "https" {
+            return Err(YukiError::SecurityViolation(format!(
+                "Protocolo inseguro ('{}') rejeitado para busca live externa. Apenas HTTPS é permitido.",
+                url.scheme()
+            )));
+        }
+
+        let is_trusted = host.eq_ignore_ascii_case("api.langsearch.com")
+            || host.eq_ignore_ascii_case("langsearch.com")
+            || host.ends_with(".langsearch.com");
+
+        if !is_trusted {
+            return Err(YukiError::SecurityViolation(format!(
+                "Destino externo não autorizado ('{}') para envio de credencial LangSearch. Host confiável esperado: api.langsearch.com.",
+                host
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Higieniza mensagens de erro recebidas de provedores externos antes de propagá-las.
+///
+/// REGRAS:
+/// 1. Remove ou substitui caracteres de controle ASCII que poderiam corromper terminais ou logs.
+/// 2. Delimita o tamanho máximo a 200 caracteres, prevenindo OOM e poluição de logs.
+/// 3. Garante que mensagens vazias recebam texto substituto informativo.
+pub(crate) fn sanitize_external_error_message(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "Erro desconhecido reportado pelo provedor externo".to_string();
+    }
+
+    let cleaned: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\t' && c != '\n' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    if cleaned.chars().count() > 200 {
+        let truncated: String = cleaned.chars().take(200).collect();
+        format!("{}...", truncated)
+    } else {
+        cleaned
     }
 }

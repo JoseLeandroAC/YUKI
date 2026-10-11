@@ -239,3 +239,54 @@ impl CredentialBroker for EnvSecretStore {
         }
     }
 }
+
+/// Broker composto que delega dinamicamente para o backend apropriado
+/// com base no prefixo da URI de referência:
+/// - `secret://env/<VAR>` -> resolvido via variáveis de ambiente (`EnvSecretStore`)
+/// - `secret://vault/<ALIAS>` -> resolvido via cofre seguro cifrado (`CredentialVault`)
+pub struct CompositeCredentialBroker {
+    env_broker: EnvSecretStore,
+    vault_broker: Option<std::sync::Arc<dyn CredentialBroker>>,
+}
+
+impl CompositeCredentialBroker {
+    pub fn new() -> Self {
+        Self {
+            env_broker: EnvSecretStore::new(),
+            vault_broker: None,
+        }
+    }
+
+    pub fn with_vault(mut self, vault_broker: std::sync::Arc<dyn CredentialBroker>) -> Self {
+        self.vault_broker = Some(vault_broker);
+        self
+    }
+
+    pub fn set_vault(&mut self, vault_broker: std::sync::Arc<dyn CredentialBroker>) {
+        self.vault_broker = Some(vault_broker);
+    }
+}
+
+impl Default for CompositeCredentialBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CredentialBroker for CompositeCredentialBroker {
+    fn acquire(&self, reference: &SecretRef) -> Result<SecretLease, CredentialError> {
+        let uri = reference.uri();
+        if uri.starts_with("secret://env/") {
+            self.env_broker.acquire(reference)
+        } else if uri.starts_with("secret://vault/") {
+            match &self.vault_broker {
+                Some(vault) => vault.acquire(reference),
+                None => Err(CredentialError::BackendUnavailable(
+                    "Credential Vault não inicializado ou não configurado".to_string(),
+                )),
+            }
+        } else {
+            Err(CredentialError::InvalidReference(uri.to_string()))
+        }
+    }
+}

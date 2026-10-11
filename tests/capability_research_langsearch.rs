@@ -881,3 +881,96 @@ fn test_langsearch_22_application_error_payload() {
     assert!(err.to_string().contains("code 400"));
     assert!(err.to_string().contains("Invalid query parameter length"));
 }
+
+// ============================================================================
+// 23. Hardening: Rejeição de Endpoint Não Confiável em Modo Live
+// ============================================================================
+
+#[test]
+fn test_langsearch_23_untrusted_live_endpoint_rejected() {
+    let broker = Arc::new(TestCredentialBroker::new(Some("secret")));
+    let config = LangSearchConfig::new()
+        .with_live_enabled(true)
+        .with_endpoint("https://attacker.evil.corp/v1/search");
+
+    let provider = LangSearchProvider::new(config, broker).unwrap();
+    let input = ResearchSearchInput::new("security untrusted endpoint");
+    let err = provider.search(&input).unwrap_err();
+
+    assert!(err.to_string().contains("Destino externo não autorizado"));
+    assert!(err.to_string().contains("api.langsearch.com"));
+}
+
+// ============================================================================
+// 24. Hardening: Rejeição de Esquema HTTP Inseguro em Modo Live Remoto
+// ============================================================================
+
+#[test]
+fn test_langsearch_24_insecure_scheme_rejected_in_live_mode() {
+    let broker = Arc::new(TestCredentialBroker::new(Some("secret")));
+    let config = LangSearchConfig::new()
+        .with_live_enabled(true)
+        .with_endpoint("http://api.langsearch.com/v1/web-search");
+
+    let provider = LangSearchProvider::new(config, broker).unwrap();
+    let input = ResearchSearchInput::new("security insecure http");
+    let err = provider.search(&input).unwrap_err();
+
+    assert!(err.to_string().contains("Protocolo inseguro"));
+    assert!(err.to_string().contains("Apenas HTTPS é permitido"));
+}
+
+// ============================================================================
+// 25. Hardening: Higienização e Truncamento de Mensagem de Erro Externa
+// ============================================================================
+
+#[test]
+fn test_langsearch_25_error_message_sanitization() {
+    let raw_hostile_msg = format!(
+        "Erro Crítico\x00\x07\x1b[31mInjeção\x1b[0m: {}",
+        "X".repeat(500)
+    );
+    let error_json = serde_json::json!({
+        "code": 500,
+        "msg": raw_hostile_msg,
+        "data": null
+    })
+    .to_string();
+
+    let server = spawn_mock_server(200, error_json, 0);
+    let broker = Arc::new(TestCredentialBroker::new(Some("secret")));
+    let config = LangSearchConfig::new()
+        .with_live_enabled(true)
+        .with_endpoint(server.url());
+
+    let provider = LangSearchProvider::new(config, broker).unwrap();
+    let input = ResearchSearchInput::new("hostile error payload");
+    let err = provider.search(&input).unwrap_err();
+    let err_str = err.to_string();
+
+    // Mensagem não deve conter caracteres de controle ASCII NUL/BEL
+    assert!(!err_str.contains('\0'));
+    assert!(!err_str.contains('\x07'));
+    // E deve ter sido truncada com reticências
+    assert!(err_str.contains("..."));
+}
+
+// ============================================================================
+// 26. Hardening: Streaming de Resposta Excedendo 512 KiB Aborta Imediatamente
+// ============================================================================
+
+#[test]
+fn test_langsearch_26_streaming_chunked_abort_exceeding_max_bytes() {
+    let huge_content = "X".repeat(600 * 1024); // 600 KiB > 512 KiB
+    let server = spawn_mock_server(200, huge_content, 0);
+    let broker = Arc::new(TestCredentialBroker::new(Some("secret")));
+    let config = LangSearchConfig::new()
+        .with_live_enabled(true)
+        .with_endpoint(server.url());
+
+    let provider = LangSearchProvider::new(config, broker).unwrap();
+    let input = ResearchSearchInput::new("streaming abort query");
+    let err = provider.search(&input).unwrap_err();
+
+    assert!(err.to_string().contains("excedeu limite"));
+}

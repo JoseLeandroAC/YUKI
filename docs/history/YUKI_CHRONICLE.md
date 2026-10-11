@@ -844,3 +844,71 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - Classificação:
   - **LANGSEARCH PROVIDER — PRONTO PARA VALIDAÇÃO LIVE**
   - **YUKI NATIVE SEARCH — ARQUITETURA PROPOSTA (ADR-021)**
+
+---
+
+#### 2026-10-11 — Marco 6: Infrastructure Expansion: Credential Vault v1 + Native Search Foundation + Research Hardening
+- **Branch:** `feature/research-v1`
+- **Repositório:** `JoseLeandroAC/YUKI`
+
+##### 1. Contexto e Motivação
+Com a validação dos provedores externos da Research v1 (Brave Search e LangSearch), a plataforma Yuki demandava:
+1. Endurecimento das defesas de transporte e sanitização de erros contra APIs remotas (Research Hardening);
+2. Implementação do cofre criptográfico soberano para proteção de credenciais em repouso (Credential Vault v1, conforme ADR-008);
+3. Concretização da primeira fase executável da busca nativa local soberana (Native Search Foundation, conforme ADR-021);
+4. Integração das novas capacidades sob configuração tipada unificada sem alterar os contratos congelados da Foundation v0.1 e MVP-1.
+
+##### 2. Etapa 1 — Research Hardening (LangSearch & Brave Search)
+- **Recepção Streaming Delimitada com Aborto Prévio (< 512 KiB):** Substituição de buffering integral (`resp.bytes().await`) por leitura streaming em blocos (`resp.chunk().await`). Se a resposta acumulada ultrapassar 512 KiB (`524,288` bytes), a conexão é abortada imediatamente antes de alocar memória excedente.
+- **Validação Estrita de Endpoint em Modo Live:** Requisições reais exigem HTTPS e são restritas aos hosts de confiança registrados (`api.langsearch.com`, `langsearch.com`, `api.search.brave.com`). Destinos em loopback (`127.0.0.1`, `localhost`) são permitidos estritamente em ambiente de teste offline.
+- **Sanitização de Mensagens de Erro Externas:** Remoção de caracteres de controle ASCII e truncamento estrito a 200 caracteres com reticências (`...`) via `sanitize_external_error_message`, prevenindo poluição de logs e vetores de injeção secundária.
+- Suíte de testes `capability_research_langsearch` expandida para 26 testes unitários e de integração (testes 23 a 26 adicionados).
+
+##### 3. Etapa 2 — Yuki Credential Vault v1 (ADR-008)
+- **Criptografia Autenticada:** AES-256-GCM com nonce de 12 bytes gerado por CSPRNG do sistema (`getrandom`), único por operação de escrita.
+- **Derivação de Chave Robusta:** PBKDF2-HMAC-SHA256 com 100.000 iterações e salt aleatório de 16 bytes.
+- **Zeroização em Memória:** Estruturas `ZeroizedKey` e `SecretMaterial` implementam `Zeroize` e `ZeroizeOnDrop`, garantindo limpeza imediata ao sair de escopo.
+- **Persistência Atômica:** Escrita em arquivo temporário (`.tmp.<timestamp>.<counter>`), `file.sync_all()` e substituição atômica via `rename`, com permissões restritas `0o600` em Unix.
+- **Separação de Metadados:** `CredentialMetadata` (`alias`, `provider`, `status`, `created_at`, `updated_at`, `description`) nunca expõe ou armazena chaves, senhas, texto cifrado, salt ou nonce.
+- **Ciclo de Vida e Fail-Closed:** Operações CRUD (`store`, `get`, `revoke`, `delete`, `list_metadata`, `is_active`). Senha incorreta ou texto cifrado adulterado falha imediatamente por verificação da tag GCM. Revogação explícita nega qualquer emissão subsequente (`CredentialError::AccessDenied`).
+- **Abstração e Composição:**
+  - Trait `SecretStore` e adaptador `VaultSecretStore` implementando `CredentialBroker`;
+  - `CompositeCredentialBroker` resolvendo transparentemente referências `secret://env/<var>` e `secret://vault/<alias>`.
+- **Eventos de Auditoria:** `VaultCredentialStored`, `VaultCredentialRevoked` e `VaultCredentialAccessed` adicionados a `EventType`, validados contra padrões de segredo via `assert_no_secrets()`.
+- **Suíte de Testes:** `tests/vault_security.rs` com 8 testes cobrindo CRUD, persistência entre reinicializações, falha fechada com senha errada ou dados adulterados, revogação, concorrência thread-safe, blindagem em Debug/Display e resolução composta.
+
+##### 4. Etapa 3 — Yuki Native Search Foundation (ADR-021)
+- **Operação 100% Local e Soberana:** `NativeSearchProvider` implementa `SearchProvider` com `is_live() -> false` (zero sockets de rede, zero requisições HTTP).
+- **Esquema Relacional e SQLite FTS5:**
+  - Tabelas `indexed_documents` e `document_chunks`;
+  - Tabela virtual `chunks_fts` com tokenizador `unicode61 remove_diacritics 2`, habilitando busca fonética e com/sem acentos em português.
+- **Indexador Local Incremental (`LocalDocumentIndexer`):**
+  - Processa arquivos `.md`, `.txt` e `.rs`;
+  - Defesa contra Path Traversal via `canonicalize` e validação estrita de pertencimento à raiz autorizada;
+  - Filtro preventivo de arquivos e pastas sensíveis (`.*`, `.env*`, `.git`, `.key`, `.pem`, `id_rsa`, `*token*`, `*secret*`, `target/`, `node_modules/`);
+  - Delta updates via SHA-256: arquivos inalterados são ignorados (*delta skip*); arquivos modificados têm seus chunks atualizados atomicamente;
+  - Sincronização de remoções: arquivos deletados do disco são expurgados do índice relacional e FTS5;
+  - Chunking contextual: segmentação em blocos de até ~800 caracteres preservando cabeçalhos contextuais Markdown (`heading_context`).
+- **Motor de Busca Local (`LocalSearchEngine`):** Sanitização de queries FTS5 para busca booleana segura, ranking BM25 e geração de snippets destacados.
+- **Suíte de Testes:** `tests/native_search.rs` com 8 testes cobrindo indexação inicial, queries BM25, delta updates, remoção de arquivos, bloqueio de arquivos secretos, suporte a termos acentuados em português, defesa contra path traversal e isolamento de rede.
+
+##### 5. Etapa 4 — Integração & Configuração Unificada
+- Adicionada variante `SearchProviderChoice::Native` a `src/capabilities/research/mod.rs`.
+- Suporte a seleção via `YUKI_RESEARCH_SEARCH_PROVIDER=native` instanciando `NativeSearchProvider`.
+- Configuração tipada `VaultConfig` com suporte a `YUKI_VAULT_PATH` e banco local via `YUKI_NATIVE_SEARCH_DB_PATH`.
+- Mapeamento uniforme para `SearchResultItem` com `SourceKind::LocalWorkspace` e domínio `local.workspace`.
+
+##### 6. Portões de Qualidade e Métricas
+- **Testes:** 383 testes executados e aprovados no workspace (0 falhas, 4 testes live opt-in ignorados).
+  - `tests/vault_security.rs`: 8/8 aprovados.
+  - `tests/native_search.rs`: 8/8 aprovados.
+  - `tests/capability_research_langsearch.rs`: 26/26 aprovados.
+  - `tests/capability_research_brave.rs`: 26/26 aprovados (1 live ignorado).
+- **Formatação e Lints:** `cargo fmt --check` e `cargo clippy --all-targets -- -D warnings` aprovados com zero advertências.
+- **Compilação de Release:** `cargo build --release` executado com sucesso.
+- **Baselines Preservados:** `v0.1.0-foundation` e `v0.2.0-mvp1` estritamente íntegros.
+- **Classificação:**
+  - **RESEARCH HARDENING — IMPLEMENTADO E APROVADO**
+  - **CREDENTIAL VAULT V1 — IMPLEMENTADO E APROVADO**
+  - **NATIVE SEARCH FOUNDATION — IMPLEMENTADO E APROVADO**
+

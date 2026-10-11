@@ -329,7 +329,7 @@ impl SearchProvider for BraveSearchProvider {
         // 5. Execução HTTP isolada
         let wire_response = self.run_async(
             async move {
-                let resp = client
+                let mut resp = client
                     .get(url_clone)
                     .header("X-Subscription-Token", token)
                     .header("Accept", "application/json")
@@ -392,18 +392,25 @@ impl SearchProvider for BraveSearchProvider {
                     }
                 }
 
-                let body_bytes = resp.bytes().await.map_err(|e| {
-                    YukiError::ExecutionFailed(format!(
-                        "Falha ao ler dados da resposta de busca: {}",
-                        e
-                    ))
-                })?;
-
-                if body_bytes.len() > max_response_bytes {
-                    return Err(YukiError::ExecutionFailed(format!(
-                        "Corpo da resposta de busca excedeu limite de {} bytes",
-                        max_response_bytes
-                    )));
+                let mut body_bytes = Vec::new();
+                while let Some(chunk) = resp.chunk().await.map_err(|e| {
+                    if e.is_timeout() {
+                        YukiError::ExecutionFailed(
+                            "Timeout durante leitura do stream de resposta de busca".to_string(),
+                        )
+                    } else {
+                        YukiError::ExecutionFailed(
+                            "Falha ao ler dados da resposta de busca".to_string(),
+                        )
+                    }
+                })? {
+                    if body_bytes.len() + chunk.len() > max_response_bytes {
+                        return Err(YukiError::ExecutionFailed(format!(
+                            "Corpo da resposta de busca excedeu limite de {} bytes",
+                            max_response_bytes
+                        )));
+                    }
+                    body_bytes.extend_from_slice(&chunk);
                 }
 
                 let parsed: BraveSearchWireResponse =

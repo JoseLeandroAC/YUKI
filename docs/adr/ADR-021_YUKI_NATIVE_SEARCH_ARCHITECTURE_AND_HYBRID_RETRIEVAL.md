@@ -1,10 +1,10 @@
 # ADR-021 — Yuki Native Search Architecture, Indexing Engine & Hybrid Retrieval
 
-**Versão:** 1.0  
-**Status:** PROPOSED / ARCHITECTURAL BLUEPRINT (Marco 5 Concluído)  
+**Versão:** 1.1  
+**Status:** PARTIALLY IMPLEMENTED (Marco 6: Fundação de Busca Nativa & FTS5 Implementados)  
 **Domínio:** 15 — Integrations / Cognitive Capabilities / Information Retrieval & Local Indexing  
 **Data:** 2026-10-11  
-**Decisão:** Proposed (Arquitetura formal e roadmap definidos para busca e recuperação híbrida soberana)  
+**Decisão:** Accepted & Partially Implemented (Fase 1 operacional na branch feature/research-v1)  
 
 ---
 
@@ -341,11 +341,41 @@ A arquitetura Native Search será desdobrada em marcos modulares e testáveis:
 
 ---
 
-## 10. Conclusão & Próximos Passos
+## 10. Conclusão & Evolução Modular
 
 A arquitetura formalizada neste ADR-021 posiciona a Yuki para transcender a dependência estrita de motores comerciais de terceiros. Ao combinar a indexação local via SQLite FTS5, embeddings semânticos soberanos e fusão RRF com os provedores externos governados (Brave e LangSearch), a Yuki alcança simultaneamente:
 1. Máxima velocidade e privacidade em tarefas locais;
 2. Amplitude informativa em consultas sobre a web pública;
 3. Respeito irrestrito à governança constitucional e ao isolamento de privilégios.
 
-Este documento encerra o desenho arquitetural do Marco 5, ficando registrado como referência mandatória para a implementação subsequente do Marco 5A.
+---
+
+## 11. Implementação: Yuki Native Search Foundation (Marco 6)
+
+O **Marco 6** concretizou a primeira etapa executável deste ADR-021 (antigo Marco 5A), entregando a fundação operacional da busca local determinística:
+
+### 11.1 Armazenamento Relacional e Tabela Virtual FTS5
+- Inicializado via `initialize_search_schema` no SQLite (`rusqlite` bundled).
+- Tabelas relacionais `indexed_documents` e `document_chunks`.
+- Tabela virtual FTS5 `chunks_fts` com colunas `chunk_id UNINDEXED`, `doc_id UNINDEXED`, `content_text`, `heading_context`, `title`.
+- Tokenizador configurado: `unicode61 remove_diacritics 2`, garantindo busca fonética e acentuação transparente em português e termos técnicos de código.
+
+### 11.2 Indexador Local Incremental (`LocalDocumentIndexer`)
+- **Escopo e Extensões:** Processamento nativo de documentos `.md`, `.txt` e código-fonte `.rs`.
+- **Defesa Contra Path Traversal:** Resolução obrigatória de caminhos canônicos (`fs::canonicalize`) e verificação estrita de que cada arquivo reside estritamente sob a raiz autorizada (`starts_with`).
+- **Filtro Estrito de Arquivos Sensíveis:** Bloqueio preventivo de arquivos ocultos (`.*`), variáveis de ambiente (`.env*`), chaves (`.key`, `.pem`, `id_rsa`), segredos (`*token*`, `*secret*`, `*credential*`) e diretórios de compilação (`target/`, `node_modules/`, `dist/`).
+- **Delta Updates via SHA-256:** Leitura prévia de hash bruto; arquivos inalterados são pulados (*delta skip*). Arquivos modificados sofrem substituição atômica de chunks.
+- **Sincronização de Remoção:** Arquivos removidos do disco são expurgados do índice relacional e FTS5 na sincronização.
+- **Chunking Semântico com Contexto:** Divisão em blocos de até ~800 caracteres em limites de parágrafo, preservando o cabeçalho Markdown contextual (`heading_context`).
+
+### 11.3 Motor de Busca Local (`LocalSearchEngine`)
+- Sanitização de termos booleanos (`sanitize_fts5_query`) prevenindo injeções de sintaxe FTS5.
+- Execução de consultas BM25 com extração nativa de snippets destacados.
+- Ordenação estrita por relevância BM25 ascendente.
+
+### 11.4 Adaptador Governamental (`NativeSearchProvider`)
+- Implementa o contrato `SearchProvider`.
+- `is_live(&self) -> false`: Zero conexões de rede, sem requisições HTTP, operação puramente local.
+- Mapeamento uniforme para `ResearchSearchResult` com classificação ontológica `SourceKind::LocalWorkspace` e domínio `local.workspace`.
+- Suporte a seleção por configuração via `YUKI_RESEARCH_SEARCH_PROVIDER=native` (`SearchProviderChoice::Native`).
+
