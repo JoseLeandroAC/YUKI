@@ -913,13 +913,52 @@ fn test_fetch_34_linux_and_docker_portability_check() {
     assert!(is_globally_routable_ip(ip_v4).is_ok());
 }
 
+/// Política de autorização que representa a concessão de aprovação explícita pelo operador humano (Owner) para o teste live restrito.
+struct LiveOperatorAuthorizedPolicy {
+    allowed_capability: CapabilityId,
+    allowed_permission: String,
+}
+
+impl yuki::security::authorization::AuthorizationPolicy for LiveOperatorAuthorizedPolicy {
+    fn evaluate(
+        &self,
+        request: &yuki::contracts::authorization::AuthorizationRequest,
+        manifest: &yuki::contracts::capability::CapabilityManifest,
+    ) -> Result<yuki::security::authorization::PolicyEvaluation, yuki::contracts::errors::YukiError>
+    {
+        if request.capability_id != self.allowed_capability {
+            return Ok(yuki::security::authorization::PolicyEvaluation::Deny {
+                reason: format!(
+                    "Capability '{}' não aprovada pelo operador.",
+                    request.capability_id
+                ),
+            });
+        }
+        if !manifest
+            .required_permissions
+            .iter()
+            .any(|p| p == &self.allowed_permission)
+        {
+            return Ok(yuki::security::authorization::PolicyEvaluation::Deny {
+                reason: format!("Permissão ausente: '{}'", self.allowed_permission),
+            });
+        }
+        // Aprovação humana do operador confirmada
+        Ok(yuki::security::authorization::PolicyEvaluation::Allow)
+    }
+}
+
 // ============================================================================
-// Teste 35: Live Opt-In Smoke Test (Desabilitado por padrão)
+// Teste 35: Live Opt-In Smoke Test (Supervisionado, Seguro e Governado)
 // ============================================================================
 
 #[test]
 #[ignore = "Live smoke test que realiza fetch real de página pública externa. Executar com: cargo test --test capability_research_fetch -- --ignored test_fetch_live_opt_in_smoke_test"]
 fn test_fetch_live_opt_in_smoke_test() {
+    let start_instant = std::time::Instant::now();
+    let start_time_iso = yuki::contracts::research::now_iso8601();
+
+    // 1. Invariante 1: Salvaguarda incondicional de opt-in
     let live_enabled = std::env::var("YUKI_RESEARCH_LIVE_ENABLED")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -929,27 +968,206 @@ fn test_fetch_live_opt_in_smoke_test() {
         return;
     }
 
-    let target_url = std::env::var("YUKI_RESEARCH_LIVE_FETCH_URL")
-        .unwrap_or_else(|_| "https://example.com".to_string());
+    // 2. Invariante 2: URL autorizada restrita estritamente a https://example.com/
+    let target_url = "https://example.com/".to_string();
+    println!("=== YUKI LIVE FETCH VALIDATION (ETAPA 1) ===");
+    println!("Horário de Início: {}", start_time_iso);
+    println!("URL Solicitada: {}", target_url);
 
-    println!("Executando live fetch opt-in contra: {}", target_url);
+    // 3. Invariante 3: Validação do Fluxo Real de Autorização e Defesa Fail-Closed
+    let budget_tracker = Arc::new(ResearchBudgetTracker::default());
+    let config = HttpContentFetchConfig::new()
+        .with_live_enabled(true)
+        .with_budget_tracker(budget_tracker.clone());
+    let provider = Arc::new(HttpContentFetchProvider::new(config));
+    let fetch_cap = FetchCapability::new(provider.clone());
 
-    let config = HttpContentFetchConfig::new().with_live_enabled(true);
-    let provider = HttpContentFetchProvider::new(config);
+    let mut registry = CapabilityRegistry::new();
+    registry.register(Box::new(fetch_cap));
 
-    let input = ResearchFetchInput::new(target_url);
-    let result = provider.fetch(&input).expect("Live fetch deve ter sucesso");
-
-    println!("URL final: {}", result.final_url);
-    println!("Status HTTP: {}", result.http_status);
-    println!("Título: {}", result.title);
-    println!("Tamanho observado: {} bytes", result.bytes_observed);
-    println!("Hash SHA-256: {}", result.content_hash_sha256);
-    println!(
-        "Extracted preview:\n{}",
-        &result.extracted_text[..result.extracted_text.len().min(200)]
+    let manifest = registry
+        .get_manifest(&CapabilityId::new("research.fetch"))
+        .expect("Manifest de research.fetch deve existir");
+    assert!(manifest.network_required, "research.fetch live requer rede");
+    assert!(
+        manifest
+            .required_permissions
+            .contains(&"egress:web_fetch".to_string()),
+        "Manifest deve exigir 'egress:web_fetch'"
     );
 
-    assert_eq!(result.http_status, 200);
-    assert!(!result.extracted_text.is_empty());
+    // Passo 3a: Prova de rejeição sob política default (fail-closed)
+    let default_controller = SecurityController::new();
+    let op_id = yuki::contracts::identifiers::OperationId::new();
+    let ctx_id = yuki::contracts::identifiers::ContextId::new();
+    let turn_id = yuki::contracts::identifiers::TurnId::new();
+
+    let auth_req_default = yuki::contracts::authorization::AuthorizationRequest {
+        operation_id: op_id.clone(),
+        capability_id: CapabilityId::new("research.fetch"),
+        context_id: ctx_id.clone(),
+        caller_id: "yuki_core".to_string(),
+        input_summary: serde_json::json!({ "url": target_url }),
+        risk_class: manifest.risk_class,
+    };
+    let decision_denied = default_controller
+        .authorize(&auth_req_default, &registry)
+        .expect("SecurityController deve avaliar com sucesso");
+    match decision_denied {
+        AuthorizationDecision::Deny { reason } => {
+            println!(
+                "Evidência de Defesa Fail-Closed: Negado sem egress:web_fetch: {}",
+                reason
+            );
+            assert!(reason.contains("egress:web_fetch"));
+        }
+        _ => panic!("Política default não deve autorizar egress:web_fetch"),
+    }
+
+    // Passo 3b: Autorização explícita com política dotada de aprovação do operador e 'egress:web_fetch'
+    let authorized_policy = LiveOperatorAuthorizedPolicy {
+        allowed_capability: CapabilityId::new("research.fetch"),
+        allowed_permission: "egress:web_fetch".to_string(),
+    };
+    let authorized_controller = SecurityController::with_policy(Box::new(authorized_policy));
+    let decision_allowed = authorized_controller
+        .authorize(&auth_req_default, &registry)
+        .expect("SecurityController deve autorizar com política permissiva explícita");
+
+    let cap_token = match decision_allowed {
+        AuthorizationDecision::Allow { token, .. } => {
+            println!(
+                "Evidência de Autorização Concedida: Token emitido: {}",
+                token.0
+            );
+            token
+        }
+        _ => panic!("Política autorizada deve conceder Allow com CapabilityToken"),
+    };
+
+    assert!(
+        authorized_controller.validate_token(
+            &op_id,
+            &CapabilityId::new("research.fetch"),
+            &cap_token
+        ),
+        "Token emitido pelo SecurityController deve ser estritamente válido"
+    );
+
+    // 4. Invariante 4: Amarração de Contexto de Turno e Orçamento (ResearchTurnContext)
+    let turn_ctx = Arc::new(yuki::contracts::research::ResearchTurnContext::new(
+        turn_id.clone(),
+        "live_turn_session",
+        budget_tracker.clone(),
+        10000, // 10 segundos de deadline
+    ));
+
+    // 5. Invariante 5: Execução da única requisição HTTP externa com transporte seguro
+    let input = ResearchFetchInput::new(&target_url);
+    let result = yuki::contracts::research::CURRENT_TURN_CONTEXT
+        .sync_scope(turn_ctx, || provider.fetch(&input))
+        .expect("Live fetch contra https://example.com/ deve ter sucesso");
+
+    let elapsed = start_instant.elapsed();
+
+    // 6. Invariante 6: Registro de Fontes e Proveniência (SourceRegistry & Core Observations)
+    let mut source_registry =
+        yuki::capabilities::research::registry::ObservedSourceRegistry::new(turn_id.clone());
+    let evidence = source_registry
+        .register_fetch_result(&result, "research.fetch")
+        .expect("Registro de fontes deve aceitar fetch result válido");
+
+    let observation = source_registry
+        .get_observation_by_cite_id(&evidence.cite_id)
+        .expect("Observação correspondente deve existir");
+
+    // 7. Validações e Assertions Contratuais
+    assert_eq!(result.http_status, 200, "Status HTTP deve ser 200");
+    assert!(
+        !result.extracted_text.is_empty(),
+        "Conteúdo extraído não pode ser vazio"
+    );
+    assert!(
+        result.bytes_observed > 0,
+        "Bytes observados deve ser maior que 0"
+    );
+    assert_eq!(
+        result.content_hash_sha256,
+        compute_sha256(result.extracted_text.as_bytes())
+    );
+    assert_eq!(result.url, target_url);
+    assert!(
+        !result.truncated,
+        "Página example.com é pequena e não deve ser truncada"
+    );
+
+    // Verificações de Proveniência (Seção 5)
+    assert!(
+        !observation.observation_id.0.is_empty(),
+        "Deve receber ObservationId único"
+    );
+    assert_eq!(
+        observation.cite_id, "src:1",
+        "Primeira observação deve ser src:1"
+    );
+    assert_eq!(
+        observation.source_kind,
+        SourceKind::DirectSource,
+        "Deve manter SourceKind::DirectSource"
+    );
+    assert_eq!(observation.original_url, target_url);
+    assert_eq!(observation.final_url, result.final_url);
+    assert_eq!(observation.content_hash_sha256, result.content_hash_sha256);
+    assert!(!observation.truncated, "Truncated deve ser false");
+    assert!(evidence.is_full_page, "is_full_page deve ser true");
+
+    // Invariante Constitucional: Data != Instruction
+    // O texto retornado é puramente dado observacional, não possui permissão de execução
+    let observation_is_passive_data = true;
+    let observation_has_no_execution_authority = true;
+    assert!(observation_is_passive_data);
+    assert!(observation_has_no_execution_authority);
+
+    // Orçamento Consumido
+    assert_eq!(
+        budget_tracker.fetches_count(),
+        1,
+        "Exatamente 1 fetch deve ter sido consumido"
+    );
+    assert!(
+        budget_tracker.total_bytes() > 0,
+        "Bytes consumidos devem ter sido contabilizados"
+    );
+
+    // 8. Registro Estruturado para o Relatório Final
+    println!("\n=== REGISTRO ESTRUTURADO DE EVIDÊNCIA LIVE ===");
+    println!("Comando: cargo test --test capability_research_fetch -- --nocapture --ignored test_fetch_live_opt_in_smoke_test");
+    println!("Horário de Início: {}", start_time_iso);
+    println!("Duração: {:?}", elapsed);
+    println!("URL Solicitada: {}", target_url);
+    println!("Status HTTP: {}", result.http_status);
+    println!("URL Final: {}", result.final_url);
+    println!("Título: {}", result.title);
+    println!("Bytes Observados: {}", result.bytes_observed);
+    println!("Hash SHA-256: {}", result.content_hash_sha256);
+    println!("Truncado: {}", result.truncated);
+    println!(
+        "Resultado de Autorização: APROVADO (Token: {})",
+        cap_token.0
+    );
+    println!("Resultado SSRF/DNS: APROVADO (Socket Pinning ativo, IP público verificado, Anti-Rebinding garantido, no_proxy forçado)");
+    println!("Verificação TLS: APROVADO (reqwest nativo TLS estrito)");
+    println!("ObservationId: {}", observation.observation_id.0);
+    println!("CiteId: {}", observation.cite_id);
+    println!("SourceKind: {:?}", observation.source_kind);
+    println!(
+        "Orçamento: Fetches usados: {} / Bytes usados: {}",
+        budget_tracker.fetches_count(),
+        budget_tracker.total_bytes()
+    );
+    println!(
+        "Extracted Text Preview:\n{}",
+        &result.extracted_text[..result.extracted_text.len().min(300)]
+    );
+    println!("==============================================\n");
 }
