@@ -1010,4 +1010,42 @@ Após a expansão de infraestrutura com busca nativa e cofre criptográfico no M
 - **Classificação:**
   - **MARCO 7 (PERSONAL INTELLIGENCE FOUNDATION) — IMPLEMENTADO, AUDITADO E APROVADO**
 
+---
+
+#### [Event Time: 2026-10-11 | Record Creation Time: 2026-10-11]
+### Marco 7.1 — Endurecimento da Personal Intelligence e Diretrizes Fundamentais de Evolução
+
+- **Branch**: `feature/marco-7.1-evolution`
+- **Contexto**: Resolução das 12 pendências técnicas apontadas na auditoria pós-Marco 7 e formalização das diretrizes estruturais de longo prazo para a plataforma.
+
+##### 1. O que se pretendia
+A Yuki não é um projeto escolar ou protótipo limitado ao mínimo funcional; é uma inteligência assistiva multimodal, modular e extensível para atuar como uma extensão aprimorada das capacidades intelectuais, criativas e práticas de seu operador, preservando a soberania humana. A meta do Marco 7.1 era sanar todas as fragilidades técnicas encontradas no Marco 7 antes de prosseguir e registrar os fundamentos de longo prazo da arquitetura.
+
+##### 2. As 12 Correções Implementadas
+1. **Filtros SQL antes de LIMIT/OFFSET (`src/memory/store.rs`):** As cláusulas de filtro (`owner_id`, `status`, `memory_type`, `source`, `confidence`, `tags`) foram movidas dinamicamente para o `WHERE` antes de `LIMIT ? OFFSET ?`.
+2. **`count()` Desacoplado de Paginação (`src/memory/store.rs`):** O método executa `SELECT COUNT(*)` com exatamente a mesma cláusula `WHERE`, computando o total real de registros.
+3. **Zero Fallback de Busca Textual com Fatos Aleatórios (`src/memory/store.rs` e `src/memory/retriever.rs`):** Consultas textuais FTS5 que não encontram resultados retornam lista vazia (`Vec::new()`), eliminando o antigo fallback que poluía o contexto com fatos irrelevantes.
+4. **Propagação de Erros de Banco e Auditoria (`src/memory/store.rs`, `src/contracts/events.rs`, `src/core/yuki_core.rs`):** Erros de banco não são mais silenciados; propagam-se como `MemoryError::Storage` e emitem o evento `MemoryRetrievalFailed` na auditoria.
+5. **Isolamento de Memórias Fora de Instruções de Sistema (`Data != Instruction`):** As memórias do contexto pessoal são encapsuladas em `<operator_personal_context origin="memory_v1" classification="untrusted_reference_data">` no payload do usuário, mantendo `system_instruction` inviolável.
+6. **Escopo Lógico Obrigatório de Dono (`owner_id`):** Introdução de `owner_id` (padrão `operator:primary`), migração transparente de banco de dados e isolamento em deduplicação e consultas.
+7. **Política Sanitária Expandida (`src/contracts/memory.rs`):** `MemoryPolicy` valida nulos (`\0`), rejeita connection strings (`postgres://`, etc.), chaves privadas RSA/SSH, dados bancários/CVV, seed phrases e proíbe vigilância íntima clandestina (`prohibit_intimate_surveillance`).
+8. **Orçamento Adaptativo Proporcional ao Prompt (`src/context/personal_context.rs`):** Suporte a `total_prompt_budget_chars` e `max_prompt_ratio`, calculando o limite proporcional de caracteres.
+9. **Sincronização Interprocessos no Vault (`src/security/vault/store.rs`):** Criação de `VaultProcessLock` com arquivo companion `.lock`, impedindo corridas entre processos concorrentes.
+10. **Proteção Windows `share_mode(0)` (`src/security/vault/store.rs`):** Escrita atômica em arquivo temporário com acesso exclusivo no kernel Windows via `share_mode(0)`.
+11. **Inicialização Inequívoca de `vault init` (`src/security/vault/admin.rs` e `store.rs`):** Métodos explícitos `create_new`, `open` e `open_or_create`. O comando `yuki vault init` exige `--force` e digitação de `"RECRIAR"` para reescrever cofres existentes.
+12. **Alinhamento Documental e Diretrizes de Evolução:** Atualização de status e formalização das propostas de evolução.
+
+##### 3. Documentos e Propostas Arquiteturais Formalizados
+- **ADR-022:** Ampliação das Capacidades Humanas e Parceria Intelectual (Princípio canônico: *"A Yuki existe para ampliar as capacidades humanas de seu operador, aprendendo, colaborando e agindo de maneira inteligente, fiel, crítica e responsável, sem substituir sua autonomia"*).
+- **ADR-023:** Arquitetura de Memória Cognitiva, Associativa e Expansível (6 camadas de memória, consolidação noturna, importância não-linear, limites dinâmicos e esquecimento seletivo).
+- **ADR-024:** Governança de Políticas Configuráveis e Autonomia Proporcional ao Impacto (3 categorias de governança e faixas de impacto Baixo/Médio/Crítico).
+- **ADR-025:** Princípio de Independência Arquitetural e Primazia do Proprietário (independência perante ferramentas e modelos de IA utilizados em sua construção).
+- **Proposta Técnica:** Yuki Ambient Intelligence & Security (`docs/proposals/YUKI_AMBIENT_INTELLIGENCE_AND_SECURITY.md`).
+- **Proposta Técnica:** OperatorProfile v1 (`docs/proposals/OPERATOR_PROFILE_V1.md`).
+
+##### 4. Resultados Verificados
+- Suíte `tests/marco_7_1_validation.rs`: 10/10 testes aprovados.
+- Suíte geral de testes: 419+ testes ativos aprovados (0 falhas).
+- Classificação: **MARCO 7.1 — IMPLEMENTADO, ADVERSARIALMENTE TESTADO E DOCUMENTADO**.
+
 

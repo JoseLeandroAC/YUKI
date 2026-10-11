@@ -58,6 +58,9 @@ Yuki Research v1 & Marco 6 (Pesquisa Governamental, Credential Vault v1 & Native
 Yuki Marco 7 (Personal Intelligence Foundation: Vault Hardened, Memory v1, Personal Context v1, Personality v1)
 ████████████████████████████████████████  implementado e validado (409+ testes)
 
+Yuki Marco 7.1 (Endurecimento da Personal Intelligence & Diretrizes de Longo Prazo)
+████████████████████████████████████████  implementado e validado (419+ testes, 12 correções técnicas, ADRs 022 a 025)
+
 Yuki Marco 8 (Voice v1 & Missions Foundation)
 🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)
 

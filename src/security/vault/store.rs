@@ -62,6 +62,9 @@ pub enum VaultError {
 
     #[error("Erro de serialização JSON do vault: {0}")]
     Serialization(String),
+
+    #[error("Cofre em uso por outro processo: {0}")]
+    ProcessLockBusy(String),
 }
 
 /// Registro persistido contendo metadados claros e segredo cifrado.
@@ -90,6 +93,123 @@ impl Default for VaultFile {
     }
 }
 
+/// Retorna o caminho canônico do arquivo de lock correspondente ao cofre.
+fn lock_path_for(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("vault");
+    target_path.with_file_name(format!("{}.lock", file_name))
+}
+
+/// Lock interprocessos para sincronização segura de operações no Credential Vault.
+pub struct VaultProcessLock {
+    #[cfg(windows)]
+    _file: File,
+    #[cfg(not(windows))]
+    lock_path: PathBuf,
+}
+
+impl VaultProcessLock {
+    /// Adquire lock exclusivo para o arquivo do cofre especificado com timeout/tentativas.
+    pub fn acquire(vault_path: &Path) -> Result<Self, VaultError> {
+        if let Some(parent) = vault_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        let lock_path = lock_path_for(vault_path);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut opts = fs::OpenOptions::new();
+            opts.read(true).write(true).create(true).share_mode(0);
+
+            let start = std::time::Instant::now();
+            loop {
+                match opts.open(&lock_path) {
+                    Ok(file) => return Ok(Self { _file: file }),
+                    Err(e)
+                        if e.raw_os_error() == Some(32)
+                            || e.kind() == std::io::ErrorKind::PermissionDenied =>
+                    {
+                        if start.elapsed() > std::time::Duration::from_millis(10_000) {
+                            return Err(VaultError::ProcessLockBusy(format!(
+                                "Cofre em uso por outro processo (lock em {}): {}",
+                                lock_path.display(),
+                                e
+                            )));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(15));
+                    }
+                    Err(e) => {
+                        return Err(VaultError::Io(format!(
+                            "Falha ao adquirir lock do cofre em {}: {}",
+                            lock_path.display(),
+                            e
+                        )));
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            let start = std::time::Instant::now();
+            loop {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&lock_path)
+                {
+                    Ok(mut file) => {
+                        let pid = std::process::id();
+                        let _ = writeln!(file, "{}", pid);
+                        return Ok(Self { lock_path });
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if let Ok(meta) = fs::metadata(&lock_path) {
+                            if let Ok(elapsed) = meta.modified().and_then(|m| {
+                                m.elapsed().map_err(|_| {
+                                    std::io::Error::new(std::io::ErrorKind::Other, "time error")
+                                })
+                            }) {
+                                if elapsed > std::time::Duration::from_secs(5) {
+                                    let _ = fs::remove_file(&lock_path);
+                                    continue;
+                                }
+                            }
+                        }
+                        if start.elapsed() > std::time::Duration::from_millis(10_000) {
+                            return Err(VaultError::ProcessLockBusy(format!(
+                                "Cofre em uso por outro processo (lock em {}): {}",
+                                lock_path.display(),
+                                e
+                            )));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(15));
+                    }
+                    Err(e) => {
+                        return Err(VaultError::Io(format!(
+                            "Falha ao adquirir lock do cofre em {}: {}",
+                            lock_path.display(),
+                            e
+                        )));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for VaultProcessLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
 /// Cofre seguro de credenciais persistido em disco com criptografia autenticada.
 ///
 /// INVARIANTES ARQUITETURAIS:
@@ -99,6 +219,7 @@ impl Default for VaultFile {
 /// 4. Metadados operacionais estritamente separados do texto cifrado.
 /// 5. Nenhum segredo ou chave mestra é exposto em logs ou mensagens de erro.
 /// 6. Revogação explícita com fail-closed imediato.
+/// 7. Sincronização interprocessos via `VaultProcessLock` e proteção atômica em disco.
 pub struct CredentialVault {
     path: PathBuf,
     passphrase: SecretMaterial,
@@ -116,9 +237,8 @@ impl std::fmt::Debug for CredentialVault {
 }
 
 impl CredentialVault {
-    /// Abre um cofre existente autenticando a senha mestra antecipadamente,
-    /// ou cria um novo se o arquivo não existir.
-    pub fn open_or_create(
+    /// Cria um novo cofre de credenciais. Falha com `VaultError::AlreadyExists` se o arquivo já existir.
+    pub fn create_new(
         path: impl Into<PathBuf>,
         passphrase: SecretMaterial,
     ) -> Result<Self, VaultError> {
@@ -128,69 +248,107 @@ impl CredentialVault {
             return Err(VaultCryptoError::EmptyPassphrase.into());
         }
 
+        let _lock = VaultProcessLock::acquire(&path)?;
+
         if path.exists() {
-            let symlink_meta = fs::symlink_metadata(&path)
-                .map_err(|e| VaultError::Io(format!("Falha ao inspecionar caminho: {}", e)))?;
-            if symlink_meta.file_type().is_symlink() {
-                return Err(VaultError::InsecurePath(
-                    "Caminho do cofre não pode ser link simbólico".to_string(),
-                ));
-            }
-            if symlink_meta.len() > MAX_VAULT_FILE_BYTES {
-                return Err(VaultError::FileTooLarge(symlink_meta.len()));
-            }
+            return Err(VaultError::AlreadyExists(format!(
+                "Arquivo do cofre já existe em '{}'",
+                path.display()
+            )));
+        }
 
-            let content = fs::read_to_string(&path)
-                .map_err(|e| VaultError::Io(format!("Falha ao ler vault: {}", e)))?;
-            let mut vault_file: VaultFile = serde_json::from_str(&content)
-                .map_err(|e| VaultError::Serialization(format!("JSON inválido: {}", e)))?;
+        let canary_blob = encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
+        let default_vault = VaultFile {
+            version: VAULT_FORMAT_VERSION,
+            verification: Some(canary_blob.clone()),
+            entries: BTreeMap::new(),
+        };
+        Self::persist_file_atomic(&path, &default_vault)?;
+        Ok(Self {
+            path,
+            passphrase,
+            verification: RwLock::new(Some(canary_blob)),
+            entries: RwLock::new(BTreeMap::new()),
+        })
+    }
 
-            if vault_file.version != VAULT_FORMAT_VERSION {
-                return Err(VaultError::UnsupportedVersion(vault_file.version));
-            }
+    /// Abre um cofre existente autenticando a senha mestra antecipadamente.
+    /// Falha com `VaultError::NotFound` se o arquivo não existir.
+    pub fn open(path: impl Into<PathBuf>, passphrase: SecretMaterial) -> Result<Self, VaultError> {
+        let path = path.into();
 
-            // Autenticação antecipada da senha mestra
-            let verification = if let Some(ref canary_blob) = vault_file.verification {
-                match decrypt_secret(passphrase.expose_secret(), canary_blob) {
-                    Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {
-                        Some(canary_blob.clone())
-                    }
-                    _ => return Err(VaultError::InvalidPassphrase),
+        if passphrase.expose_secret().trim().is_empty() {
+            return Err(VaultCryptoError::EmptyPassphrase.into());
+        }
+
+        let _lock = VaultProcessLock::acquire(&path)?;
+
+        if !path.exists() {
+            return Err(VaultError::NotFound(format!(
+                "Arquivo do cofre não encontrado em '{}'",
+                path.display()
+            )));
+        }
+
+        let symlink_meta = fs::symlink_metadata(&path)
+            .map_err(|e| VaultError::Io(format!("Falha ao inspecionar caminho: {}", e)))?;
+        if symlink_meta.file_type().is_symlink() {
+            return Err(VaultError::InsecurePath(
+                "Caminho do cofre não pode ser link simbólico".to_string(),
+            ));
+        }
+        if symlink_meta.len() > MAX_VAULT_FILE_BYTES {
+            return Err(VaultError::FileTooLarge(symlink_meta.len()));
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|e| VaultError::Io(format!("Falha ao ler vault: {}", e)))?;
+        let mut vault_file: VaultFile = serde_json::from_str(&content)
+            .map_err(|e| VaultError::Serialization(format!("JSON inválido: {}", e)))?;
+
+        if vault_file.version != VAULT_FORMAT_VERSION {
+            return Err(VaultError::UnsupportedVersion(vault_file.version));
+        }
+
+        // Autenticação antecipada da senha mestra
+        let verification = if let Some(ref canary_blob) = vault_file.verification {
+            match decrypt_secret(passphrase.expose_secret(), canary_blob) {
+                Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {
+                    Some(canary_blob.clone())
                 }
-            } else {
-                // Migração transparente de cofre legado (Marco 6) sem canário
-                if let Some((_, first_entry)) = vault_file.entries.iter().next() {
-                    if decrypt_secret(passphrase.expose_secret(), &first_entry.encrypted).is_err() {
-                        return Err(VaultError::InvalidPassphrase);
-                    }
-                }
-                let canary_blob =
-                    encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
-                vault_file.verification = Some(canary_blob.clone());
-                Self::persist_file_atomic(&path, &vault_file)?;
-                Some(canary_blob)
-            };
-
-            Ok(Self {
-                path,
-                passphrase,
-                verification: RwLock::new(verification),
-                entries: RwLock::new(vault_file.entries),
-            })
+                _ => return Err(VaultError::InvalidPassphrase),
+            }
         } else {
+            // Migração transparente de cofre legado (Marco 6) sem canário
+            if let Some((_, first_entry)) = vault_file.entries.iter().next() {
+                if decrypt_secret(passphrase.expose_secret(), &first_entry.encrypted).is_err() {
+                    return Err(VaultError::InvalidPassphrase);
+                }
+            }
             let canary_blob = encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
-            let default_vault = VaultFile {
-                version: VAULT_FORMAT_VERSION,
-                verification: Some(canary_blob.clone()),
-                entries: BTreeMap::new(),
-            };
-            Self::persist_file_atomic(&path, &default_vault)?;
-            Ok(Self {
-                path,
-                passphrase,
-                verification: RwLock::new(Some(canary_blob)),
-                entries: RwLock::new(BTreeMap::new()),
-            })
+            vault_file.verification = Some(canary_blob.clone());
+            Self::persist_file_atomic(&path, &vault_file)?;
+            Some(canary_blob)
+        };
+
+        Ok(Self {
+            path,
+            passphrase,
+            verification: RwLock::new(verification),
+            entries: RwLock::new(vault_file.entries),
+        })
+    }
+
+    /// Abre um cofre existente se existir, ou cria um novo se o arquivo não existir.
+    pub fn open_or_create(
+        path: impl Into<PathBuf>,
+        passphrase: SecretMaterial,
+    ) -> Result<Self, VaultError> {
+        let path = path.into();
+        if path.exists() {
+            Self::open(path, passphrase)
+        } else {
+            Self::create_new(path, passphrase)
         }
     }
 
@@ -217,6 +375,8 @@ impl CredentialVault {
             metadata: metadata.clone(),
             encrypted,
         };
+
+        let _proc_lock = VaultProcessLock::acquire(&self.path)?;
 
         let mut entries_guard = self
             .entries
@@ -262,6 +422,10 @@ impl CredentialVault {
             )));
         }
 
+        let encrypted = encrypt_secret(self.passphrase.expose_secret(), secret)?;
+
+        let _proc_lock = VaultProcessLock::acquire(&self.path)?;
+
         let mut entries_guard = self
             .entries
             .write()
@@ -274,7 +438,6 @@ impl CredentialVault {
         let provider = existing.metadata.provider.clone();
         let desc = description.or_else(|| existing.metadata.description.clone());
 
-        let encrypted = encrypt_secret(self.passphrase.expose_secret(), secret)?;
         let metadata = CredentialMetadata::new(alias, &provider, desc);
 
         let entry = VaultEntry {
@@ -346,6 +509,7 @@ impl CredentialVault {
     /// Marca uma credencial como revogada de forma estritamente transacional.
     pub fn revoke(&self, alias: &str) -> Result<CredentialMetadata, VaultError> {
         Self::validate_alias(alias)?;
+        let _proc_lock = VaultProcessLock::acquire(&self.path)?;
 
         let mut entries_guard = self
             .entries
@@ -381,6 +545,7 @@ impl CredentialVault {
     /// Remove permanentemente uma credencial de forma estritamente transacional.
     pub fn delete(&self, alias: &str) -> Result<(), VaultError> {
         Self::validate_alias(alias)?;
+        let _proc_lock = VaultProcessLock::acquire(&self.path)?;
 
         let mut entries_guard = self
             .entries
@@ -481,6 +646,17 @@ impl CredentialVault {
             .map_err(|e| VaultError::Serialization(e.to_string()))?;
 
         {
+            #[cfg(windows)]
+            let mut file = {
+                use std::os::windows::fs::OpenOptionsExt;
+                let mut opts = fs::OpenOptions::new();
+                opts.write(true).create_new(true).share_mode(0);
+                opts.open(&tmp_path).map_err(|e| {
+                    VaultError::Io(format!("Falha ao criar arquivo temporário do vault: {}", e))
+                })?
+            };
+
+            #[cfg(not(windows))]
             let mut file = File::create(&tmp_path).map_err(|e| {
                 VaultError::Io(format!("Falha ao criar arquivo temporário do vault: {}", e))
             })?;

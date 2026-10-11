@@ -24,6 +24,7 @@ pub enum EventType {
     VaultCredentialRevoked,
     VaultCredentialAccessed,
     MemoryRetrieved,
+    MemoryRetrievalFailed,
     MemoryStored,
     MemoryRevoked,
     PersonalityApplied,

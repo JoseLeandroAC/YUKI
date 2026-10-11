@@ -232,10 +232,14 @@ impl Default for MemoryProvenance {
     }
 }
 
+/// Identificador padrão canônico do escopo do operador principal.
+pub const DEFAULT_OPERATOR_OWNER_ID: &str = "operator:primary";
+
 /// Registro persistido canônico da memória pessoal da Yuki.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: MemoryId,
+    pub owner_id: String,
     pub memory_type: MemoryType,
     pub source: MemorySource,
     pub confidence: MemoryConfidence,
@@ -248,7 +252,7 @@ pub struct MemoryRecord {
 }
 
 impl MemoryRecord {
-    /// Cria um novo registro ativo de memória com validação sanitária.
+    /// Cria um novo registro ativo de memória com escopo padrão do operador.
     pub fn new(
         memory_type: MemoryType,
         source: MemorySource,
@@ -257,9 +261,37 @@ impl MemoryRecord {
         content: impl Into<String>,
         tags: Vec<String>,
     ) -> Result<Self, MemoryError> {
+        Self::new_with_owner(
+            DEFAULT_OPERATOR_OWNER_ID,
+            memory_type,
+            source,
+            confidence,
+            title,
+            content,
+            tags,
+        )
+    }
+
+    /// Cria um novo registro ativo de memória com escopo explícito de proprietário.
+    pub fn new_with_owner(
+        owner_id: impl Into<String>,
+        memory_type: MemoryType,
+        source: MemorySource,
+        confidence: MemoryConfidence,
+        title: impl Into<String>,
+        content: impl Into<String>,
+        tags: Vec<String>,
+    ) -> Result<Self, MemoryError> {
         let id = MemoryId::generate();
+        let owner_id = owner_id.into().trim().to_string();
         let title = title.into().trim().to_string();
         let content = content.into().trim().to_string();
+
+        if owner_id.is_empty() {
+            return Err(MemoryError::InvalidRecord(
+                "Escopo de proprietário (owner_id) não pode ser vazio".to_string(),
+            ));
+        }
 
         if title.is_empty() {
             return Err(MemoryError::InvalidRecord(
@@ -275,6 +307,7 @@ impl MemoryRecord {
 
         let record = Self {
             id,
+            owner_id,
             memory_type,
             source,
             confidence,
@@ -288,6 +321,11 @@ impl MemoryRecord {
 
         record.assert_no_secrets()?;
         Ok(record)
+    }
+
+    pub fn with_owner(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = owner_id.into().trim().to_string();
+        self
     }
 
     /// Verifica que a memória não contém senhas, chaves de API ou tokens.
@@ -347,6 +385,7 @@ impl MemoryRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryCandidate {
     pub candidate_id: String,
+    pub owner_id: String,
     pub memory_type: MemoryType,
     pub source: MemorySource,
     pub confidence: MemoryConfidence,
@@ -367,8 +406,32 @@ impl MemoryCandidate {
         tags: Vec<String>,
         rationale: impl Into<String>,
     ) -> Self {
+        Self::new_with_owner(
+            DEFAULT_OPERATOR_OWNER_ID,
+            memory_type,
+            source,
+            confidence,
+            title,
+            content,
+            tags,
+            rationale,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_owner(
+        owner_id: impl Into<String>,
+        memory_type: MemoryType,
+        source: MemorySource,
+        confidence: MemoryConfidence,
+        title: impl Into<String>,
+        content: impl Into<String>,
+        tags: Vec<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
         Self {
             candidate_id: MemoryId::generate().0,
+            owner_id: owner_id.into().trim().to_string(),
             memory_type,
             source,
             confidence,
@@ -380,9 +443,15 @@ impl MemoryCandidate {
         }
     }
 
+    pub fn with_owner(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = owner_id.into().trim().to_string();
+        self
+    }
+
     /// Converte o candidato em um registro durável caso atenda às políticas sanitárias.
     pub fn to_record(&self) -> Result<MemoryRecord, MemoryError> {
-        let mut record = MemoryRecord::new(
+        let mut record = MemoryRecord::new_with_owner(
+            &self.owner_id,
             self.memory_type,
             self.source,
             self.confidence,
@@ -405,6 +474,8 @@ pub struct MemoryPolicy {
     pub max_content_bytes: usize,
     /// Proibir explicitamente retenção de credenciais ou chaves.
     pub prohibit_secrets: bool,
+    /// Proibir explicitamente gravação de dados íntimos de terceiros ou monitoramento clandestino.
+    pub prohibit_intimate_surveillance: bool,
 }
 
 impl Default for MemoryPolicy {
@@ -413,6 +484,7 @@ impl Default for MemoryPolicy {
             min_inferred_confidence: MemoryConfidence::Medium,
             max_content_bytes: 8192,
             prohibit_secrets: true,
+            prohibit_intimate_surveillance: true,
         }
     }
 }
@@ -420,9 +492,21 @@ impl Default for MemoryPolicy {
 impl MemoryPolicy {
     /// Avalia se um candidato pode ser aceito para persistência.
     pub fn evaluate_candidate(&self, candidate: &MemoryCandidate) -> Result<(), MemoryError> {
+        if candidate.owner_id.trim().is_empty() {
+            return Err(MemoryError::PolicyViolation(
+                "Escopo de proprietário (owner_id) do candidato não pode ser vazio".to_string(),
+            ));
+        }
+
         if candidate.title.trim().is_empty() {
             return Err(MemoryError::PolicyViolation(
                 "Título do candidato não pode ser vazio".to_string(),
+            ));
+        }
+
+        if candidate.content.contains('\0') {
+            return Err(MemoryError::ForbiddenContent(
+                "Conteúdo contém bytes nulos inválidos".to_string(),
             ));
         }
 
@@ -444,13 +528,14 @@ impl MemoryPolicy {
             )));
         }
 
-        // Sanitização de segredos
+        let combined = format!(
+            "{} {} {}",
+            candidate.title, candidate.content, candidate.rationale
+        )
+        .to_lowercase();
+
+        // Sanitização de segredos e credenciais
         if self.prohibit_secrets {
-            let combined = format!(
-                "{} {} {}",
-                candidate.title, candidate.content, candidate.rationale
-            )
-            .to_lowercase();
             let forbidden = [
                 "password",
                 "senha",
@@ -462,11 +547,60 @@ impl MemoryPolicy {
                 "access_token",
                 "refresh_token",
                 "vault.json",
+                "postgres://",
+                "mysql://",
+                "mongodb://",
+                "redis://",
+                "amqp://",
+                "begin rsa private key",
+                "begin openssh private key",
+                "ssh-rsa ",
+                "cartão de crédito",
+                "cartao de credito",
+                "credit_card",
+                "cvv",
+                "seed phrase",
+                "mnemonic phrase",
+                "auth_token",
+                "authorization: ",
             ];
             for pattern in &forbidden {
                 if combined.contains(pattern) {
                     return Err(MemoryError::ForbiddenContent(format!(
                         "Padrão sensível detectado no candidato a memória: '{}'",
+                        pattern
+                    )));
+                }
+            }
+        }
+
+        // Proteção contra gravação de atividades íntimas clandestinas e invasão de privacidade
+        if self.prohibit_intimate_surveillance {
+            let forbidden_privacy = [
+                "vigilância íntima",
+                "vigilancia intima",
+                "câmera oculta",
+                "camera oculta",
+                "câmera oculta no quarto",
+                "camera oculta no quarto",
+                "monitorar momento íntimo",
+                "monitorar momento intimo",
+                "gravação oculta",
+                "gravacao oculta",
+                "gravação oculta de terceiros",
+                "gravacao oculta de terceiros",
+                "gravando intimidade",
+                "gravação íntima",
+                "gravacao intima",
+                "espionar",
+                "espionar terceiros",
+                "intimidade dos moradores",
+                "banheiro",
+            ];
+            for pattern in &forbidden_privacy {
+                if combined.contains(pattern) {
+                    return Err(MemoryError::ForbiddenContent(format!(
+                        "Violação de privacidade ou intimidade detectada no candidato a memória: '{}'",
                         pattern
                     )));
                 }
@@ -480,6 +614,7 @@ impl MemoryPolicy {
 /// Parâmetros de consulta e recuperação no repositório de memórias.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {
+    pub owner_id: Option<String>,
     pub text_query: Option<String>,
     pub memory_types: Option<Vec<MemoryType>>,
     pub sources: Option<Vec<MemorySource>>,
@@ -496,6 +631,16 @@ impl MemoryQuery {
             limit: 20,
             ..Default::default()
         }
+    }
+
+    pub fn with_owner(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = Some(owner_id.into().trim().to_string());
+        self
+    }
+
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {

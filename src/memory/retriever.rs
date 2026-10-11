@@ -1,24 +1,37 @@
 use crate::contracts::memory::{
     MemoryError, MemoryQuery, MemoryRecord, MemoryRepository, MemoryRetriever, MemoryStatus,
-    MemoryType,
+    MemoryType, DEFAULT_OPERATOR_OWNER_ID,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Recuperador padrão de memórias governado por relevância e orçamento contextual.
+/// Recuperador padrão de memórias governado por relevância, escopo do proprietário e orçamento contextual.
 pub struct DefaultMemoryRetriever {
     repository: Arc<dyn MemoryRepository>,
+    owner_id: String,
 }
 
 impl DefaultMemoryRetriever {
     pub fn new(repository: Arc<dyn MemoryRepository>) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            owner_id: DEFAULT_OPERATOR_OWNER_ID.to_string(),
+        }
+    }
+
+    pub fn with_owner(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = owner_id.into().trim().to_string();
+        self
     }
 }
 
 impl MemoryRetriever for DefaultMemoryRetriever {
     fn retrieve(&self, query: &MemoryQuery) -> Result<Vec<MemoryRecord>, MemoryError> {
-        self.repository.query(query)
+        let mut q = query.clone();
+        if q.owner_id.is_none() {
+            q.owner_id = Some(self.owner_id.clone());
+        }
+        self.repository.query(&q)
     }
 
     fn retrieve_for_context(
@@ -30,8 +43,9 @@ impl MemoryRetriever for DefaultMemoryRetriever {
         let mut results = Vec::new();
         let mut seen_ids = HashSet::new();
 
-        // 1. Sempre recuperar instruções ativas prioritárias (diretrizes explícitas do usuário)
+        // 1. Sempre recuperar instruções ativas prioritárias (diretrizes explícitas do operador)
         let instructions_query = MemoryQuery {
+            owner_id: Some(self.owner_id.clone()),
             statuses: Some(vec![MemoryStatus::Active]),
             memory_types: Some(vec![MemoryType::Instruction]),
             limit: 5,
@@ -43,8 +57,9 @@ impl MemoryRetriever for DefaultMemoryRetriever {
             }
         }
 
-        // 2. Recuperar preferências ativas declaradas pelo usuário
+        // 2. Recuperar preferências ativas declaradas pelo operador
         let preferences_query = MemoryQuery {
+            owner_id: Some(self.owner_id.clone()),
             statuses: Some(vec![MemoryStatus::Active]),
             memory_types: Some(vec![MemoryType::Preference]),
             limit: 5,
@@ -56,9 +71,11 @@ impl MemoryRetriever for DefaultMemoryRetriever {
             }
         }
 
-        // 3. Se houver espaço no orçamento, buscar fatos e contexto relevantes para a consulta atual
+        // 3. Se houver espaço no orçamento e input_text não for vazio, buscar fatos e contexto relevantes
+        // via FTS5 especificamente correspondentes ao prompt.
         if results.len() < max_items && !input_text.trim().is_empty() {
             let search_query = MemoryQuery {
+                owner_id: Some(self.owner_id.clone()),
                 text_query: Some(input_text.to_string()),
                 statuses: Some(vec![MemoryStatus::Active]),
                 memory_types: Some(vec![
@@ -77,40 +94,11 @@ impl MemoryRetriever for DefaultMemoryRetriever {
             }
         }
 
-        // 4. Se ainda houver orçamento e a busca textual não retornou nada, trazer fatos gerais recentes
-        if results.len() < max_items {
-            let recent_facts_query = MemoryQuery {
-                statuses: Some(vec![MemoryStatus::Active]),
-                memory_types: Some(vec![MemoryType::Fact, MemoryType::ProjectContext]),
-                limit: max_items - results.len(),
-                ..Default::default()
-            };
+        // OBSERVAÇÃO ARQUITETURAL (MARCO 7.1):
+        // Se a busca textual não retornar correspondências para o prompt, a Yuki deliberadamente
+        // NÃO despeja memórias não relacionadas ou aleatórias como se fossem contextuais.
+        // Fatos irrelevantes não devem poluir o contexto da conversa.
 
-            for mem in self.repository.query(&recent_facts_query)? {
-                if seen_ids.insert(mem.id.clone()) {
-                    results.push(mem);
-                }
-            }
-        }
-
-        // 5. Se ainda houver orçamento restante, trazer episódios recentes
-        if results.len() < max_items {
-            let recent_episodes_query = MemoryQuery {
-                statuses: Some(vec![MemoryStatus::Active]),
-                memory_types: Some(vec![MemoryType::Episode]),
-                limit: max_items - results.len(),
-                ..Default::default()
-            };
-
-            for mem in self.repository.query(&recent_episodes_query)? {
-                if seen_ids.insert(mem.id.clone()) {
-                    results.push(mem);
-                }
-            }
-        }
-
-        // Truncar para respeitar rigorosamente o orçamento de itens
-        results.truncate(max_items);
         Ok(results)
     }
 }

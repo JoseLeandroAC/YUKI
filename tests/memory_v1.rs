@@ -190,6 +190,7 @@ fn test_memory_candidate_evaluation_policy() {
         min_inferred_confidence: MemoryConfidence::Medium,
         max_content_bytes: 512,
         prohibit_secrets: true,
+        prohibit_intimate_surveillance: true,
     };
     let controller = MemoryController::new(Arc::clone(&store), policy);
 

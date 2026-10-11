@@ -1,41 +1,53 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-11
-Status geral: Marco 7 (Personal Intelligence Foundation: Credential Vault Hardened + Memory v1 + Personal Context v1 + Personality v1) implementado, testado e validado; 409+ testes aprovados no workspace
+Status geral: Marco 7.1 (Endurecimento da Personal Intelligence + Diretrizes Fundamentais de Evolução) implementado, testado e validado; 419+ testes aprovados no workspace
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/personal-intelligence-v1"
+Branch de trabalho: "feature/marco-7.1-evolution"
 Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura) e o **Marco 7 (Personal Intelligence Foundation)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation) e o **Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
 - **Marco 7 (Memory v1):** Contratos canônicos (`MemoryRecord`, `MemoryCandidate`, `MemoryPolicy`), armazenamento persistente relacional com SQLite FTS5 (`unicode61 remove_diacritics 2`), triggers atômicos de sincronização, detecção de duplicatas e superseding, sanitização fail-closed de credenciais e direito ao esquecimento (`delete_permanently`);
 - **Marco 7 (Personal Context v1):** `PersonalContextBuilder` com orçamento estrito de caracteres/tokens e priorização em 5 camadas (Diretrizes, Identidade, Memória de Trabalho, Perfil/Preferências, Fatos/Episódica), auditado via `ContextBuilt`;
 - **Marco 7 (Personality v1):** Identidade estável de 3 camadas com salvaguardas ontológicas imutáveis contra simulação de consciência humana (`YUKI_CORE_IDENTITY_DIRECTIVES`), perfil tipado com padrão canônico `Yuki Default` e adaptação contextual dinâmica (`ContextUrgency`);
-- **Marco 7 (Integração YukiCore & Preparação para Marco 8):** Integração no ciclo de execução governado, extração automática de memórias declarativas, eventos tipados para voz e missões e proposta técnica de referência para o Marco 8 (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
+- **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):**
+  1. Filtros aplicados no SQL antes de `LIMIT/OFFSET` em consultas FTS5;
+  2. `count()` independente de paginação;
+  3. Eliminação total de fallback de busca textual com fatos não relacionados;
+  4. Propagação de erros de banco com emissão de auditoria `MemoryRetrievalFailed`;
+  5. Memórias isoladas como dados não confiáveis fora da instrução de sistema (`Data != Instruction`);
+  6. Escopo lógico de proprietário obrigatório (`owner_id`) e isolamento multi-tenant;
+  7. Expansão da política sanitária contra credenciais/chaves e proteção contra vigilância íntima clandestina;
+  8. Orçamento contextual adaptativo considerando a proporção global da janela do modelo;
+  9. Sincronização interprocessos no Vault com `VaultProcessLock`;
+  10. Proteção atômica e permissões exclusivas Windows `share_mode(0)`;
+  11. Inicialização inequívoca de `vault init` com fail-closed e confirmação `RECRIAR`;
+  12. Alinhamento de documentação de status e formalização das Diretrizes de Evolução (ADR-022 a ADR-025 e propostas).
 
 A situação atual pode ser resumida como:
 
 ARQUITETURA
 ████████████████████████████████████████
-DEFINIDA E DOCUMENTADA (ADRs 006 a 021)
+DEFINIDA E DOCUMENTADA (ADRs 006 a 025)
 
 CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
 FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-RESEARCH V1, MARCO 6 & MARCO 7 (PERSONAL INTELLIGENCE)
+RESEARCH V1, MARCO 6, MARCO 7 & MARCO 7.1
 ████████████████████████████████████████
 IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-409+ TESTES ATIVOS PASSANDO (4 LIVE OPT-IN IGNORADOS)
+419+ TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS)
 
 
 ---
@@ -110,6 +122,30 @@ Yuki Context & Knowledge Architecture
 
 ADR-017
 Yuki External Platform Reuse, Runtime Adapters & Vendor Independence
+
+ADR-018
+Yuki Model Gateway & Provider Abstraction
+
+ADR-019
+Yuki Local Persistence & Audit Storage (SQLite)
+
+ADR-020
+Research v1 Governed Retrieval, Transport & Cloud Boundaries
+
+ADR-021
+Yuki Native Search Architecture, Indexing Engine & Hybrid Retrieval
+
+ADR-022
+Ampliação das Capacidades Humanas e Parceria Intelectual (Proposto)
+
+ADR-023
+Arquitetura de Memória Cognitiva, Associativa e Expansível (Proposto)
+
+ADR-024
+Governança de Políticas Configuráveis e Autonomia Proporcional ao Impacto (Proposto)
+
+ADR-025
+Princípio de Independência Arquitetural e Primazia do Proprietário (Proposto)
 
 Os ADRs posteriores complementam e refinam os anteriores.
 
@@ -671,4 +707,35 @@ Resultados verificados do Marco 7:
 - `cargo test --all-targets`: 409+ testes aprovados (0 falhas, 4 live ignorados);
 - `cargo fmt --check`: aprovado sem desvios;
 - `cargo clippy --all-targets -- -D warnings`: aprovado com zero warnings;
+- `cargo build --release`: aprovado com sucesso.
+
+---
+
+23. Registro de Validação do Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução)
+
+O Marco 7.1 implementou e validou a resolução integral dos 12 itens técnicos e as diretrizes de longo prazo:
+1. **Filtros SQL antes de LIMIT/OFFSET:** Construção dinâmica de cláusulas `WHERE` vinculando filtros antes de limitar e deslocar resultados FTS5 e relacionais.
+2. **`count()` Desacoplado de Paginação:** Execução de `SELECT COUNT(*)` aplicando exatamente os mesmos filtros sem cláusula `LIMIT/OFFSET`.
+3. **Zero Fallback com Fatos Aleatórios:** Busca textual FTS5 que não encontra correspondência retorna `Vec::new()`, eliminando o antigo fallback que injetava memórias aleatórias irrelevantes.
+4. **Propagação de Erros de Banco e Auditoria:** Eliminação de silenciamento de erros no SQLite; propagação de `MemoryError::Storage` e emissão do evento `MemoryRetrievalFailed`.
+5. **Isolamento de Memórias Fora de Instruções de Sistema (`Data != Instruction`):** Memórias recuperadas são empacotadas no bloco delimitado `<operator_personal_context origin="memory_v1" classification="untrusted_reference_data">` dentro do payload do usuário, mantendo a instrução de sistema livre de injeção.
+6. **Escopo Lógico Obrigatório de Dono (`owner_id`):** Introdução de `owner_id` (padrão `operator:primary`), migração transparente do esquema com índice `idx_memories_owner`, e isolamento multi-tenant garantido em deduplicação e buscas.
+7. **Política Sanitária Expandida:** `MemoryPolicy` valida nulos (`\0`), rejeita connection strings (`postgres://`, etc.), chaves privadas RSA/SSH, cartões/CVV, seed phrases e proíbe vigilância íntima clandestina (`prohibit_intimate_surveillance`).
+8. **Orçamento Adaptativo Proporcional ao Prompt:** `PersonalContextConfig` introduz `total_prompt_budget_chars` e `max_prompt_ratio`, calculando dinamicamente `effective_char_limit()`.
+9. **Sincronização Interprocessos no Vault:** Introdução do `VaultProcessLock` com arquivo de bloqueio companion `.lock`, prevenindo condições de corrida entre múltiplos processos CLI e da plataforma.
+10. **Proteção Windows `share_mode(0)`:** Escrita atômica em arquivo temporário com acesso exclusivo no kernel Windows via `share_mode(0)` e permissões rigorosas.
+11. **Inicialização Inequívoca de `vault init`:** Separação estrita entre `create_new` (falha se arquivo existir), `open` (falha se não existir) e `open_or_create`. O comando CLI `vault init` exige flag `--force` e digitação explícita de `"RECRIAR"` para reinicializar cofre pré-existente.
+12. **Documentação e Diretrizes de Evolução de Longo Prazo:**
+    - Elaboração de **ADR-022** (Ampliação das Capacidades Humanas e Parceria Intelectual);
+    - Elaboração de **ADR-023** (Arquitetura de Memória Cognitiva, Associativa e Expansível);
+    - Elaboração de **ADR-024** (Governança de Políticas Configuráveis e Autonomia Proporcional ao Impacto);
+    - Elaboração de **ADR-025** (Princípio de Independência Arquitetural e Primazia do Proprietário);
+    - Elaboração da proposta `docs/proposals/YUKI_AMBIENT_INTELLIGENCE_AND_SECURITY.md`;
+    - Elaboração da proposta `docs/proposals/OPERATOR_PROFILE_V1.md`.
+
+Resultados verificados do Marco 7.1:
+- `tests/marco_7_1_validation.rs`: 10/10 testes aprovados cobrindo adversariamente os 12 itens;
+- Suíte geral de testes: 419+ testes ativos aprovados (0 falhas);
+- `cargo fmt --check`: aprovado sem desvios;
+- `cargo clippy --all-targets -- -D warnings`: aprovado com zero advertências;
 - `cargo build --release`: aprovado com sucesso.

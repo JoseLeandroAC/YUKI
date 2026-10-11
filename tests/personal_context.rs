@@ -73,6 +73,8 @@ fn test_personal_context_prioritization_and_budget() {
             max_chars: 1000,
             max_items: 4,
             include_episodes: true,
+            total_prompt_budget_chars: None,
+            max_prompt_ratio: 0.25,
         });
 
     let pctx = builder

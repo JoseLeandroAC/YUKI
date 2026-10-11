@@ -49,8 +49,17 @@ O projeto encontra-se na fase de:
 * **Research v1 (Marcos 1 a 5):** Recuperação governada, SSRF guard, extração e descompressão segura de conteúdo, Brave Search e LangSearch providers, registro de fontes e citações verificáveis (ADR-020).
 * **Marco 6 (Expansão de Infraestrutura):** Credential Vault v1 (AES-256-GCM + PBKDF2, zeroize, SecretStore, CompositeCredentialBroker), Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede), e endurecimento de transporte (ADR-008 e ADR-021).
 * **Marco 7 (Personal Intelligence Foundation):** Credential Vault Hardened (canary upfront, limites de iteração e payload, mitigação de symlinks e Admin CLI `yuki vault`), Memory v1 (SQLite FTS5 BM25, triggers de sincronização, deduplicação e superseding, sanitização fail-closed de segredos e direito ao esquecimento), Personal Context v1 (orçamento estrito de tokens em 5 camadas priorizadas), e Personality v1 (identidade estável de 3 camadas com salvaguardas ontológicas e perfil "Yuki Default").
+* **Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução):**
+  - Correção dos 12 itens técnicos identificados na auditoria do Marco 7 (paginação e filtros FTS5 antes de LIMIT/OFFSET, `count()` desacoplado de paginação, eliminação de fallback aleatório, propagação de erros de banco com emissão de auditoria `MemoryRetrievalFailed`, isolamento de memórias fora da instrução de sistema conforme `Data != Instruction`, escopo lógico de dono `owner_id` com isolamento multi-tenant, expansão da política sanitária contra credenciais/chaves/vigilância íntima, orçamento adaptativo proporcional ao prompt, sincronização interprocessos no Vault com `VaultProcessLock` e proteção Windows `share_mode(0)`, inicialização inequívoca e fail-closed de `vault init` com confirmação `RECRIAR`, e alinhamento de documentação de status);
+  - Formalização de Propostas e ADRs Fundamentais de Evolução de Longo Prazo:
+    - **ADR-022:** Ampliação das Capacidades Humanas e Parceria Intelectual;
+    - **ADR-023:** Arquitetura de Memória Cognitiva, Associativa e Expansível;
+    - **ADR-024:** Governança de Políticas Configuráveis e Autonomia Proporcional ao Impacto;
+    - **ADR-025:** Princípio de Independência Arquitetural e Primazia do Proprietário;
+    - **Proposta:** Yuki Ambient Intelligence & Security (`docs/proposals/YUKI_AMBIENT_INTELLIGENCE_AND_SECURITY.md`);
+    - **Proposta:** OperatorProfile v1 (`docs/proposals/OPERATOR_PROFILE_V1.md`).
 * **Próximo Marco:** Marco 8 — Voice v1 & Missions Foundation (`docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md`).
-* **Base de Testes:** Mais de 400 testes automatizados aprovados no workspace.
+* **Base de Testes:** Mais de 419 testes automatizados aprovados no workspace.
 
 Consulte:
 

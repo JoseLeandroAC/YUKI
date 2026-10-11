@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 pub enum VaultCommand {
     /// Inicializa um novo cofre de credenciais
     Init {
+        /// Forçar recriação do cofre caso já exista (requer confirmação explícita 'RECRIAR')
+        #[arg(long)]
+        force: bool,
+
         /// Caminho opcional do arquivo do cofre
         #[arg(long)]
         path: Option<PathBuf>,
@@ -84,18 +88,44 @@ impl VaultCommand {
     /// Executa o comando administrativo do cofre no terminal.
     pub fn execute(self) -> Result<(), Box<dyn std::error::Error>> {
         match self {
-            VaultCommand::Init { path } => {
+            VaultCommand::Init { force, path } => {
                 let vault_path = resolve_path(path);
                 println!("=== Inicialização do Yuki Credential Vault ===");
                 println!("Arquivo de destino: {}", vault_path.display());
 
-                if vault_path.exists()
-                    && !confirm_action(
-                        "O arquivo do cofre já existe. Deseja reinicializá-lo? [s/N]: ",
-                    )?
-                {
-                    println!("Operação cancelada.");
-                    return Ok(());
+                if vault_path.exists() {
+                    if !force {
+                        eprintln!(
+                            "Erro: O arquivo do cofre já existe em '{}'. Para recriá-lo do zero apagando todas as credenciais existentes, utilize a flag '--force' e confirme a operação digitando 'RECRIAR'.",
+                            vault_path.display()
+                        );
+                        return Err(
+                            "Arquivo do cofre já existe. Operação cancelada por segurança.".into(),
+                        );
+                    }
+
+                    println!("ATENÇÃO CRÍTICA: A flag --force foi informada.");
+                    println!("Recriar o cofre DESTRUIRÁ permanentemente todas as credenciais e segredos já existentes!");
+                    print!(
+                        "Para confirmar a destruição e recriação, digite exatamente 'RECRIAR': "
+                    );
+                    io::stdout().flush()?;
+                    let mut confirmation = String::new();
+                    io::stdin().read_line(&mut confirmation)?;
+                    if confirmation.trim() != "RECRIAR" {
+                        println!("Confirmação inválida. Operação de reinicialização abortada.");
+                        return Ok(());
+                    }
+
+                    let _ = std::fs::remove_file(&vault_path);
+                    let lock_path = vault_path.with_file_name(format!(
+                        "{}.lock",
+                        vault_path
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("vault")
+                    ));
+                    let _ = std::fs::remove_file(&lock_path);
                 }
 
                 let pass1 = prompt_masked("Defina a senha mestra do cofre: ")?;
@@ -110,7 +140,7 @@ impl VaultCommand {
                     return Ok(());
                 }
 
-                CredentialVault::open_or_create(&vault_path, SecretMaterial::new(&pass1))?;
+                CredentialVault::create_new(&vault_path, SecretMaterial::new(&pass1))?;
                 println!(
                     "Cofre inicializado com sucesso em: {}",
                     vault_path.display()
