@@ -1092,15 +1092,30 @@ Garantir que os contratos de segurança e integridade do cofre de credenciais, d
    - Sanitização de memórias recuperadas insensível a maiúsculas/minúsculas e tolerante a espaços em branco para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`).
    - Isolamento rigoroso segundo o princípio constitucional `Data != Instruction`.
 
-##### 3. Suíte Dedicada e Portões de Qualidade
-- **Suíte Dedicada (`tests/marco_7_2_hardening.rs`):** 19 testes automatizados cobrindo concorrência multiprocesso (cenários A a E), permissões DACL/Unix e caminhos acentuados, migração legada fail-closed, auditoria de falha de memória, integração ponta a ponta do orçamento e imunidade a injeções.
+##### 3. Fechamento Definitivo e Refinamentos de Produção
+Durante a revisão de fechamento definitivo do Marco 7.2, foram implementadas três correções críticas de robustez e integridade:
+1. **Refinamento do Orçamento Integral de Prompt (`src/context/prompt_budget.rs` e `src/core/yuki_core.rs`):**
+   - **Remoção do Piso Artificial:** Eliminação do piso rígido `.max(500.0)` em `effective_input_char_limit`. O cálculo matemático reflete estritamente a janela do modelo descontando a margem de segurança e o orçamento de saída, falhando fechado (`IntegralPromptBudgetError::EssentialInstructionsExceedBudget` ou `BudgetExhausted`) caso o espaço restante seja insuficiente.
+   - **Truncamento Efetivo de Personalidade (Tier 2):** Implementação de truncamento real do conteúdo de personalidade quando este excede o espaço residual disponível, preservando o prefixo da identidade central e registrando `Tier2Personality` em `truncated_tiers` estritamente quando há corte efetivo de caracteres.
+   - **Contabilidade Prévia de Ferramentas (Tool Overhead):** Projeção de capabilities disponíveis no `YukiCore` e cômputo da sobrecarga de declaração das ferramentas registradas via `PromptBudgetManager::assemble_with_tools`, deduzindo previamente esse payload e prevenindo estouros silenciosos no gateway.
+2. **Consistência Transacional e Fail-Closed no Vault (`src/security/vault/store.rs`):**
+   - **Recarregamento Estrito sob Lock:** Introdução de `reload_disk_file_under_lock` e eliminação de fallbacks permissivos silenciosos (`if let Ok(...)`) em operações de mutação (`store`, `replace`, `revoke`, `delete`) e leituras com cache-miss.
+   - **Falha Fechada por Integridade:** Qualquer erro de I/O em disco, corrupção de payload, versão de formato inválida, violação de link simbólico ou falha de autenticação de canary interrompe imediatamente a operação (`VaultError::Serialization` ou `VaultError::Io`), impedindo que arquivos danificados em disco sejam sobrescritos acidentalmente pelo estado em memória.
+   - **Concorrência Otimizada:** Leituras rápidas ocorrem via `RwLock<BTreeMap>` em memória; locks de processo exclusivos a nível de SO são adquiridos apenas durante mutações ou recarregamentos de disco, eliminando contenção concorrente desnecessária.
+3. **Reconciliação e Transparência na Métricas de Teste:**
+   - Retificação do número total de testes: o valor de "488" mencionado em relatório narrativo prévio resultou de soma manual imprecisa.
+   - A contagem real e verificável em todas as 36 metas de teste do workspace é de **443 testes ativos aprovados + 4 testes ignorados live (`#[ignore]`) = 447 testes no total do projeto**.
+   - A suíte de validação de hardening (`tests/marco_7_2_hardening.rs`) foi expandida de 19 para **26 testes automatizados**.
+
+##### 4. Suíte Dedicada e Portões de Qualidade
+- **Suíte Dedicada (`tests/marco_7_2_hardening.rs`):** 26 testes automatizados cobrindo concorrência multiprocesso (cenários A a E), permissões DACL/Unix e caminhos acentuados, migração legada fail-closed, recarregamento transacional sob lock do vault, resiliência a corrupção em disco, orçamentos sub-500 caracteres, truncamento real de personalidade, dedução de overhead de ferramentas e imunidade a injeções adversariais.
 - **Portões de Qualidade Locais Aprovados:**
   - `cargo fmt --all -- --check`: 100% aderente ao padrão oficial.
   - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
-  - `cargo test --workspace`: todos os testes unitários e de integração verdes (0 falhas).
+  - `cargo test --workspace`: 443 testes aprovados, 4 ignorados, 0 falhas.
   - `cargo build --release`: compilação limpa concluída com sucesso.
 - **Baselines Preservados:** `v0.1.0-foundation` e `v0.2.0-mvp1` estritamente mantidos.
 - **Classificação:**
-  - **MARCO 7.2 (HARDENING FINAL, INTEGRIDADE E VALIDAÇÃO INDEPENDENTE) — CONCLUÍDO, AUDITADO E VALIDADO**.
+  - **MARCO 7.2 (HARDENING FINAL, INTEGRIDADE E VALIDAÇÃO INDEPENDENTE) — CONCLUÍDO, AUDITADO E VALIDADO DEFINITIVAMENTE**.
 
 

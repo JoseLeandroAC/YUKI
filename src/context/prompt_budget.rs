@@ -126,7 +126,11 @@ impl IntegralPromptBudgetConfig {
         let input_tokens = self.available_input_tokens();
         let raw_chars = (input_tokens as f64) * self.tokenizer_profile.chars_per_token();
         let safe_chars = raw_chars * (1.0 - self.safety_margin_ratio as f64);
-        safe_chars.max(500.0) as usize
+        if safe_chars <= 0.0 {
+            0
+        } else {
+            safe_chars.floor() as usize
+        }
     }
 
     /// Estima a contagem de tokens de forma conservadora a partir de uma string.
@@ -149,6 +153,7 @@ pub struct PromptBudgetAudit {
     pub personal_context_chars: usize,
     pub tool_results_chars: usize,
     pub history_chars: usize,
+    pub tool_declarations_chars: usize,
     pub total_assembled_chars: usize,
     pub estimated_input_tokens: usize,
     pub available_input_tokens: usize,
@@ -194,6 +199,29 @@ impl PromptBudgetManager {
         raw_tool_results: Option<&str>,
         conversation_history: &[String],
     ) -> Result<AssembledPrompt, PromptBudgetError> {
+        self.assemble_with_tools(
+            essential_system,
+            personality,
+            user_turn,
+            raw_personal_context,
+            raw_tool_results,
+            conversation_history,
+            0,
+        )
+    }
+
+    /// Monta o prompt integral contabilizando as declarações de ferramentas e esquemas (Tier 4 / Tools).
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_with_tools(
+        &self,
+        essential_system: &str,
+        personality: &str,
+        user_turn: &str,
+        raw_personal_context: Option<&str>,
+        raw_tool_results: Option<&str>,
+        conversation_history: &[String],
+        tool_declarations_chars: usize,
+    ) -> Result<AssembledPrompt, PromptBudgetError> {
         let effective_char_limit = self.config.effective_input_char_limit();
         let mut truncated_tiers = Vec::new();
 
@@ -206,9 +234,18 @@ impl PromptBudgetManager {
             });
         }
 
+        // Validação adicional: overhead de ferramentas + instruções essenciais
+        if essential_chars + tool_declarations_chars > effective_char_limit {
+            return Err(PromptBudgetError::BudgetExhausted(format!(
+                "Orçamento insuficiente para acomodar declarações de ferramentas ({} chars) e instruções essenciais ({} chars): limite efetivo {} chars",
+                tool_declarations_chars, essential_chars, effective_char_limit
+            )));
+        }
+
         // 2. Validação Tier 3: Turno do Usuário (Preservação da intenção - falha fechada se não couber)
         let user_chars = user_turn.chars().count();
-        let available_for_user = effective_char_limit.saturating_sub(essential_chars);
+        let available_for_user =
+            effective_char_limit.saturating_sub(essential_chars + tool_declarations_chars);
         if user_chars > available_for_user {
             return Err(PromptBudgetError::UserTurnExceedsBudget {
                 required_chars: user_chars,
@@ -217,14 +254,33 @@ impl PromptBudgetManager {
         }
 
         // 3. Tier 2: Personalidade
-        let personality_chars = personality.chars().count();
-        let required_base = essential_chars + user_chars + personality_chars;
-        if required_base > effective_char_limit {
-            // Se personalidade for excessiva, truncamos aviso mantendo núcleo
-            truncated_tiers.push("Tier2Personality".to_string());
-        }
+        // Base fixa inviolável já alocada:
+        let fixed_used = essential_chars + tool_declarations_chars + user_chars;
+        let remaining_for_optional = effective_char_limit.saturating_sub(fixed_used);
 
-        let mut budget_left = effective_char_limit.saturating_sub(required_base);
+        let personality_trimmed = personality.trim();
+        let personality_chars = personality.chars().count();
+
+        let (final_personality, personality_used) = if personality_trimmed.is_empty() {
+            (String::new(), 0)
+        } else if remaining_for_optional <= 2 {
+            // Nem mesmo o separador cabe no restante
+            truncated_tiers.push("Tier2Personality".to_string());
+            (String::new(), 0)
+        } else {
+            let max_personality_chars = remaining_for_optional - 2;
+            if personality_chars > max_personality_chars {
+                let truncated: String = personality.chars().take(max_personality_chars).collect();
+                truncated_tiers.push("Tier2Personality".to_string());
+                let used = truncated.chars().count() + 2;
+                (truncated, used)
+            } else {
+                let used = personality_chars + 2;
+                (personality.to_string(), used)
+            }
+        };
+
+        let mut budget_left = remaining_for_optional.saturating_sub(personality_used);
 
         // 4. Processa Contexto Pessoal (Tier 6 - Cota percentual configurável)
         let max_personal_chars =
@@ -292,10 +348,10 @@ impl PromptBudgetManager {
         let final_history = history_entries.join("\n\n");
 
         // 7. Montagem estruturada dos blocos de saída
-        let full_system_instruction = if personality.trim().is_empty() {
+        let full_system_instruction = if final_personality.trim().is_empty() {
             essential_system.to_string()
         } else {
-            format!("{}\n\n{}", personality, essential_system)
+            format!("{}\n\n{}", final_personality, essential_system)
         };
 
         let mut user_prompt_parts = Vec::new();
@@ -314,28 +370,29 @@ impl PromptBudgetManager {
 
         let total_assembled_chars =
             full_system_instruction.chars().count() + final_prompt_input.chars().count();
+        let total_payload_chars = total_assembled_chars + tool_declarations_chars;
 
-        // Verificação final rigorosa: falha fechada se total assembled estourar
-        if total_assembled_chars > effective_char_limit {
+        // Verificação final rigorosa: falha fechada se payload total estourar
+        if total_payload_chars > effective_char_limit {
             return Err(PromptBudgetError::BudgetExhausted(format!(
-                "Prompt final montado ({} chars) excedeu limite efetivo ({} chars)",
-                total_assembled_chars, effective_char_limit
+                "Payload final montado ({} chars, incluindo {} chars de ferramentas) excedeu limite efetivo ({} chars)",
+                total_payload_chars, tool_declarations_chars, effective_char_limit
             )));
         }
 
-        let estimated_input_tokens = self.config.estimate_tokens(&format!(
-            "{}\n{}",
-            full_system_instruction, final_prompt_input
-        ));
+        let estimated_input_tokens = ((total_payload_chars as f64)
+            / self.config.tokenizer_profile.chars_per_token())
+        .ceil() as usize;
 
         let audit = PromptBudgetAudit {
             essential_system_chars: essential_chars,
-            personality_chars,
+            personality_chars: final_personality.chars().count(),
             user_turn_chars: user_chars,
             personal_context_chars: final_personal_context.chars().count(),
             tool_results_chars: final_tool_results.chars().count(),
             history_chars: final_history.chars().count(),
-            total_assembled_chars,
+            tool_declarations_chars,
+            total_assembled_chars: total_payload_chars,
             estimated_input_tokens,
             available_input_tokens: self.config.available_input_tokens(),
             effective_char_limit,

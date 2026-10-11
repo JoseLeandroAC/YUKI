@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-11
-Status geral: Marco 7.2 (Hardening Final, Integridade e Validação Independente) implementado, testado e validado; 488 testes aprovados no workspace
+Status geral: Marco 7.2 (Hardening Final, Integridade e Validação Independente) — Fechamento Definitivo concluído, testado e validado; 443 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 447 testes; 0 falhas) no workspace
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-7.2-hardening"
 Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
@@ -25,7 +25,9 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
   4. Suíte de concorrência com asserção estrita de `ProcessLockBusy` em todas as plataformas;
   5. Propagação estrita de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com emissão de `MemoryRetrievalFailed` e `YukiError::ExecutionFailed` sem fallback silencioso;
   6. Orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers ontológicos, integrado diretamente no caminho de produção de `YukiCore::process_input_internal`, protegendo inviolavelmente as Instruções Essenciais de Sistema (Tier 1), descontando delimitadores e avisos de truncamento sem mascaramento por `saturating_sub`, falhando fechado com erros tipados (`UserTurnExceedsBudget`, `EssentialInstructionsExceedBudget`) e registrando auditoria em `PersonalityApplied`;
-  7. Defesa ativa contra injeção e quebra de delimitadores em memórias (`sanitize_untrusted_memory_content`), com neutralização insensível a maiúsculas/minúsculas e tolerante a espaços para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`).
+  7. Defesa ativa contra injeção e quebra de delimitadores em memórias (`sanitize_untrusted_memory_content`), com neutralização insensível a maiúsculas/minúsculas e tolerante a espaços para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`);
+  8. Orçamento Integral de Prompt Refinado: Remoção de piso artificial de 500 chars em `effective_input_char_limit` (limite estrito fail-closed para janelas restritas); truncamento real de Tier 2 Personality quando exceder o orçamento restante (preservando o núcleo de identidade prioritariamente e registrando em `truncated_tiers` exclusivamente quando houver redução efetiva); contabilização antecipada de overhead e esquemas de declaração de ferramentas (`tool_declarations_chars`);
+  9. Consistência Transacional Estrita do Vault: Recarregamento e validação completa sob lock (`reload_disk_file_under_lock`) em todas as operações de mutação (`store`, `replace`, `revoke`, `delete`) e leitura de fallback, falhando fechado caso o arquivo em disco esteja corrompido ou adulterado, garantindo que nenhum estado inválido de disco seja mascarado ou sobrescrito por dados em memória.
 
 A situação atual pode ser resumida como:
 
@@ -43,7 +45,7 @@ IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-488 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS)
+443 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 447 TESTES)
 
 
 ---
@@ -748,18 +750,20 @@ O Marco 7.2 implementou e validou o endurecimento estrito de 7 áreas críticas 
 5. **Propagação Rigorosa de Erros de Memória no Core (`src/core/yuki_core.rs`):** Erros de armazenamento `MemoryError::Storage` no `retriever.retrieve` registram `EventType::MemoryRetrievalFailed` na auditoria durável e imediatamente retornam `Err(YukiError::ExecutionFailed(...))` sem qualquer fallback silencioso para lista vazia.
 6. **Orçamento Integral de Prompt Governamental (`src/context/prompt_budget.rs`):** Implementado `PromptBudgetManager` governando o orçamento do modelo entre 6 tiers ontológicos:
    - Tier 1: Instruções Essenciais de Sistema (não truncáveis; falha fechada se orçamento for insuficiente);
-   - Tier 2: Diretrizes de Personalidade;
-   - Tier 3: Turno do Usuário;
-   - Tier 4: Resultados de Ferramentas;
-   - Tier 5: Histórico Conversacional;
-   - Tier 6: Memórias de Contexto Pessoal.
-   Aplica estimativa conservadora (1 token ≈ 3.5 caracteres) com margem de segurança de 10%.
+   - Tier 2: Diretrizes de Personalidade (truncamento real quando excede limite, preservando núcleo de identidade);
+   - Tier 3: Turno do Usuário (preservado; falha fechada);
+   - Tier 4: Ferramentas / Resultados & Esquemas de Declaração (`tool_declarations_chars` computados antecipadamente);
+   - Tier 5: Histórico Conversacional (janela deslizante);
+   - Tier 6: Memórias de Contexto Pessoal (cota proporcional).
+   Aplica estimativa conservadora (1 token ≈ 3.5 caracteres) com margem de segurança de 10% e sem piso artificial arbitrário (efetivo exato fail-closed para janelas restritas).
 7. **Defesa Ativa contra Injeção de Delimitadores (`src/context/personal_context.rs`):** Sanitização ativa via `sanitize_untrusted_memory_content` que neutraliza tags de escape (`</operator_personal_context>`) e tokens de autoridade (`<system>`, `<developer>`, `[INST]`, etc.) em textos de memória de dados não confiáveis (`Data != Instruction`).
+8. **Consistência Transacional Estrita do Vault (`src/security/vault/store.rs`):** Método `reload_disk_file_under_lock` implementado de forma estritamente fail-closed para todas as mutações (`store`, `replace`, `revoke`, `delete`) e leituras, impedindo que corrupção em disco seja mascarada ou sobrescrita por estado retido em memória.
 
-Resultados verificados do Marco 7.2:
-- `tests/marco_7_2_hardening.rs`: 9/9 testes aprovados cobrindo os 7 itens de segurança e integridade;
+Resultados verificados do Marco 7.2 (Fechamento Definitivo):
+- `tests/marco_7_2_hardening.rs`: 26/26 testes aprovados (incluindo testes de orçamento sub-500, truncamento efetivo de personalidade, overhead de ferramentas e integridade de disco do vault);
 - `tests/marco_7_1_validation.rs`: 10/10 testes aprovados com asserção estrita de `ProcessLockBusy`;
-- Suíte geral de testes no workspace: 488 testes ativos aprovados (0 falhas);
+- `tests/vault_security.rs`: 11/11 testes aprovados (incluindo concorrência intra-processo e inter-processo);
+- Suíte geral de testes no workspace: 443 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 447 testes; 0 falhas). Nota de reconciliação: a contagem anterior de 488 decorreu de soma imprecisa em narrativa prévia; a contagem física real de testes no repositório é de 443 ativos + 4 live opt-in ignorados = 447 testes totais;
 - `cargo fmt --all -- --check`: aprovado sem desvios de formatação;
 - `cargo clippy --workspace --all-targets -- -D warnings`: aprovado com zero advertências;
 - `cargo build --release`: aprovado com sucesso.

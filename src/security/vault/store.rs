@@ -598,6 +598,77 @@ impl CredentialVault {
         }
     }
 
+    /// Recarrega o estado do arquivo em disco sob lock de processo com validação estrita.
+    ///
+    /// Se o arquivo não existir, retorna Ok(None).
+    /// Se o arquivo existir mas estiver corrompido, adulterado, com symlinks inválidos,
+    /// tamanho excessivo, versão incompatível ou canário não autenticável, falha fechado imediatamente.
+    fn reload_disk_file_under_lock(&self) -> Result<Option<VaultFile>, VaultError> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+
+        let symlink_meta = fs::symlink_metadata(&self.path)
+            .map_err(|e| VaultError::Io(format!("Falha ao ler metadados do vault: {}", e)))?;
+
+        if symlink_meta.file_type().is_symlink() {
+            return Err(VaultError::InsecurePath(
+                "Caminho do cofre não pode ser link simbólico".to_string(),
+            ));
+        }
+
+        if symlink_meta.len() > MAX_VAULT_FILE_BYTES {
+            return Err(VaultError::FileTooLarge(symlink_meta.len()));
+        }
+
+        let content = fs::read_to_string(&self.path)
+            .map_err(|e| VaultError::Io(format!("Falha ao ler vault: {}", e)))?;
+
+        let disk_file: VaultFile = serde_json::from_str(&content)
+            .map_err(|e| VaultError::Serialization(format!("JSON inválido: {}", e)))?;
+
+        if disk_file.version != VAULT_FORMAT_VERSION {
+            return Err(VaultError::UnsupportedVersion(disk_file.version));
+        }
+
+        // Validação da senha/canário
+        if let Some(ref canary_blob) = disk_file.verification {
+            match decrypt_secret(self.passphrase.expose_secret(), canary_blob) {
+                Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {}
+                _ => return Err(VaultError::InvalidPassphrase),
+            }
+        } else if !disk_file.entries.is_empty() {
+            let (_, first_entry) = disk_file.entries.iter().next().unwrap();
+            if decrypt_secret(self.passphrase.expose_secret(), &first_entry.encrypted).is_err() {
+                return Err(VaultError::InvalidPassphrase);
+            }
+        } else {
+            return Err(VaultError::UnverifiableLegacyVault(
+                self.path.display().to_string(),
+            ));
+        }
+
+        Ok(Some(disk_file))
+    }
+
+    /// Sincroniza o guard de entradas com o estado em disco de forma transacional e fail-closed.
+    fn sync_entries_under_lock(
+        &self,
+        entries_guard: &mut BTreeMap<String, VaultEntry>,
+    ) -> Result<(), VaultError> {
+        if let Some(disk_file) = self.reload_disk_file_under_lock()? {
+            *entries_guard = disk_file.entries;
+            if disk_file.verification.is_some() {
+                let mut ver_guard = self
+                    .verification
+                    .write()
+                    .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?;
+                *ver_guard = disk_file.verification;
+            }
+        }
+        Ok(())
+    }
+
     /// Armazena ou atualiza uma credencial cifrada no cofre de forma estritamente transacional.
     pub fn store(
         &self,
@@ -629,13 +700,7 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        if self.path.exists() {
-            if let Ok(content) = fs::read_to_string(&self.path) {
-                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
-                    *entries_guard = disk_file.entries;
-                }
-            }
-        }
+        self.sync_entries_under_lock(&mut entries_guard)?;
 
         let mut staged = entries_guard.clone();
         staged.insert(alias.to_string(), entry);
@@ -685,13 +750,7 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        if self.path.exists() {
-            if let Ok(content) = fs::read_to_string(&self.path) {
-                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
-                    *entries_guard = disk_file.entries;
-                }
-            }
-        }
+        self.sync_entries_under_lock(&mut entries_guard)?;
 
         let existing = entries_guard
             .get(alias)
@@ -749,11 +808,7 @@ impl CredentialVault {
                         .entries
                         .write()
                         .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
-                    if let Ok(content) = fs::read_to_string(&self.path) {
-                        if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
-                            *write_guard = disk_file.entries;
-                        }
-                    }
+                    self.sync_entries_under_lock(&mut write_guard)?;
                     write_guard
                         .get(alias)
                         .cloned()
@@ -783,10 +838,26 @@ impl CredentialVault {
             .read()
             .map_err(|_| VaultError::Io("Lock de leitura envenenado".to_string()))?;
 
-        entries
-            .get(alias)
-            .map(|e| e.metadata.clone())
-            .ok_or_else(|| VaultError::NotFound(alias.to_string()))
+        match entries.get(alias) {
+            Some(e) => Ok(e.metadata.clone()),
+            None => {
+                drop(entries);
+                if self.path.exists() {
+                    let _proc_lock = VaultProcessLock::acquire(&self.path)?;
+                    let mut write_guard = self
+                        .entries
+                        .write()
+                        .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+                    self.sync_entries_under_lock(&mut write_guard)?;
+                    write_guard
+                        .get(alias)
+                        .map(|e| e.metadata.clone())
+                        .ok_or_else(|| VaultError::NotFound(alias.to_string()))
+                } else {
+                    Err(VaultError::NotFound(alias.to_string()))
+                }
+            }
+        }
     }
 
     /// Marca uma credencial como revogada de forma estritamente transacional.
@@ -799,13 +870,7 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        if self.path.exists() {
-            if let Ok(content) = fs::read_to_string(&self.path) {
-                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
-                    *entries_guard = disk_file.entries;
-                }
-            }
-        }
+        self.sync_entries_under_lock(&mut entries_guard)?;
 
         let mut staged = entries_guard.clone();
         let entry = staged
@@ -843,13 +908,7 @@ impl CredentialVault {
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        if self.path.exists() {
-            if let Ok(content) = fs::read_to_string(&self.path) {
-                if let Ok(disk_file) = serde_json::from_str::<VaultFile>(&content) {
-                    *entries_guard = disk_file.entries;
-                }
-            }
-        }
+        self.sync_entries_under_lock(&mut entries_guard)?;
 
         let mut staged = entries_guard.clone();
         if staged.remove(alias).is_none() {

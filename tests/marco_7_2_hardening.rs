@@ -996,3 +996,364 @@ fn test_adversarial_memory_titles_facts_projects_episodes_isolated_in_user_paylo
     assert!(!inner_content.to_lowercase().contains("<system>"));
     assert!(!inner_content.contains("[INST]"));
 }
+
+// ============================================================================
+// 7. TESTES ADICIONAIS DE AUDITORIA E FECHAMENTO DEFINITIVO DO MARCO 7.2
+// ============================================================================
+
+#[test]
+fn test_prompt_budget_sub_500_chars_no_artificial_floor() {
+    // Configura orçamento ultra restrito com janela pequena:
+    // 50 tokens disponíveis de entrada com ConservativeMultilingual (3.5 chars/tok) e 10% safety margin:
+    // 50 * 3.5 * 0.9 = 157 chars efetivos (sem piso artificial de 500 chars).
+    let config = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 100,
+        reserved_response_tokens: 50,
+        safety_margin_ratio: 0.10,
+        tokenizer_profile: TokenizerModelProfile::ConservativeMultilingual,
+        ..Default::default()
+    };
+
+    let limit = config.effective_input_char_limit();
+    assert_eq!(
+        limit, 157,
+        "Limite deve ser exatamente 157 chars, sem elevação artificial para 500"
+    );
+
+    let manager = PromptBudgetManager::new(config);
+    let essential = "DIRETRIZ ESSENCIAL DE SISTEMA (Tier 1)"; // 38 chars
+    let small_user = "Oi"; // 2 chars
+
+    // Cabe exatamente: 38 + 2 = 40 <= 157
+    let ok_res = manager.assemble(essential, "", small_user, None, None, &[]);
+    assert!(ok_res.is_ok(), "Dentro do orçamento restrito deve passar");
+
+    // Excede o limite de 157 chars: 38 + 150 = 188 chars > 157 chars
+    let large_user = "a".repeat(150);
+    let err_res = manager.assemble(essential, "", &large_user, None, None, &[]);
+    assert!(
+        matches!(
+            err_res,
+            Err(PromptBudgetError::UserTurnExceedsBudget { .. })
+        ),
+        "Deve falhar fechado com UserTurnExceedsBudget sem piso artificial de 500 chars"
+    );
+}
+
+#[test]
+fn test_prompt_budget_personality_actual_truncation_when_exceeding_budget() {
+    // Configura limite de ~220 chars
+    let config = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 120,
+        reserved_response_tokens: 50, // 70 tokens * 3.5 * 0.9 = 220 chars
+        ..Default::default()
+    };
+    let limit = config.effective_input_char_limit();
+    assert_eq!(limit, 220);
+
+    let manager = PromptBudgetManager::new(config);
+    let essential = "ESSENCIAL DE SISTEMA (Tier 1 inviolavel)"; // 40 chars
+    let user_turn = "Pergunta objetiva do operador"; // 29 chars
+                                                     // Espaço restante para opcionais = 220 - (40 + 29) = 151 chars.
+                                                     // Separador "\n\n" consome 2 chars -> sobra no máximo 149 chars para personalidade.
+
+    // Caso 1: Personalidade grande (300 chars) -> deve ser TRUNCADA de verdade
+    let huge_personality =
+        "DIRETRIZ DE IDENTIDADE: Você é Yuki, assistente autônoma pessoal e leal. ".repeat(5);
+    let assembled = manager
+        .assemble(essential, &huge_personality, user_turn, None, None, &[])
+        .expect("montagem com truncamento governado de personalidade");
+
+    assert!(
+        assembled
+            .audit
+            .truncated_tiers
+            .contains(&"Tier2Personality".to_string()),
+        "Deve acusar truncamento de personalidade"
+    );
+    assert!(
+        assembled.audit.personality_chars < huge_personality.chars().count(),
+        "Caracteres de personalidade devem ter sido efetivamente reduzidos"
+    );
+    assert!(
+        assembled.audit.personality_chars <= 149,
+        "Personalidade deve respeitar o teto estrito do espaço disponível"
+    );
+    assert!(
+        assembled
+            .system_instruction
+            .starts_with("DIRETRIZ DE IDENTIDADE:"),
+        "Núcleo de identidade inicial deve ser preservado prioritariamente"
+    );
+
+    // Caso 2: Personalidade pequena (30 chars) -> cabe inteira e NÃO pode acusar truncamento falso
+    let small_personality = "Você é Yuki, assistente leal."; // 29 chars
+    let assembled_small = manager
+        .assemble(essential, small_personality, user_turn, None, None, &[])
+        .expect("montagem sem truncamento de personalidade");
+
+    assert!(
+        !assembled_small
+            .audit
+            .truncated_tiers
+            .contains(&"Tier2Personality".to_string()),
+        "Não pode relatar Tier2Personality como truncada quando ela couber integralmente"
+    );
+    assert_eq!(
+        assembled_small.audit.personality_chars,
+        small_personality.chars().count()
+    );
+}
+
+#[test]
+fn test_prompt_budget_tool_declarations_overhead_accounting() {
+    let config = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 200,
+        reserved_response_tokens: 100, // 100 tokens * 3.5 * 0.9 = 315 chars
+        ..Default::default()
+    };
+    let limit = config.effective_input_char_limit();
+    assert_eq!(limit, 314);
+
+    let manager = PromptBudgetManager::new(config);
+    let essential = "DIRETRIZ ESSENCIAL"; // 18 chars
+    let user_turn = "Turno do operador"; // 17 chars
+    let tool_chars = 120; // 120 chars de esquemas JSON de ferramentas
+
+    // Cenário A: Cabe dentro do orçamento
+    let assembled = manager
+        .assemble_with_tools(essential, "", user_turn, None, None, &[], tool_chars)
+        .expect("montagem com ferramentas deve ter sucesso");
+
+    assert_eq!(assembled.audit.tool_declarations_chars, 120);
+    assert!(assembled.audit.is_within_budget);
+    assert!(assembled.audit.total_assembled_chars <= limit);
+
+    // Cenário B: Overhead de ferramentas gigantesco que estoura o orçamento
+    let huge_tool_chars = 400; // > 315 chars
+    let err =
+        manager.assemble_with_tools(essential, "", user_turn, None, None, &[], huge_tool_chars);
+    assert!(
+        matches!(err, Err(PromptBudgetError::BudgetExhausted(_))),
+        "Overhead de ferramentas excessivo deve falhar fechado com BudgetExhausted"
+    );
+}
+
+#[tokio::test]
+async fn test_prompt_budget_yukicore_with_tools_projects_and_audits_tool_budget() {
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let budget_config = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 4096,
+        reserved_response_tokens: 1024,
+        tokenizer_profile: TokenizerModelProfile::ConservativeMultilingual,
+        ..Default::default()
+    };
+
+    let core = YukiCore::new()
+        .with_model_provider(inspecting_provider.clone())
+        .with_prompt_budget(budget_config);
+
+    let input = UserInput::new("Teste de integração de ferramentas e orçamento");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(
+        res.is_ok(),
+        "Processamento com ferramentas deve ter sucesso"
+    );
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(delivered.len(), 1);
+    let req = &delivered[0];
+
+    // Verifica que as ferramentas foram devidamente projetadas no ModelRequest
+    assert!(
+        !req.available_capabilities.is_empty(),
+        "available_capabilities devem ser projetadas no ModelRequest"
+    );
+    assert!(req
+        .available_capabilities
+        .iter()
+        .any(|c| c.name == "system.echo"));
+
+    // Verifica que o evento de auditoria registrou o tool_declarations_chars
+    let corr_id = yuki::contracts::identifiers::CorrelationId::from_request(&input.request_id);
+    let events = core.event_store.get_events(&corr_id);
+    let applied_event = events
+        .iter()
+        .find(|e| e.event_type == EventType::PersonalityApplied)
+        .expect("evento PersonalityApplied");
+
+    let audit_json = applied_event
+        .payload
+        .get("prompt_budget_audit")
+        .expect("prompt_budget_audit no evento");
+    let tool_chars = audit_json
+        .get("tool_declarations_chars")
+        .and_then(|v| v.as_u64())
+        .expect("tool_declarations_chars");
+    assert!(
+        tool_chars > 0,
+        "tool_declarations_chars deve ser contabilizado no audit"
+    );
+
+    // Cenário com orçamento tão restrito que nem mesmo as ferramentas registradas cabem
+    let tight_budget = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 50,
+        reserved_response_tokens: 40, // Sobram 10 tokens (~31 chars), incapazes de acomodar system.echo
+        ..Default::default()
+    };
+    let tight_core = YukiCore::new()
+        .with_model_provider(inspecting_provider.clone())
+        .with_prompt_budget(tight_budget);
+
+    let tight_res = tight_core.process_input_async(input).await;
+    assert!(
+        tight_res.is_err(),
+        "Quando o overhead de ferramentas registradas estourar o limite, deve falhar fechado"
+    );
+}
+
+#[test]
+fn test_vault_corrupted_disk_file_fails_closed_on_mutation_and_read() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_corrupt_vault_{}.json", nonce));
+
+    let vault = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-test-123"),
+    )
+    .expect("criar vault inicial");
+
+    vault
+        .store("creda", "secret-a", "prov-a", None)
+        .expect("armazenar creda");
+
+    // Simula corrupção física do arquivo em disco
+    fs::write(&vault_path, b"CORRUPTED_RAW_JSON_DATA_INVALID_SYNTAX { [")
+        .expect("escrever corrupção em disco");
+
+    // 1. Delete deve falhar fechado com erro de serialização e NÃO apagar/sobrescrever o arquivo corrompido
+    let del_res = vault.delete("creda");
+    assert!(
+        matches!(del_res, Err(VaultError::Serialization(_))),
+        "delete em arquivo corrompido deve falhar fechado com Serialization"
+    );
+
+    // 2. Store deve falhar fechado e NÃO mascarar o arquivo corrompido com estado de memória
+    let store_res = vault.store("credb", "secret-b", "prov-b", None);
+    assert!(
+        matches!(store_res, Err(VaultError::Serialization(_))),
+        "store em arquivo corrompido deve falhar fechado com Serialization"
+    );
+
+    // 3. Replace deve falhar fechado
+    let rep_res = vault.replace("creda", "new-secret", None);
+    assert!(
+        matches!(rep_res, Err(VaultError::Serialization(_))),
+        "replace em arquivo corrompido deve falhar fechado com Serialization"
+    );
+
+    // 4. Revoke deve falhar fechado
+    let rev_res = vault.revoke("creda");
+    assert!(
+        matches!(rev_res, Err(VaultError::Serialization(_))),
+        "revoke em arquivo corrompido deve falhar fechado com Serialization"
+    );
+
+    // 5. O arquivo em disco continua corrompido (não foi acidentalmente sobrescrito por estado em memória)
+    let disk_raw = fs::read_to_string(&vault_path).expect("ler arquivo em disco");
+    assert!(
+        disk_raw.contains("CORRUPTED_RAW_JSON_DATA_INVALID_SYNTAX"),
+        "O arquivo corrompido original em disco não pode ser mascarado ou sobrescrito"
+    );
+
+    // 6. Tentativa de abrir o cofre corrompido também falha fechada
+    let open_res = CredentialVault::open(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-test-123"),
+    );
+    assert!(
+        matches!(open_res, Err(VaultError::Serialization(_))),
+        "open em arquivo corrompido deve falhar fechado com Serialization"
+    );
+
+    let _ = fs::remove_file(&vault_path);
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_delete_non_existent_alias_returns_not_found() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_delete_not_found_{}.json", nonce));
+
+    let passphrase = SecretMaterial::new("master-passphrase-not-found-123");
+    let vault = CredentialVault::create_new(&vault_path, passphrase).expect("criar vault");
+
+    let res = vault.delete("alias_inexistente");
+    assert!(
+        matches!(res, Err(VaultError::NotFound(_))),
+        "delete de chave inexistente deve retornar NotFound"
+    );
+
+    let _ = fs::remove_file(&vault_path);
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_cross_instance_consistency_and_sync() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_cross_instance_{}.json", nonce));
+
+    let vault1 = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-sync-123"),
+    )
+    .expect("criar vault1");
+    let vault2 = CredentialVault::open(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-sync-123"),
+    )
+    .expect("abrir vault2");
+
+    // Instância 1 armazena chave
+    vault1
+        .store("cross_key", "secret-cross", "test", None)
+        .expect("armazenar via vault1");
+
+    // Instância 2 deleta chave
+    vault2.delete("cross_key").expect("deletar via vault2");
+
+    // Instância 2 confirma que chave não existe mais
+    let get_res = vault2.get("cross_key");
+    assert!(
+        matches!(get_res, Err(VaultError::NotFound(_))),
+        "vault2 deve retornar NotFound após deletar a chave"
+    );
+
+    let _ = fs::remove_file(&vault_path);
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
