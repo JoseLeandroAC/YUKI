@@ -553,3 +553,53 @@ Em auditoria adversarial e independente sobre a totalidade da capability Researc
 - 23 testes automatizados cobrindo os 7 eixos da auditoria final.
 - Base total expandida para 329 testes com 100% de sucesso.
 - Classificação: **RESEARCH V1 — APROVADA PARA VALIDAÇÃO LIVE CONTROLADA**.
+
+---
+
+## 12. Correção Pós-Live: Descompressão Delimitada de Content-Encoding e Prevenção de Zip Bomb
+
+Durante a execução da primeira validação live supervisionada de `research.fetch` contra `https://example.com/`, identificou-se que o servidor remoto respondeu com cabeçalho `Content-Encoding: gzip`. Devido à ausência de descompressão transparente no cliente HTTP delimitado, os bytes binários compactados foram tratados diretamente como texto UTF-8, gerando uma extração corrompida.
+
+Para solucionar a causa-raiz preservando integralmente os princípios ontológicos e as defesas contra esgotamento de recursos (*Zip Bombs* / *Decompression Bombs*), foram incorporadas as seguintes medidas arquiteturais:
+
+### 12.1. Suporte Explícito e Estrito a Content-Encoding
+- **Formatos suportados:** `gzip`, `deflate`, `br` (Brotli) e `identity`.
+- **Implementações seguras em Rust puro:** Adoção dos crates `flate2` (com backend `miniz_oxide`) e `brotli` (em Rust puro), sem vínculos com código C não gerenciado.
+- **Política Fail-Closed:** Encodings desconhecidos, proprietários ou não suportados (ex.: `zstd`, `compress`, `lzo`) são imediatamente rejeitados com erro tipado `YukiError::ExecutionFailed`, impedindo qualquer tentativa silenciosa de processamento de binários como texto legível.
+
+### 12.2. Prevenção Contra Decompression Bombs (Zip Bombs) e Tetos Delimitados
+- **Teto na Rede (Bytes Comprimidos):** Payload comprimido recebido do transporte de rede não pode exceder 256 KiB (`262,144` bytes). Se a resposta na rede ultrapassar esse teto, o stream é interrompido imediatamente.
+- **Teto na Memória (Bytes Descomprimidos):** Payload emitido pelo processo de descompressão não pode exceder 1 MiB (`1,048,576` bytes).
+- **Leitura Streaming Incremental em Blocos de 8 KiB:** A descompressão opera em blocos incrementais de 8 KiB (`read_stream_with_limit`). A cada bloco lido, o acumulador verifica se o limite de 1 MiB foi ultrapassado. Em caso de violação, o processo aborta imediatamente com erro explícito de Zip Bomb bloqueado, sem alocar memória prévia para o tamanho descompactado alegado pelo cabeçalho.
+- **Teto de Extração de Texto:** Preservado o limite estrito de caracteres de texto útil extraído da página (padrão de 10.000 caracteres, configurável até 30.000 caracteres conforme ADR-020).
+- **Orçamento Global de Turno (`ResearchBudgetTracker`):** O volume de bytes descomprimidos (`decompressed_bytes`) é contabilizado no envelope global de bytes do turno (teto agregado de 2 MiB).
+
+### 12.3. Semântica de Proveniência e Integridade Criptográfica
+- **Contratos Tipados Atualizados (`ResearchFetchResult`):**
+  - `raw_network_bytes`: contagem real e precisa de bytes transferidos pela rede.
+  - `decompressed_bytes`: contagem real de bytes obtidos após descompressão.
+  - `content_encoding`: identificador canônico da codificação (`gzip`, `deflate`, `br`, `identity`).
+  - `content_hash_sha256`: calculado estritamente sobre o texto limpo extraído (`extracted_text`), garantindo que o hash de integridade represente o conteúdo fático observado, e não a representação comprimida transitória da rede.
+  - `truncated`: flag booleana indicando se o texto foi cortado por restrição de tamanho.
+- **Escopo Canônico de Evidência:** Preservado no formato `fetch:url={url}` no `ObservedSourceRegistry`, garantindo total consistência com os Marcos 1 a 4.
+
+### 12.4. Suíte de Testes Offline de Content-Encoding (`tests/capability_research_content_encoding.rs`)
+- 16 testes automatizados cobrindo todos os cenários sem acesso externo à rede:
+  1. Gzip válido com extração HTML íntegra.
+  2. Deflate válido com preservação de estrutura.
+  3. Brotli válido com integridade de caracteres.
+  4. Identity explícito e implícito.
+  5. Encodings desconhecidos rejeitados fail-closed (`zstd`).
+  6. Gzip corrompido com detecção de falha de descompressão.
+  7. Stream interrompido / truncado.
+  8. Zip Bomb (>1 MiB expandido) com aborto incremental em blocos.
+  9. Payload na rede excedendo 256 KiB com aborto prévio.
+  10. Textos HTML UTF-8 com acentos e caracteres multibyte.
+  11. Entidades HTML especiais (`&amp;`, `&quot;`, `&lt;`).
+  12. Preservação da flag `truncated` em textos longos.
+  13. Cancelamento por deadline de turno durante a descompressão.
+  14. Concorrência entre requisições com encodings distintos.
+  15. Proveniência e integridade de metadados no `ObservedSourceRegistry`.
+  16. Registro fiel de bytes descomprimidos no `ResearchBudgetTracker`.
+- Base total de testes da plataforma expandida para 345 testes offline com 100% de aprovação.
+- Classificação: **CONTENT-ENCODING — CORRIGIDO OFFLINE**.

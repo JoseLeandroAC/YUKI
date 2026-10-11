@@ -711,5 +711,61 @@ Na branch `feature/research-v1`, foi implementado o Marco 1 da primeira capabili
 - Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
 - Veredito da Auditoria: **RESEARCH V1 — APROVADA PARA VALIDAÇÃO LIVE CONTROLADA**.
 
+---
+
+#### [2026-10-10] Research v1 — Correção Pós-Live: Content-Encoding e Integridade de Extração
+
+##### 1. Contexto e Diagnóstico
+- Durante a execução supervisionada da Validação Live Controlada — Etapa 1 (`research.fetch` contra `https://example.com/`), o servidor de destino respondeu com `Content-Encoding: gzip`.
+- O cliente HTTP `HttpContentFetchProvider` não descomprimia o fluxo binário antes da decodificação de texto UTF-8 (`String::from_utf8_lossy`), entregando caracteres de controle corrompidos para a extração HTML e poluindo a extração textual.
+- Diagnosticada a necessidade de implementação de suporte a `Content-Encoding` delimitado, seguro e imune a *Zip Bombs* / *Decompression Bombs*.
+
+##### 2. Arquitetura e Implementação
+- **Módulo Dedicado (`src/capabilities/research/encoding.rs`)**:
+  - Enum tipado `SupportedContentEncoding` com variantes `Identity`, `Gzip`, `Deflate` e `Brotli`.
+  - Parsing de cabeçalho `Content-Encoding` fail-closed (rejeição imediata de formatos não suportados como `zstd`, `compress`, `lzo`).
+  - Funções de descompressão streaming delimitada com leitura incremental em blocos de 8 KiB (`read_stream_with_limit`), abortando imediatamente se os dados emitidos ultrapassarem o teto de 1 MiB (`1.048.576` bytes).
+  - Teto de bytes brutos na rede delimitado em 256 KiB (`262.144` bytes) para payloads comprimidos.
+  - Helpers determinísticos de compressão para testes (`compress_gzip`, `compress_deflate`, `compress_brotli`).
+- **Dependências Puramente Rust (`Cargo.toml`)**:
+  - Adicionados `flate2 v1.1.10` (backend Rust puro via `miniz_oxide`) e `brotli v9.0.0` (Rust puro), sem dependências dinâmicas de C.
+- **Contratos e Proveniência (`src/contracts/research.rs`)**:
+  - `ResearchFetchResult` enriquecido com `raw_network_bytes: usize`, `decompressed_bytes: usize` e `content_encoding: Option<String>`.
+  - `ResearchFetchInput` enriquecido com `with_max_length_chars()`.
+  - O cálculo do hash criptográfico SHA-256 (`content_hash_sha256`) é estritamente aplicado sobre o texto limpo extraído (`extracted_text`), preservando proveniência e integridade semântica.
+  - O acumulador de orçamento do turno (`ResearchBudgetTracker::record_bytes`) passa a registrar fielmente o total de bytes descomprimidos na memória.
+- **Configuração e Transporte (`src/capabilities/research/http_fetch.rs`)**:
+  - Adicionado campo `accept_encoding` (padrão `"gzip, deflate, br"`) configurável via `with_accept_encoding` e variável de ambiente `YUKI_RESEARCH_ACCEPT_ENCODING`.
+  - `NetworkFetchTransport` aplica teto de streaming na rede diferenciado (256 KiB para streams comprimidos, 1 MiB para não comprimidos).
+  - Preservados incondicionalmente TLS, SSRF, socket pinning, `.no_proxy()` e verificação de deadlines de turno.
+
+##### 3. Nova Suíte Dedicada de Testes Offline (`tests/capability_research_content_encoding.rs`)
+- 16 testes determinísticos e 100% offline cobrindo:
+  1. Gzip válido com extração HTML íntegra;
+  2. Deflate válido com preservação de texto;
+  3. Brotli válido com integridade de caracteres;
+  4. Identity explícito e implícito;
+  5. Encodings desconhecidos rejeitados fail-closed (`zstd`);
+  6. Gzip corrompido com falha tratada determinística;
+  7. Stream interrompido / truncado tratado graciosamente;
+  8. Zip Bomb (>1 MiB descomprimido) bloqueado durante descompressão streaming em blocos;
+  9. Payload de rede >256 KiB bloqueado antes/durante recepção;
+  10. Textos HTML UTF-8 com caracteres acentuados;
+  11. Entidades HTML especiais decodificadas;
+  12. Preservação da flag `truncated` em textos longos;
+  13. Cancelamento por deadline de turno durante a descompressão;
+  14. Concorrência entre requisições com encodings distintos sem interferência;
+  15. Proveniência e integridade de metadados no `ObservedSourceRegistry`;
+  16. Registro de bytes descomprimidos no `ResearchBudgetTracker`.
+
+##### 4. Portões de Qualidade Aprovados
+- `cargo test`: 345 testes unitários e de integração aprovados no workspace (0 falhas, 4 testes live ignorados).
+- `cargo fmt --check`: 100% aprovado.
+- `cargo clippy --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `cargo build --release`: compilação limpa e bem-sucedida.
+- Baselines `v0.1.0-foundation` (`654c181`) e `v0.2.0-mvp1` (`6a9d070`) estritamente preservados.
+- Nenhuma requisição à internet pública ou consumo de cotas de APIs externas realizado nesta etapa.
+- Classificação: **CONTENT-ENCODING — CORRIGIDO OFFLINE**.
+
 
 

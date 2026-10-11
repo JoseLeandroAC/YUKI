@@ -232,6 +232,11 @@ impl ResearchFetchInput {
         }
     }
 
+    pub fn with_max_length_chars(mut self, max: usize) -> Self {
+        self.max_length_chars = max;
+        self
+    }
+
     /// Validação de invariantes contratuais de entrada (ADR-020).
     pub fn validate(&self) -> Result<(), YukiError> {
         let url_trimmed = self.url.trim();
@@ -275,6 +280,12 @@ pub struct ResearchFetchResult {
     pub truncated: bool,
     #[serde(default)]
     pub bytes_observed: usize,
+    #[serde(default)]
+    pub raw_network_bytes: usize,
+    #[serde(default)]
+    pub decompressed_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     pub confidence_state: SourceKind,

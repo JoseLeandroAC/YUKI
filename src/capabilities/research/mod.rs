@@ -1,4 +1,5 @@
 pub mod brave;
+pub mod encoding;
 pub mod fetch;
 pub mod html_extract;
 pub mod http_fetch;
@@ -10,6 +11,7 @@ pub mod ssrf;
 pub mod synthesis;
 
 pub use brave::*;
+pub use encoding::*;
 pub use fetch::*;
 pub use html_extract::*;
 pub use http_fetch::*;

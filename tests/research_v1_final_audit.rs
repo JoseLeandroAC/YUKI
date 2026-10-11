@@ -76,6 +76,9 @@ fn dummy_fetch_result(url: &str, text: &str, truncated: bool) -> ResearchFetchRe
         content_type: "text/html; charset=utf-8".to_string(),
         truncated,
         bytes_observed: text.len(),
+        raw_network_bytes: text.len(),
+        decompressed_bytes: text.len(),
+        content_encoding: Some("identity".to_string()),
         fetched_at: "2026-10-10T12:05:00Z".to_string(),
         published_date: None,
         source_id: Some(format!(

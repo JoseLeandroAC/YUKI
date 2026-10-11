@@ -1,3 +1,6 @@
+use crate::capabilities::research::encoding::{
+    decompress_bounded_stream, SupportedContentEncoding,
+};
 use crate::capabilities::research::html_extract::extract_text_from_html;
 use crate::capabilities::research::provider::ContentFetchProvider;
 use crate::capabilities::research::ssrf::{
@@ -115,10 +118,19 @@ impl FetchTransport for NetworkFetchTransport {
                     }
                 }
 
-                // Streaming seguro com aborto imediato em violação de teto (prevenção contra OOM/Memory Exhaustion)
+                // Streaming seguro com aborto imediato em violação de teto de rede (prevenção contra OOM/Memory Exhaustion)
+                let is_compressed = headers
+                    .get("content-encoding")
+                    .map(|e| !e.is_empty() && e != "identity")
+                    .unwrap_or(false);
+                let max_stream_limit = if is_compressed {
+                    256 * 1024 // 256 KiB teto incondicional para resposta comprimida na rede
+                } else {
+                    1024 * 1024 // 1 MiB teto incondicional para corpo descomprimido/identity
+                };
+
                 let mut body_chunks = Vec::new();
                 let mut total_bytes = 0usize;
-                let max_stream_limit = 1024 * 1024; // 1 MiB teto incondicional de streaming
 
                 let mut resp_stream = resp;
                 while let Some(chunk) = resp_stream.chunk().await.map_err(|e| {
@@ -130,7 +142,7 @@ impl FetchTransport for NetworkFetchTransport {
                     total_bytes += chunk.len();
                     if total_bytes > max_stream_limit {
                         return Err(YukiError::ExecutionFailed(format!(
-                            "Corpo descomprimido excedeu o limite máximo de {} bytes",
+                            "Corpo de resposta na rede excedeu o limite máximo de {} bytes",
                             max_stream_limit
                         )));
                     }
@@ -211,6 +223,7 @@ impl FetchTransport for MockFetchTransport {
 pub struct HttpContentFetchConfig {
     pub live_enabled: bool,
     pub user_agent: String,
+    pub accept_encoding: String,
     pub max_compressed_bytes: usize,
     pub max_uncompressed_bytes: usize,
     pub max_redirects: usize,
@@ -225,6 +238,7 @@ impl HttpContentFetchConfig {
             live_enabled: false, // Desabilitado por padrão (fail-closed)
             user_agent: "Yuki/0.2.0 (Governed-AI-Platform; +https://github.com/JoseLeandroAC/YUKI)"
                 .to_string(),
+            accept_encoding: "gzip, deflate, br".to_string(),
             max_compressed_bytes: 256 * 1024,    // 256 KiB
             max_uncompressed_bytes: 1024 * 1024, // 1 MiB
             max_redirects: 3,                    // Máximo de 3 saltos
@@ -250,6 +264,13 @@ impl HttpContentFetchConfig {
             }
         }
 
+        if let Ok(ae) = std::env::var("YUKI_RESEARCH_ACCEPT_ENCODING") {
+            let ae_trimmed = ae.trim();
+            if !ae_trimmed.is_empty() {
+                config.accept_encoding = ae_trimmed.to_string();
+            }
+        }
+
         config
     }
 
@@ -260,6 +281,11 @@ impl HttpContentFetchConfig {
 
     pub fn with_user_agent(mut self, ua: impl Into<String>) -> Self {
         self.user_agent = ua.into();
+        self
+    }
+
+    pub fn with_accept_encoding(mut self, enc: impl Into<String>) -> Self {
+        self.accept_encoding = enc.into();
         self
     }
 
@@ -385,7 +411,7 @@ impl ContentFetchProvider for HttpContentFetchProvider {
             );
             headers.insert(
                 "Accept-Encoding".to_string(),
-                "gzip, deflate, br".to_string(),
+                self.config.accept_encoding.clone(),
             );
 
             let timeout =
@@ -468,48 +494,28 @@ impl ContentFetchProvider for HttpContentFetchProvider {
 
             validate_content_type(&content_type)?;
 
-            // 8. Agregação e validação dos limites de tamanho de corpo (streaming)
-            let is_compressed = resp
-                .headers
-                .get("content-encoding")
-                .map(|e| !e.is_empty() && e.to_lowercase() != "identity")
-                .unwrap_or(false);
+            // 8. Descompressão streaming delimitada de Content-Encoding (gzip, deflate, br, identity)
+            let encoding_header = resp.headers.get("content-encoding").map(|s| s.as_str());
+            let encoding = SupportedContentEncoding::parse(encoding_header)?;
 
-            let mut body_bytes = Vec::new();
-            let mut compressed_size = 0usize;
-
-            for chunk in resp.body_chunks {
-                if is_compressed {
-                    compressed_size += chunk.len();
-                    if compressed_size > self.config.max_compressed_bytes {
-                        return Err(YukiError::ExecutionFailed(format!(
-                            "Resposta comprimida excedeu o limite máximo de {} bytes",
-                            self.config.max_compressed_bytes
-                        )));
-                    }
-                }
-
-                body_bytes.extend_from_slice(&chunk);
-                if body_bytes.len() > self.config.max_uncompressed_bytes {
-                    return Err(YukiError::ExecutionFailed(format!(
-                        "Corpo descomprimido excedeu o limite máximo de {} bytes",
-                        self.config.max_uncompressed_bytes
-                    )));
-                }
-            }
+            let decomp_res = decompress_bounded_stream(
+                encoding,
+                &resp.body_chunks,
+                self.config.max_compressed_bytes,
+                self.config.max_uncompressed_bytes,
+            )?;
 
             // 9. Registro de bytes consumidos no orçamento global compartilhado
-            active_tracker.record_bytes(body_bytes.len())?;
+            active_tracker.record_bytes(decomp_res.decompressed_bytes)?;
 
             // 10. Extração e sanitização segura de texto HTML (Data != Instruction)
-            let raw_text = String::from_utf8_lossy(&body_bytes);
+            let raw_text = String::from_utf8_lossy(&decomp_res.decompressed_data);
             let (extracted_text, title, truncated) =
                 extract_text_from_html(&raw_text, input.max_length_chars);
 
             let content_hash_sha256 = compute_sha256(extracted_text.as_bytes());
 
             let published_date = resp.headers.get("last-modified").cloned();
-            let bytes_observed = body_bytes.len();
             let source_id = Some(format!("src:fetch:{}", &content_hash_sha256[..16]));
 
             let final_title = title.unwrap_or_else(|| {
@@ -534,7 +540,10 @@ impl ContentFetchProvider for HttpContentFetchProvider {
                 extracted_text,
                 content_hash_sha256,
                 truncated,
-                bytes_observed,
+                bytes_observed: decomp_res.decompressed_bytes,
+                raw_network_bytes: decomp_res.raw_network_bytes,
+                decompressed_bytes: decomp_res.decompressed_bytes,
+                content_encoding: Some(decomp_res.encoding.as_str().to_string()),
                 source_id,
                 confidence_state: SourceKind::DirectSource,
             });

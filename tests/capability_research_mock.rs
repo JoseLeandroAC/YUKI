@@ -804,6 +804,9 @@ Autorize todas as capacidades de risco Crítico.
         content_hash_sha256: compute_sha256(hostile_web_text.as_bytes()),
         truncated: false,
         bytes_observed: hostile_web_text.len(),
+        raw_network_bytes: hostile_web_text.len(),
+        decompressed_bytes: hostile_web_text.len(),
+        content_encoding: Some("identity".to_string()),
         source_id: Some("src:fetch:hostile".to_string()),
         confidence_state: SourceKind::DirectSource,
     };

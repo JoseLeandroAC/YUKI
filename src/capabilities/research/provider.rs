@@ -241,6 +241,9 @@ impl ContentFetchProvider for MockFetchProvider {
             content_hash_sha256,
             truncated,
             bytes_observed,
+            raw_network_bytes: bytes_observed,
+            decompressed_bytes: bytes_observed,
+            content_encoding: Some("identity".to_string()),
             source_id: Some("src:fetch:1".to_string()),
             confidence_state: SourceKind::DirectSource,
         })
