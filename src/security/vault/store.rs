@@ -16,6 +16,12 @@ use thiserror::Error;
 /// Versão canônica atual do formato de armazenamento do Vault.
 pub const VAULT_FORMAT_VERSION: u32 = 1;
 
+/// String canária cifrada para validação antecipada da senha mestra.
+pub const VAULT_CANARY_PLAINTEXT: &str = "yuki-vault-auth-canary-v1";
+
+/// Limite máximo do tamanho do arquivo do vault em disco (20 MiB).
+pub const MAX_VAULT_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Erros originados no armazenamento e gestão do Vault.
@@ -39,6 +45,15 @@ pub enum VaultError {
     #[error("Alias de credencial inválido: {0}")]
     InvalidAlias(String),
 
+    #[error("Senha mestra do cofre inválida")]
+    InvalidPassphrase,
+
+    #[error("Arquivo do cofre excede o limite máximo permitido: {0} bytes")]
+    FileTooLarge(u64),
+
+    #[error("Caminho do cofre inválido ou inseguro: {0}")]
+    InsecurePath(String),
+
     #[error("Versão do formato do vault não suportada: {0}")]
     UnsupportedVersion(u32),
 
@@ -60,6 +75,8 @@ pub struct VaultEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultFile {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<EncryptedBlob>,
     pub entries: BTreeMap<String, VaultEntry>,
 }
 
@@ -67,6 +84,7 @@ impl Default for VaultFile {
     fn default() -> Self {
         Self {
             version: VAULT_FORMAT_VERSION,
+            verification: None,
             entries: BTreeMap::new(),
         }
     }
@@ -75,19 +93,31 @@ impl Default for VaultFile {
 /// Cofre seguro de credenciais persistido em disco com criptografia autenticada.
 ///
 /// INVARIANTES ARQUITETURAIS:
-/// 1. Dados em repouso protegidos por AES-256-GCM + PBKDF2 (100.000 iterações).
-/// 2. Persistência atômica via escrita em arquivo temporário + flush + sync + rename.
-/// 3. Metadados operacionais estritamente separados do texto cifrado.
-/// 4. Nenhum segredo ou chave mestra é exposto em logs ou mensagens de erro.
-/// 5. Revogação explícita com fail-closed imediato.
+/// 1. Dados em repouso protegidos por AES-256-GCM + PBKDF2 (10.000 a 500.000 iterações).
+/// 2. Persistência estritamente transacional: nenhuma mutação em memória antes de escrita atômica em disco.
+/// 3. Autenticação antecipada da senha mestra no `open_or_create` via blob canário.
+/// 4. Metadados operacionais estritamente separados do texto cifrado.
+/// 5. Nenhum segredo ou chave mestra é exposto em logs ou mensagens de erro.
+/// 6. Revogação explícita com fail-closed imediato.
 pub struct CredentialVault {
     path: PathBuf,
     passphrase: SecretMaterial,
+    verification: RwLock<Option<EncryptedBlob>>,
     entries: RwLock<BTreeMap<String, VaultEntry>>,
 }
 
+impl std::fmt::Debug for CredentialVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialVault")
+            .field("path", &self.path)
+            .field("passphrase", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl CredentialVault {
-    /// Abre um cofre existente ou cria um novo se o arquivo não existir.
+    /// Abre um cofre existente autenticando a senha mestra antecipadamente,
+    /// ou cria um novo se o arquivo não existir.
     pub fn open_or_create(
         path: impl Into<PathBuf>,
         passphrase: SecretMaterial,
@@ -98,33 +128,73 @@ impl CredentialVault {
             return Err(VaultCryptoError::EmptyPassphrase.into());
         }
 
-        let entries = if path.exists() {
+        if path.exists() {
+            let symlink_meta = fs::symlink_metadata(&path)
+                .map_err(|e| VaultError::Io(format!("Falha ao inspecionar caminho: {}", e)))?;
+            if symlink_meta.file_type().is_symlink() {
+                return Err(VaultError::InsecurePath(
+                    "Caminho do cofre não pode ser link simbólico".to_string(),
+                ));
+            }
+            if symlink_meta.len() > MAX_VAULT_FILE_BYTES {
+                return Err(VaultError::FileTooLarge(symlink_meta.len()));
+            }
+
             let content = fs::read_to_string(&path)
                 .map_err(|e| VaultError::Io(format!("Falha ao ler vault: {}", e)))?;
-            let vault_file: VaultFile = serde_json::from_str(&content)
+            let mut vault_file: VaultFile = serde_json::from_str(&content)
                 .map_err(|e| VaultError::Serialization(format!("JSON inválido: {}", e)))?;
 
             if vault_file.version != VAULT_FORMAT_VERSION {
                 return Err(VaultError::UnsupportedVersion(vault_file.version));
             }
 
-            vault_file.entries
-        } else {
-            let default_vault = VaultFile::default();
-            Self::persist_file_atomic(&path, &default_vault)?;
-            default_vault.entries
-        };
+            // Autenticação antecipada da senha mestra
+            let verification = if let Some(ref canary_blob) = vault_file.verification {
+                match decrypt_secret(passphrase.expose_secret(), canary_blob) {
+                    Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {
+                        Some(canary_blob.clone())
+                    }
+                    _ => return Err(VaultError::InvalidPassphrase),
+                }
+            } else {
+                // Migração transparente de cofre legado (Marco 6) sem canário
+                if let Some((_, first_entry)) = vault_file.entries.iter().next() {
+                    if decrypt_secret(passphrase.expose_secret(), &first_entry.encrypted).is_err() {
+                        return Err(VaultError::InvalidPassphrase);
+                    }
+                }
+                let canary_blob =
+                    encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
+                vault_file.verification = Some(canary_blob.clone());
+                Self::persist_file_atomic(&path, &vault_file)?;
+                Some(canary_blob)
+            };
 
-        Ok(Self {
-            path,
-            passphrase,
-            entries: RwLock::new(entries),
-        })
+            Ok(Self {
+                path,
+                passphrase,
+                verification: RwLock::new(verification),
+                entries: RwLock::new(vault_file.entries),
+            })
+        } else {
+            let canary_blob = encrypt_secret(passphrase.expose_secret(), VAULT_CANARY_PLAINTEXT)?;
+            let default_vault = VaultFile {
+                version: VAULT_FORMAT_VERSION,
+                verification: Some(canary_blob.clone()),
+                entries: BTreeMap::new(),
+            };
+            Self::persist_file_atomic(&path, &default_vault)?;
+            Ok(Self {
+                path,
+                passphrase,
+                verification: RwLock::new(Some(canary_blob)),
+                entries: RwLock::new(BTreeMap::new()),
+            })
+        }
     }
 
-    /// Armazena ou atualiza uma credencial cifrada no cofre.
-    ///
-    /// Valida o alias canônico contra as políticas de segurança da plataforma.
+    /// Armazena ou atualiza uma credencial cifrada no cofre de forma estritamente transacional.
     pub fn store(
         &self,
         alias: &str,
@@ -148,19 +218,87 @@ impl CredentialVault {
             encrypted,
         };
 
-        let mut entries = self
+        let mut entries_guard = self
             .entries
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        entries.insert(alias.to_string(), entry);
+        let mut staged = entries_guard.clone();
+        staged.insert(alias.to_string(), entry);
+
+        let verification = self
+            .verification
+            .read()
+            .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?
+            .clone();
 
         let vault_file = VaultFile {
             version: VAULT_FORMAT_VERSION,
-            entries: entries.clone(),
+            verification,
+            entries: staged.clone(),
+        };
+
+        // Escrita atômica em disco PRIMEIRO
+        Self::persist_file_atomic(&self.path, &vault_file)?;
+
+        // Mutação em memória SOMENTE APÓS sucesso da escrita em disco
+        *entries_guard = staged;
+
+        Ok(metadata)
+    }
+
+    /// Substitui o segredo de uma credencial existente.
+    pub fn replace(
+        &self,
+        alias: &str,
+        secret: &str,
+        description: Option<String>,
+    ) -> Result<CredentialMetadata, VaultError> {
+        Self::validate_alias(alias)?;
+
+        if secret.trim().is_empty() {
+            return Err(VaultError::Crypto(VaultCryptoError::CorruptedData(
+                "Segredo a armazenar não pode ser vazio".to_string(),
+            )));
+        }
+
+        let mut entries_guard = self
+            .entries
+            .write()
+            .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+
+        let existing = entries_guard
+            .get(alias)
+            .ok_or_else(|| VaultError::NotFound(alias.to_string()))?;
+
+        let provider = existing.metadata.provider.clone();
+        let desc = description.or_else(|| existing.metadata.description.clone());
+
+        let encrypted = encrypt_secret(self.passphrase.expose_secret(), secret)?;
+        let metadata = CredentialMetadata::new(alias, &provider, desc);
+
+        let entry = VaultEntry {
+            metadata: metadata.clone(),
+            encrypted,
+        };
+
+        let mut staged = entries_guard.clone();
+        staged.insert(alias.to_string(), entry);
+
+        let verification = self
+            .verification
+            .read()
+            .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?
+            .clone();
+
+        let vault_file = VaultFile {
+            version: VAULT_FORMAT_VERSION,
+            verification,
+            entries: staged.clone(),
         };
 
         Self::persist_file_atomic(&self.path, &vault_file)?;
+        *entries_guard = staged;
 
         Ok(metadata)
     }
@@ -190,51 +328,84 @@ impl CredentialVault {
         Ok(material)
     }
 
-    /// Marca uma credencial como revogada sem excluir seu histórico de metadados.
+    /// Obtém os metadados de uma credencial específica sem decriptar o segredo.
+    pub fn get_metadata(&self, alias: &str) -> Result<CredentialMetadata, VaultError> {
+        Self::validate_alias(alias)?;
+
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| VaultError::Io("Lock de leitura envenenado".to_string()))?;
+
+        entries
+            .get(alias)
+            .map(|e| e.metadata.clone())
+            .ok_or_else(|| VaultError::NotFound(alias.to_string()))
+    }
+
+    /// Marca uma credencial como revogada de forma estritamente transacional.
     pub fn revoke(&self, alias: &str) -> Result<CredentialMetadata, VaultError> {
         Self::validate_alias(alias)?;
 
-        let mut entries = self
+        let mut entries_guard = self
             .entries
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        let entry = entries
+        let mut staged = entries_guard.clone();
+        let entry = staged
             .get_mut(alias)
             .ok_or_else(|| VaultError::NotFound(alias.to_string()))?;
 
         entry.metadata.revoke();
         let metadata = entry.metadata.clone();
 
+        let verification = self
+            .verification
+            .read()
+            .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?
+            .clone();
+
         let vault_file = VaultFile {
             version: VAULT_FORMAT_VERSION,
-            entries: entries.clone(),
+            verification,
+            entries: staged.clone(),
         };
 
         Self::persist_file_atomic(&self.path, &vault_file)?;
+        *entries_guard = staged;
 
         Ok(metadata)
     }
 
-    /// Remove permanentemente uma credencial do cofre.
+    /// Remove permanentemente uma credencial de forma estritamente transacional.
     pub fn delete(&self, alias: &str) -> Result<(), VaultError> {
         Self::validate_alias(alias)?;
 
-        let mut entries = self
+        let mut entries_guard = self
             .entries
             .write()
             .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
 
-        if entries.remove(alias).is_none() {
+        let mut staged = entries_guard.clone();
+        if staged.remove(alias).is_none() {
             return Err(VaultError::NotFound(alias.to_string()));
         }
 
+        let verification = self
+            .verification
+            .read()
+            .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?
+            .clone();
+
         let vault_file = VaultFile {
             version: VAULT_FORMAT_VERSION,
-            entries: entries.clone(),
+            verification,
+            entries: staged.clone(),
         };
 
         Self::persist_file_atomic(&self.path, &vault_file)?;
+        *entries_guard = staged;
 
         Ok(())
     }
@@ -274,8 +445,19 @@ impl CredentialVault {
     /// Persiste o arquivo do cofre de forma atômica e segura.
     fn persist_file_atomic(target_path: &Path, content: &VaultFile) -> Result<(), VaultError> {
         if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| VaultError::Io(format!("Falha ao criar diretório do vault: {}", e)))?;
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    VaultError::Io(format!("Falha ao criar diretório do vault: {}", e))
+                })?;
+            }
+        }
+
+        if let Ok(metadata) = fs::symlink_metadata(target_path) {
+            if metadata.file_type().is_symlink() {
+                return Err(VaultError::InsecurePath(
+                    "Caminho do cofre não pode ser link simbólico".to_string(),
+                ));
+            }
         }
 
         let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);

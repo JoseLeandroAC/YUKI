@@ -25,11 +25,24 @@ struct Cli {
 enum Commands {
     /// Diagnóstico de saúde dos componentes fundamentais da Yuki
     Health,
+
+    /// Gerenciamento seguro do cofre de credenciais da Yuki
+    #[command(subcommand)]
+    Vault(yuki::security::vault::VaultCommand),
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Comandos administrativos do Vault não exigem inicialização do modelo
+    if let Some(Commands::Vault(vault_cmd)) = cli.command {
+        if let Err(e) = vault_cmd.execute() {
+            eprintln!("Erro no cofre: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Resolve model provider from environment (ADR-018 / CONFIGURATION.md)
     let model_provider = match resolve_model_provider_from_env() {
@@ -167,5 +180,6 @@ async fn main() {
                 }
             }
         }
+        Some(Commands::Vault(_)) => unreachable!(),
     }
 }

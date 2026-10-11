@@ -106,18 +106,15 @@ fn test_vault_wrong_passphrase_fails_closed() {
             .expect("armazenar");
     }
 
-    // Reabrir com senha incorreta e tentar recuperar
+    // Reabrir com senha incorreta: deve falhar antecipadamente no open_or_create!
     {
         let master_wrong = SecretMaterial::new(wrong_pass);
-        let vault_wrong =
-            CredentialVault::open_or_create(&path, master_wrong).expect("abrir arquivo");
-        let err = vault_wrong
-            .get("gemini_key")
-            .expect_err("deve falhar decriptação");
+        let err = CredentialVault::open_or_create(&path, master_wrong)
+            .expect_err("deve falhar autenticação da senha mestra antecipadamente");
         match err {
-            VaultError::Crypto(_) => {} // DecryptionFailed
+            VaultError::InvalidPassphrase => {}
             other => panic!(
-                "Esperado erro criptográfico fail-closed, obtido: {:?}",
+                "Esperado VaultError::InvalidPassphrase, obtido: {:?}",
                 other
             ),
         }
@@ -365,6 +362,112 @@ fn test_composite_credential_broker_resolution() {
         CredentialError::InvalidReference(_) => {}
         other => panic!("Esperado InvalidReference, obtido: {:?}", other),
     }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_vault_tampered_iteration_bounds_fails_closed() {
+    let path = test_vault_path("iterations");
+    let master = SecretMaterial::new("iteration-bounds-passphrase");
+    let vault = CredentialVault::open_or_create(&path, master).expect("criar vault");
+    vault
+        .store("bounded_key", "secret-data-xyz", "provider", None)
+        .expect("armazenar");
+
+    // Adulterar iterações para valor abaixo do mínimo (10.000)
+    let content = std::fs::read_to_string(&path).expect("ler vault");
+    let mut json: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+    if let Some(entry) = json
+        .get_mut("entries")
+        .and_then(|e| e.get_mut("bounded_key"))
+        .and_then(|k| k.get_mut("encrypted"))
+        .and_then(|enc| enc.get_mut("iterations"))
+    {
+        *entry = serde_json::Value::Number(serde_json::Number::from(5000));
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).expect("gravar json");
+
+    let master2 = SecretMaterial::new("iteration-bounds-passphrase");
+    let vault2 = CredentialVault::open_or_create(&path, master2).expect("abrir vault");
+    let err = vault2
+        .get("bounded_key")
+        .expect_err("deve falhar por iterações fora dos limites");
+    match err {
+        VaultError::Crypto(_) => {}
+        other => panic!("Esperado erro criptográfico, obtido: {:?}", other),
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_vault_canary_migration_legacy_format() {
+    let path = test_vault_path("legacy_migration");
+    let master_pass = "legacy-passphrase-alpha";
+
+    // Criar vault normalmente
+    {
+        let master = SecretMaterial::new(master_pass);
+        let vault = CredentialVault::open_or_create(&path, master).expect("criar vault");
+        vault
+            .store("legacy_key", "legacy-secret-val", "legacy_prov", None)
+            .expect("armazenar");
+    }
+
+    // Remover propositalmente o campo 'verification' do arquivo para simular versão Marco 6
+    {
+        let content = std::fs::read_to_string(&path).expect("ler vault");
+        let mut json: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+        if let Some(obj) = json.as_object_mut() {
+            obj.remove("verification");
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).expect("gravar json");
+    }
+
+    // Reabrir com a senha correta: deve migrar transparentemente gerando o canário
+    {
+        let master = SecretMaterial::new(master_pass);
+        let vault = CredentialVault::open_or_create(&path, master).expect("migrar cofre legado");
+        let secret = vault.get("legacy_key").expect("obter segredo legado");
+        assert_eq!(secret.expose_secret(), "legacy-secret-val");
+    }
+
+    // Verificar que agora o arquivo possui canário e senha incorreta é rejeitada antecipadamente
+    {
+        let wrong_pass = SecretMaterial::new("wrong-legacy-pass");
+        let err = CredentialVault::open_or_create(&path, wrong_pass)
+            .expect_err("deve falhar imediatamente com senha errada após migração");
+        assert!(matches!(err, VaultError::InvalidPassphrase));
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_vault_replace_credential() {
+    let path = test_vault_path("replace");
+    let master = SecretMaterial::new("replace-passphrase");
+    let vault = CredentialVault::open_or_create(&path, master).expect("criar vault");
+
+    vault
+        .store(
+            "api_token",
+            "token-v1",
+            "brave",
+            Some("Desc v1".to_string()),
+        )
+        .expect("armazenar");
+
+    assert_eq!(vault.get("api_token").unwrap().expose_secret(), "token-v1");
+
+    vault
+        .replace("api_token", "token-v2", Some("Desc v2".to_string()))
+        .expect("substituir");
+
+    assert_eq!(vault.get("api_token").unwrap().expose_secret(), "token-v2");
+    let meta = vault.get_metadata("api_token").unwrap();
+    assert_eq!(meta.description, Some("Desc v2".to_string()));
 
     let _ = std::fs::remove_file(path);
 }

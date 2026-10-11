@@ -10,6 +10,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Número padrão de iterações PBKDF2 para derivação da chave mestra.
 pub const PBKDF2_ITERATIONS: u32 = 100_000;
 
+/// Limite mínimo de iterações aceito para prevenir ataques de KDF enfraquecido.
+pub const MIN_PBKDF2_ITERATIONS: u32 = 10_000;
+
+/// Limite máximo de iterações aceito para prevenir DoS por exaustão de CPU.
+pub const MAX_PBKDF2_ITERATIONS: u32 = 500_000;
+
+/// Limite máximo do tamanho do texto claro em bytes (1 MiB).
+pub const MAX_PLAINTEXT_BYTES: usize = 1024 * 1024;
+
+/// Limite máximo do ciphertext em bytes (10 MiB).
+pub const MAX_CIPHERTEXT_BYTES: usize = 10 * 1024 * 1024;
+
 /// Tamanho do salt em bytes (128 bits).
 pub const SALT_LEN: usize = 16;
 
@@ -111,6 +123,13 @@ pub fn encrypt_secret(
         return Err(VaultCryptoError::EmptyPassphrase);
     }
 
+    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+        return Err(VaultCryptoError::CorruptedData(format!(
+            "Texto claro excede o tamanho máximo permitido de {} bytes",
+            MAX_PLAINTEXT_BYTES
+        )));
+    }
+
     let mut salt = [0u8; SALT_LEN];
     getrandom::getrandom(&mut salt).map_err(|e| VaultCryptoError::EntropyError(e.to_string()))?;
 
@@ -139,9 +158,11 @@ pub fn encrypt_secret(
 ///
 /// INVARIANTES DE SEGURANÇA:
 /// 1. Revalida a integridade do salt e do nonce.
-/// 2. Verifica a autenticação AEAD (tag GCM); falha imediatamente se adulterado ou se a senha estiver incorreta.
-/// 3. Retorna o segredo encapsulado em `SecretMaterial` (com zeroize on drop).
-/// 4. Falha fechada (fail-closed) sem expor material sensível em mensagens de erro.
+/// 2. Valida os limites de iterações do KDF (entre 10.000 e 500.000) antes de processar.
+/// 3. Valida os limites de tamanho do ciphertext antes de alocar memória.
+/// 4. Verifica a autenticação AEAD (tag GCM); falha imediatamente se adulterado ou se a senha estiver incorreta.
+/// 5. Retorna o segredo encapsulado em `SecretMaterial` (com zeroize on drop).
+/// 6. Falha fechada (fail-closed) sem expor material sensível em mensagens de erro.
 pub fn decrypt_secret(
     passphrase: &str,
     blob: &EncryptedBlob,
@@ -150,38 +171,50 @@ pub fn decrypt_secret(
         return Err(VaultCryptoError::EmptyPassphrase);
     }
 
-    let salt_vec = from_hex(&blob.salt)?;
-    if salt_vec.len() != SALT_LEN {
+    // 1. Validar iterações antes de processar KDF (defesa contra DoS de CPU e enfraquecimento)
+    if blob.iterations < MIN_PBKDF2_ITERATIONS || blob.iterations > MAX_PBKDF2_ITERATIONS {
         return Err(VaultCryptoError::CorruptedData(format!(
-            "Tamanho de salt inválido: {} bytes (esperado {})",
-            salt_vec.len(),
-            SALT_LEN
+            "Número de iterações ({}) fora dos limites seguros [{}..{}]",
+            blob.iterations, MIN_PBKDF2_ITERATIONS, MAX_PBKDF2_ITERATIONS
         )));
     }
+
+    // 2. Validar comprimentos de strings hexadecimais antes de decodificar
+    if blob.salt.len() != SALT_LEN * 2 {
+        return Err(VaultCryptoError::CorruptedData(format!(
+            "Comprimento do salt hexadecimal inválido: {} (esperado {})",
+            blob.salt.len(),
+            SALT_LEN * 2
+        )));
+    }
+    if blob.nonce.len() != NONCE_LEN * 2 {
+        return Err(VaultCryptoError::CorruptedData(format!(
+            "Comprimento do nonce hexadecimal inválido: {} (esperado {})",
+            blob.nonce.len(),
+            NONCE_LEN * 2
+        )));
+    }
+    if blob.ciphertext.len() < 32 || blob.ciphertext.len() > MAX_CIPHERTEXT_BYTES * 2 {
+        return Err(VaultCryptoError::CorruptedData(format!(
+            "Comprimento do ciphertext hexadecimal inválido: {} caracteres",
+            blob.ciphertext.len()
+        )));
+    }
+
+    let salt_vec = from_hex(&blob.salt)?;
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&salt_vec);
 
     let nonce_vec = from_hex(&blob.nonce)?;
-    if nonce_vec.len() != NONCE_LEN {
-        return Err(VaultCryptoError::CorruptedData(format!(
-            "Tamanho de nonce inválido: {} bytes (esperado {})",
-            nonce_vec.len(),
-            NONCE_LEN
-        )));
-    }
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    nonce_bytes.copy_from_slice(&nonce_vec);
 
     let ciphertext_vec = from_hex(&blob.ciphertext)?;
-    if ciphertext_vec.is_empty() {
-        return Err(VaultCryptoError::CorruptedData(
-            "Ciphertext vazio".to_string(),
-        ));
-    }
 
-    let iterations = blob.iterations.max(10_000);
-    let derived_key = derive_key(passphrase, &salt, iterations)?;
+    let derived_key = derive_key(passphrase, &salt, blob.iterations)?;
 
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derived_key.0));
-    let nonce = Nonce::from_slice(&nonce_vec);
+    let nonce = Nonce::from_slice(&nonce_bytes);
 
     let mut decrypted_bytes = cipher
         .decrypt(nonce, ciphertext_vec.as_slice())
