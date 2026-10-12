@@ -91,6 +91,12 @@ impl LocalPiperTtsProvider {
     }
 }
 
+impl Default for LocalPiperTtsProvider {
+    fn default() -> Self {
+        Self::new(LocalPiperConfig::default())
+    }
+}
+
 impl TextToSpeechProvider for LocalPiperTtsProvider {
     fn metadata(&self) -> &VoiceProviderMetadata {
         &self.metadata

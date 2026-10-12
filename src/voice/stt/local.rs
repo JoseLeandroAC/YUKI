@@ -100,6 +100,12 @@ impl LocalWhisperSttProvider {
     }
 }
 
+impl Default for LocalWhisperSttProvider {
+    fn default() -> Self {
+        Self::new(LocalWhisperConfig::default())
+    }
+}
+
 impl SpeechToTextProvider for LocalWhisperSttProvider {
     fn metadata(&self) -> &VoiceProviderMetadata {
         &self.metadata
