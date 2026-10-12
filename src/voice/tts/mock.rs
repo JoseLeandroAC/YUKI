@@ -84,7 +84,10 @@ impl TextToSpeechProvider for MockTtsProvider {
         let fail = *self.should_fail.lock().unwrap();
         let delay = self.delay;
         let text_owned = text.to_string();
-        self.synthesized_texts.lock().unwrap().push(text_owned.clone());
+        self.synthesized_texts
+            .lock()
+            .unwrap()
+            .push(text_owned.clone());
 
         Box::pin(async move {
             if delay > Duration::ZERO {

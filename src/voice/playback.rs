@@ -54,7 +54,8 @@ impl AudioPlaybackController {
         let is_avail = *self.device_available.lock().unwrap();
         if !is_avail {
             return Err(VoiceError::DeviceUnavailable(
-                "Dispositivo de reprodução de áudio (alto-falante) não detectado ou inacessível".to_string(),
+                "Dispositivo de reprodução de áudio (alto-falante) não detectado ou inacessível"
+                    .to_string(),
             ));
         }
 

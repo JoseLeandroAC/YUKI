@@ -257,15 +257,25 @@ async fn main() {
             );
             println!("Persistent Audit (SQLite): {}", sqlite_status);
 
-            let whisper_ready = yuki::voice::stt::LocalWhisperSttProvider::default().is_environment_ready();
-            let piper_ready = yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready();
+            let whisper_ready =
+                yuki::voice::stt::LocalWhisperSttProvider::default().is_environment_ready();
+            let piper_ready =
+                yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready();
             println!(
                 "Voice STT (Local Whisper): {}",
-                if whisper_ready { "READY" } else { "STANDBY (Install docs available)" }
+                if whisper_ready {
+                    "READY"
+                } else {
+                    "STANDBY (Install docs available)"
+                }
             );
             println!(
                 "Voice TTS (Piper Neural): {}",
-                if piper_ready { "READY" } else { "STANDBY (Acoustic fallback active)" }
+                if piper_ready {
+                    "READY"
+                } else {
+                    "STANDBY (Acoustic fallback active)"
+                }
             );
             println!("Voice TTS (Acoustic Fallback): READY");
             println!("Missions Subsystem (SQLite Store): OK");
@@ -309,7 +319,9 @@ async fn main() {
                 }
             }
         }
-        Some(Commands::Vault(_)) | Some(Commands::Mission(_)) | Some(Commands::Voice(_)) => unreachable!(),
+        Some(Commands::Vault(_)) | Some(Commands::Mission(_)) | Some(Commands::Voice(_)) => {
+            unreachable!()
+        }
     }
 }
 
@@ -321,7 +333,10 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
             std::process::exit(1);
         }
     };
-    let approval_mgr = Arc::new(yuki::missions::MissionApprovalManager::new(store.clone(), None));
+    let approval_mgr = Arc::new(yuki::missions::MissionApprovalManager::new(
+        store.clone(),
+        None,
+    ));
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
     let runner = yuki::missions::MissionRunner::new(
@@ -333,28 +348,33 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
     );
 
     match cmd {
-        MissionCommands::List => {
-            match store.list_missions() {
-                Ok(missions) => {
-                    if missions.is_empty() {
-                        println!("Nenhuma missão cadastrada.");
-                    } else {
-                        println!("{:<24} {:<18} {:<30} {:<6}", "ID", "STATUS", "TÍTULO", "PASSOS");
-                        println!("{}", "-".repeat(82));
-                        for m in missions {
-                            println!(
-                                "{:<24} {:<18?} {:<30} {:<6}",
-                                m.id,
-                                m.status,
-                                if m.title.len() > 28 { format!("{}...", &m.title[..25]) } else { m.title },
-                                m.steps.len()
-                            );
-                        }
+        MissionCommands::List => match store.list_missions() {
+            Ok(missions) => {
+                if missions.is_empty() {
+                    println!("Nenhuma missão cadastrada.");
+                } else {
+                    println!(
+                        "{:<24} {:<18} {:<30} {:<6}",
+                        "ID", "STATUS", "TÍTULO", "PASSOS"
+                    );
+                    println!("{}", "-".repeat(82));
+                    for m in missions {
+                        println!(
+                            "{:<24} {:<18?} {:<30} {:<6}",
+                            m.id,
+                            m.status,
+                            if m.title.len() > 28 {
+                                format!("{}...", &m.title[..25])
+                            } else {
+                                m.title
+                            },
+                            m.steps.len()
+                        );
                     }
                 }
-                Err(e) => eprintln!("Erro ao listar missões: {}", e),
             }
-        }
+            Err(e) => eprintln!("Erro ao listar missões: {}", e),
+        },
         MissionCommands::Show { id } => {
             match store.get_mission(&id) {
                 Ok(Some(m)) => {
@@ -389,49 +409,49 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
                 Err(e) => eprintln!("Erro ao buscar missão: {}", e),
             }
         }
-        MissionCommands::Approve { approval_id, operator } => {
-            match approval_mgr.grant_approval(&approval_id, &operator) {
-                Ok(app) => {
-                    println!("Aprovação concedida com sucesso!");
-                    println!("ID: {}", app.id);
-                    println!("Missão: {}", app.mission_id);
-                    println!("Etapa: {}", app.step_id);
-                    println!("Operador: {}", app.operator_id);
-                    println!("Você pode continuar a execução com: yuki mission run {}", app.mission_id);
-                }
-                Err(e) => eprintln!("Erro ao conceder aprovação: {}", e),
+        MissionCommands::Approve {
+            approval_id,
+            operator,
+        } => match approval_mgr.grant_approval(&approval_id, &operator) {
+            Ok(app) => {
+                println!("Aprovação concedida com sucesso!");
+                println!("ID: {}", app.id);
+                println!("Missão: {}", app.mission_id);
+                println!("Etapa: {}", app.step_id);
+                println!("Operador: {}", app.operator_id);
+                println!(
+                    "Você pode continuar a execução com: yuki mission run {}",
+                    app.mission_id
+                );
             }
-        }
-        MissionCommands::Deny { approval_id, reason, operator } => {
-            match approval_mgr.deny_approval(&approval_id, &operator, &reason) {
-                Ok(app) => {
-                    println!("Aprovação rejeitada pelo operador.");
-                    println!("ID: {}", app.id);
-                    println!("Missão: {}", app.mission_id);
-                    println!("Etapa: {}", app.step_id);
-                    println!("Operador: {}", app.operator_id);
-                }
-                Err(e) => eprintln!("Erro ao rejeitar aprovação: {}", e),
+            Err(e) => eprintln!("Erro ao conceder aprovação: {}", e),
+        },
+        MissionCommands::Deny {
+            approval_id,
+            reason,
+            operator,
+        } => match approval_mgr.deny_approval(&approval_id, &operator, &reason) {
+            Ok(app) => {
+                println!("Aprovação rejeitada pelo operador.");
+                println!("ID: {}", app.id);
+                println!("Missão: {}", app.mission_id);
+                println!("Etapa: {}", app.step_id);
+                println!("Operador: {}", app.operator_id);
             }
-        }
-        MissionCommands::Pause { id } => {
-            match runner.pause_mission(&id) {
-                Ok(_) => println!("Missão '{}' pausada com sucesso.", id),
-                Err(e) => eprintln!("Erro ao pausar missão: {}", e),
-            }
-        }
-        MissionCommands::Resume { id } => {
-            match runner.resume_mission(&id).await {
-                Ok(m) => println!("Missão '{}' retomada. Status atual: {:?}", id, m.status),
-                Err(e) => eprintln!("Erro ao retomar missão: {}", e),
-            }
-        }
-        MissionCommands::Cancel { id, reason } => {
-            match runner.cancel_mission(&id, &reason) {
-                Ok(_) => println!("Missão '{}' cancelada com sucesso. Motivo: {}", id, reason),
-                Err(e) => eprintln!("Erro ao cancelar missão: {}", e),
-            }
-        }
+            Err(e) => eprintln!("Erro ao rejeitar aprovação: {}", e),
+        },
+        MissionCommands::Pause { id } => match runner.pause_mission(&id) {
+            Ok(_) => println!("Missão '{}' pausada com sucesso.", id),
+            Err(e) => eprintln!("Erro ao pausar missão: {}", e),
+        },
+        MissionCommands::Resume { id } => match runner.resume_mission(&id).await {
+            Ok(m) => println!("Missão '{}' retomada. Status atual: {:?}", id, m.status),
+            Err(e) => eprintln!("Erro ao retomar missão: {}", e),
+        },
+        MissionCommands::Cancel { id, reason } => match runner.cancel_mission(&id, &reason) {
+            Ok(_) => println!("Missão '{}' cancelada com sucesso. Motivo: {}", id, reason),
+            Err(e) => eprintln!("Erro ao cancelar missão: {}", e),
+        },
         MissionCommands::Run { id } => {
             println!("Iniciando execução da missão '{}'...", id);
             match runner.run_mission(&id).await {
@@ -446,12 +466,16 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
             }
         }
         MissionCommands::CreateResearch { id, query, output } => {
-            let plan = yuki::missions::MissionPlanner::build_research_mission_plan(&id, &query, &output);
+            let plan =
+                yuki::missions::MissionPlanner::build_research_mission_plan(&id, &query, &output);
             let planner = yuki::missions::MissionPlanner::default();
             match planner.create_mission(
                 &id,
-                &format!("Pesquisa Soberana: {}", query),
-                &format!("Pesquisar documentação técnica e gerar relatório em '{}'", output),
+                format!("Pesquisa Soberana: {}", query),
+                format!(
+                    "Pesquisar documentação técnica e gerar relatório em '{}'",
+                    output
+                ),
                 "operator-jose",
                 "cli-run",
                 plan,
@@ -490,13 +514,21 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             let whisper_ready = LocalWhisperSttProvider::default().is_environment_ready();
             println!(
                 "STT Local (Whisper.cpp / CLI): {}",
-                if whisper_ready { "DISPONÍVEL" } else { "NÃO INSTALADO / NÃO CONFIGURADO (instruções em docs/)" }
+                if whisper_ready {
+                    "DISPONÍVEL"
+                } else {
+                    "NÃO INSTALADO / NÃO CONFIGURADO (instruções em docs/)"
+                }
             );
 
             let piper_ready = LocalPiperTtsProvider::default().is_environment_ready();
             println!(
                 "TTS Local (Piper Neural):     {}",
-                if piper_ready { "DISPONÍVEL" } else { "NÃO INSTALADO (instruções em docs/)" }
+                if piper_ready {
+                    "DISPONÍVEL"
+                } else {
+                    "NÃO INSTALADO (instruções em docs/)"
+                }
             );
 
             println!("TTS Local Acústico (Fallback): DISPONÍVEL (Embarcado, F0=220Hz, voz feminina afável)");

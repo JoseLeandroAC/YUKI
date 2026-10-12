@@ -34,13 +34,19 @@ fn test_01_audio_vazio_ou_corrompido() {
     // 1. Áudio vazio
     let res_empty = AudioCodec::decode_wav(&[]);
     assert!(res_empty.is_err());
-    assert!(matches!(res_empty.unwrap_err(), VoiceError::InvalidAudioFormat(_)));
+    assert!(matches!(
+        res_empty.unwrap_err(),
+        VoiceError::InvalidAudioFormat(_)
+    ));
 
     // 2. Assinatura RIFF truncada / corrompida
     let corrupt = b"NOT_A_RIFF_HEADER_AT_ALL_THIS_IS_CORRUPT";
     let res_corrupt = AudioCodec::decode_wav(corrupt);
     assert!(res_corrupt.is_err());
-    assert!(matches!(res_corrupt.unwrap_err(), VoiceError::InvalidAudioFormat(_)));
+    assert!(matches!(
+        res_corrupt.unwrap_err(),
+        VoiceError::InvalidAudioFormat(_)
+    ));
 }
 
 #[test]
@@ -58,7 +64,10 @@ fn test_02_audio_gigante_excede_limites() {
         30_000,
     );
     assert!(validation.is_err());
-    assert!(matches!(validation.unwrap_err(), VoiceError::AudioTooLong { .. }));
+    assert!(matches!(
+        validation.unwrap_err(),
+        VoiceError::AudioTooLong { .. }
+    ));
 
     // Valida limites de tamanho: máx 100 KiB
     let validation_size = AudioCodec::validate_constraints(
@@ -69,7 +78,10 @@ fn test_02_audio_gigante_excede_limites() {
         60_000,
     );
     assert!(validation_size.is_err());
-    assert!(matches!(validation_size.unwrap_err(), VoiceError::AudioTooLarge { .. }));
+    assert!(matches!(
+        validation_size.unwrap_err(),
+        VoiceError::AudioTooLarge { .. }
+    ));
 }
 
 #[test]
@@ -80,8 +92,8 @@ fn test_03_formato_audio_nao_suportado() {
     header[8..12].copy_from_slice(b"WAVE");
     header[12..16].copy_from_slice(b"fmt ");
     header[16..20].copy_from_slice(&16u32.to_le_bytes()); // subchunk size
-    header[20..22].copy_from_slice(&3u16.to_le_bytes());  // IEEE Float (não suportado, requer PCM 1)
-    header[22..24].copy_from_slice(&1u16.to_le_bytes());  // channels = 1
+    header[20..22].copy_from_slice(&3u16.to_le_bytes()); // IEEE Float (não suportado, requer PCM 1)
+    header[22..24].copy_from_slice(&1u16.to_le_bytes()); // channels = 1
     header[24..28].copy_from_slice(&16000u32.to_le_bytes()); // sample rate = 16k
     header[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample = 16
     header[36..40].copy_from_slice(b"data");
@@ -89,7 +101,10 @@ fn test_03_formato_audio_nao_suportado() {
 
     let res = AudioCodec::decode_wav(&header);
     assert!(res.is_err());
-    assert!(matches!(res.unwrap_err(), VoiceError::InvalidAudioFormat(_)));
+    assert!(matches!(
+        res.unwrap_err(),
+        VoiceError::InvalidAudioFormat(_)
+    ));
 }
 
 #[test]
@@ -101,7 +116,10 @@ fn test_04_dispositivo_ocupado_ou_indisponivel() {
     let output = AudioOutput::new(vec![0; 100], AudioFormat::default(), 500, "yuki");
     let play_res = controller.play(&output);
     assert!(play_res.is_err());
-    assert!(matches!(play_res.unwrap_err(), VoiceError::DeviceUnavailable(_)));
+    assert!(matches!(
+        play_res.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
 
     // 2. Conflito de concorrência no gerenciador de sessões
     let session_mgr = VoiceSessionManager::new();
@@ -123,7 +141,10 @@ async fn test_05_falha_provedor_stt() {
     let input = AudioInput::new(vec![0; 100], AudioFormat::default(), 500, "mic");
     let res = mock.transcribe(&input).await;
     assert!(res.is_err());
-    assert!(matches!(res.unwrap_err(), VoiceError::TranscriptionFailed(_)));
+    assert!(matches!(
+        res.unwrap_err(),
+        VoiceError::TranscriptionFailed(_)
+    ));
 }
 
 #[tokio::test]
@@ -138,7 +159,10 @@ async fn test_06_falha_provedor_tts() {
 #[test]
 fn test_07_timeout_em_requisicoes_de_audio() {
     let err = VoiceError::Timeout("Operação de gravação excedeu 15 segundos".to_string());
-    assert_eq!(err.to_string(), "Operação de voz expirou por timeout (Operação de gravação excedeu 15 segundos)");
+    assert_eq!(
+        err.to_string(),
+        "Operação de voz expirou por timeout (Operação de gravação excedeu 15 segundos)"
+    );
 }
 
 #[test]
@@ -152,7 +176,11 @@ fn test_08_cancelamento_de_sessao_durante_captura() {
     assert_eq!(session.state, VoiceSessionState::Capturing);
 
     // Cancelamento com transição segura
-    assert!(session.transition_to(VoiceSessionState::Failed("Cancelado pelo usuário".to_string())).is_ok());
+    assert!(session
+        .transition_to(VoiceSessionState::Failed(
+            "Cancelado pelo usuário".to_string()
+        ))
+        .is_ok());
     session_mgr.close_session("mic");
     assert!(session_mgr.get_session("mic").is_none());
 }
@@ -211,8 +239,10 @@ async fn test_13_tentativa_de_fallback_para_nuvem_sem_autorizacao() {
     let cloud_stt = Arc::new(MockSttProvider::new().with_response("Transcrição em nuvem"));
     let local_tts = Arc::new(MockTtsProvider::new());
 
-    let mut config = VoiceConfiguration::default();
-    config.cloud_fallback_allowed = false; // Política rígida: Proibido fallback não autorizado
+    let config = VoiceConfiguration {
+        cloud_fallback_allowed: false,
+        ..Default::default()
+    };
 
     let router = GovernedVoiceRouter::new(local_stt, Some(cloud_stt), local_tts, None, config);
     let audio_input = AudioInput::new(vec![0; 100], AudioFormat::default(), 500, "mic");
@@ -220,7 +250,10 @@ async fn test_13_tentativa_de_fallback_para_nuvem_sem_autorizacao() {
     // Operador NÃO concedeu autorização de egress
     let res = router.transcribe(&audio_input, false).await;
     assert!(res.is_err());
-    assert!(matches!(res.unwrap_err(), VoiceError::UnauthorizedCloudFallback(_)));
+    assert!(matches!(
+        res.unwrap_err(),
+        VoiceError::UnauthorizedCloudFallback(_)
+    ));
 }
 
 #[tokio::test]
@@ -229,8 +262,10 @@ async fn test_14_falha_de_rede_durante_fallback_para_nuvem_autorizado() {
     let cloud_stt = Arc::new(MockSttProvider::new().with_failure(true));
     let local_tts = Arc::new(MockTtsProvider::new());
 
-    let mut config = VoiceConfiguration::default();
-    config.cloud_fallback_allowed = true;
+    let config = VoiceConfiguration {
+        cloud_fallback_allowed: true,
+        ..Default::default()
+    };
 
     let router = GovernedVoiceRouter::new(local_stt, Some(cloud_stt), local_tts, None, config);
     let audio_input = AudioInput::new(vec![0; 100], AudioFormat::default(), 500, "mic");
@@ -238,7 +273,10 @@ async fn test_14_falha_de_rede_durante_fallback_para_nuvem_autorizado() {
     // Operador autorizou nuvem, mas o provedor de nuvem falhou
     let res = router.transcribe(&audio_input, true).await;
     assert!(res.is_err());
-    assert!(matches!(res.unwrap_err(), VoiceError::TranscriptionFailed(_)));
+    assert!(matches!(
+        res.unwrap_err(),
+        VoiceError::TranscriptionFailed(_)
+    ));
 }
 
 #[tokio::test]
@@ -250,7 +288,10 @@ async fn test_15_injecao_de_prompt_dentro_da_transcricao_de_audio() {
 
     let output = core.process_input_async(input).await.unwrap();
     // A Yuki trata o conteúdo como entrada textual do usuário; nenhuma ação/comando foi executado
-    assert_eq!(output.status, yuki::contracts::output::ResultStatus::Success);
+    assert_eq!(
+        output.status,
+        yuki::contracts::output::ResultStatus::Success
+    );
     // Não houve execução de comando arbitrário do sistema nem elevação de privilégios (Data != Instruction)
     assert!(!output.content.contains("root:"));
     assert!(!output.content.contains("/bin/bash"));
@@ -280,7 +321,13 @@ async fn test_17_missao_com_capacidade_inexistente() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let runner = MissionRunner::new(store.clone(), approval_mgr, capability_registry, verifier, None);
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
 
     let step = MissionStep::new(
         "step_bad",
@@ -298,7 +345,15 @@ async fn test_17_missao_com_capacidade_inexistente() {
         ..Default::default()
     };
     let mission = MissionPlanner::default()
-        .create_mission("m_bad_cap", "Teste", "Obj", "op", "corr", plan, Some(policy))
+        .create_mission(
+            "m_bad_cap",
+            "Teste",
+            "Obj",
+            "op",
+            "corr",
+            plan,
+            Some(policy),
+        )
         .unwrap();
 
     store.create_mission(&mission).unwrap();
@@ -308,19 +363,43 @@ async fn test_17_missao_com_capacidade_inexistente() {
 
     let run_res = runner.run_mission("m_bad_cap").await;
     assert!(run_res.is_err());
-    assert!(matches!(run_res.unwrap_err(), MissionError::ExecutionFailed(_)));
+    assert!(matches!(
+        run_res.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
 }
 
 #[test]
 fn test_18_missao_com_dependencia_circular_dag() {
-    let s1 = MissionStep::new("s1", "m", 1, "passo 1", None, serde_json::json!({}), false, vec![2]);
-    let s2 = MissionStep::new("s2", "m", 2, "passo 2", None, serde_json::json!({}), false, vec![1]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m",
+        1,
+        "passo 1",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![2],
+    );
+    let s2 = MissionStep::new(
+        "s2",
+        "m",
+        2,
+        "passo 2",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
     let plan = MissionPlan::new(vec![s1, s2]);
 
     let policy = MissionExecutionPolicy::default();
     let validation = plan.validate(&policy);
     assert!(validation.is_err());
-    assert!(matches!(validation.unwrap_err(), MissionError::CircularDependencyDetected(_)));
+    assert!(matches!(
+        validation.unwrap_err(),
+        MissionError::CircularDependencyDetected(_)
+    ));
 }
 
 #[test]
@@ -346,7 +425,10 @@ fn test_19_missao_que_excede_limite_maximo_de_etapas() {
 
     let validation = plan.validate(&policy);
     assert!(validation.is_err());
-    assert!(matches!(validation.unwrap_err(), MissionError::StepLimitExceeded { .. }));
+    assert!(matches!(
+        validation.unwrap_err(),
+        MissionError::StepLimitExceeded { .. }
+    ));
 }
 
 #[tokio::test]
@@ -356,7 +438,13 @@ async fn test_20_execucao_sem_aprovacao_pausa_no_portao_humano() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let runner = MissionRunner::new(store.clone(), approval_mgr, capability_registry, verifier, None);
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
 
     let step = MissionStep::new(
         "s_mut",
@@ -394,7 +482,13 @@ async fn test_21_aprovacao_expirada_rejeitada() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let _runner = MissionRunner::new(store.clone(), approval_mgr.clone(), capability_registry, verifier, None);
+    let _runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr.clone(),
+        capability_registry,
+        verifier,
+        None,
+    );
 
     let step = MissionStep::new(
         "s_exp",
@@ -415,11 +509,16 @@ async fn test_21_aprovacao_expirada_rejeitada() {
     store.save_step(&step).unwrap();
 
     // Cria aprovação com validade 0 segundos (expira imediatamente)
-    let app = approval_mgr.request_approval("m_exp", &step, "op", 0).unwrap();
+    let app = approval_mgr
+        .request_approval("m_exp", &step, "op", 0)
+        .unwrap();
     // Tenta conceder após expiração
     let grant_res = approval_mgr.grant_approval(&app.id, "op");
     assert!(grant_res.is_err());
-    assert!(matches!(grant_res.unwrap_err(), MissionError::ApprovalExpired(_)));
+    assert!(matches!(
+        grant_res.unwrap_err(),
+        MissionError::ApprovalExpired(_)
+    ));
 }
 
 #[test]
@@ -456,7 +555,13 @@ fn test_23_tentativa_de_reaproveitar_aprovacao_antiga() {
     approval.status = ApprovalStatus::Granted;
 
     // Operador diferente tentando usar aprovação
-    assert!(!approval.is_valid_for("op_attacker", "m_mission_A", "step_1", "system.echo", &params));
+    assert!(!approval.is_valid_for(
+        "op_attacker",
+        "m_mission_A",
+        "step_1",
+        "system.echo",
+        &params
+    ));
 }
 
 #[test]
@@ -475,7 +580,9 @@ fn test_24_concorrencia_aprovacao_simultanea() {
         vec![],
     );
 
-    let app = approval_mgr.request_approval("m_conc", &step, "op_jose", 3600).unwrap();
+    let app = approval_mgr
+        .request_approval("m_conc", &step, "op_jose", 3600)
+        .unwrap();
 
     // Primeiro operador aprova
     let grant_1 = approval_mgr.grant_approval(&app.id, "op_jose");
@@ -484,7 +591,10 @@ fn test_24_concorrencia_aprovacao_simultanea() {
     // Segundo operador tenta negar a solicitação já finalizada
     let deny_2 = approval_mgr.deny_approval(&app.id, "op_maria", "Rejeito");
     assert!(deny_2.is_err());
-    assert!(matches!(deny_2.unwrap_err(), MissionError::ApprovalMismatch(_)));
+    assert!(matches!(
+        deny_2.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
 }
 
 #[tokio::test]
@@ -494,16 +604,35 @@ async fn test_25_cancelamento_de_missao() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let runner = MissionRunner::new(store.clone(), approval_mgr, capability_registry, verifier, None);
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
 
-    let s1 = MissionStep::new("s1", "m_cancel", 1, "p1", Some("system.echo".to_string()), serde_json::json!({"message": "1"}), false, vec![]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m_cancel",
+        1,
+        "p1",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "1"}),
+        false,
+        vec![],
+    );
     let plan = MissionPlan::new(vec![s1]);
-    let mission = MissionPlanner::default().create_mission("m_cancel", "T", "O", "op", "c", plan, None).unwrap();
+    let mission = MissionPlanner::default()
+        .create_mission("m_cancel", "T", "O", "op", "c", plan, None)
+        .unwrap();
 
     store.create_mission(&mission).unwrap();
     store.save_step(&mission.steps[0]).unwrap();
 
-    runner.cancel_mission("m_cancel", "Abortado pelo operador").unwrap();
+    runner
+        .cancel_mission("m_cancel", "Abortado pelo operador")
+        .unwrap();
     let m = store.get_mission("m_cancel").unwrap().unwrap();
     assert_eq!(m.status, MissionStatus::Cancelled);
     assert_eq!(m.failure_reason, Some("Abortado pelo operador".to_string()));
@@ -520,18 +649,38 @@ async fn test_26_pausa_e_retomada_de_missao() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let runner = MissionRunner::new(store.clone(), approval_mgr, capability_registry, verifier, None);
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
 
-    let s1 = MissionStep::new("s1", "m_pr", 1, "p1", Some("system.echo".to_string()), serde_json::json!({"message": "1"}), false, vec![]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m_pr",
+        1,
+        "p1",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "1"}),
+        false,
+        vec![],
+    );
     let plan = MissionPlan::new(vec![s1]);
-    let mission = MissionPlanner::default().create_mission("m_pr", "T", "O", "op", "c", plan, None).unwrap();
+    let mission = MissionPlanner::default()
+        .create_mission("m_pr", "T", "O", "op", "c", plan, None)
+        .unwrap();
 
     store.create_mission(&mission).unwrap();
     store.save_step(&mission.steps[0]).unwrap();
 
     // Pausar
     runner.pause_mission("m_pr").unwrap();
-    assert_eq!(store.get_mission("m_pr").unwrap().unwrap().status, MissionStatus::Paused);
+    assert_eq!(
+        store.get_mission("m_pr").unwrap().unwrap().status,
+        MissionStatus::Paused
+    );
 
     // Retomar
     let m = runner.resume_mission("m_pr").await.unwrap();
@@ -541,7 +690,14 @@ async fn test_26_pausa_e_retomada_de_missao() {
 #[test]
 fn test_27_recuperacao_de_checkpoints() {
     let store = SqliteMissionStore::open_in_memory().unwrap();
-    let mission = Mission::new("m_cp", "T", "O", "op", "c", MissionExecutionPolicy::default());
+    let mission = Mission::new(
+        "m_cp",
+        "T",
+        "O",
+        "op",
+        "c",
+        MissionExecutionPolicy::default(),
+    );
     store.create_mission(&mission).unwrap();
 
     let cp1 = MissionCheckpoint::new("cp_1", "m_cp", 1, serde_json::json!({"data": "p1"}));
@@ -579,12 +735,8 @@ async fn test_29_efeito_com_resultado_unknown() {
         error: None,
         executed_at: now_utc(),
     };
-    let context = yuki::verification::VerificationContext::new(
-        &op_id,
-        &unmapped_cap,
-        &execution,
-        &[],
-    );
+    let context =
+        yuki::verification::VerificationContext::new(&op_id, &unmapped_cap, &execution, &[]);
     let result = verifier.verify_operation(&context);
     // Verificação de capacidade sem estratégia registrada resulta deterministicamente em Unknown
     assert_eq!(
@@ -604,7 +756,14 @@ fn test_30_injecao_de_prompt_em_parametros_de_pesquisa() {
     assert!(input.validate().is_ok()); // É tratado puramente como string de dados (Data != Instruction)
 
     let store = SqliteMissionStore::open_in_memory().unwrap();
-    let mission = Mission::new("m_sql", "T", query_injection, "op", "c", MissionExecutionPolicy::default());
+    let mission = Mission::new(
+        "m_sql",
+        "T",
+        query_injection,
+        "op",
+        "c",
+        MissionExecutionPolicy::default(),
+    );
     store.create_mission(&mission).unwrap();
 
     // Confirma que a tabela de missões permanece intacta
@@ -617,13 +776,27 @@ fn test_31_tentativa_de_escalacao_de_privilegios_via_missao() {
     let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
     let approval_mgr = MissionApprovalManager::new(store, None);
 
-    let step = MissionStep::new("s", "m", 1, "d", Some("system.echo".to_string()), serde_json::json!({"message": "1"}), true, vec![]);
-    let app = approval_mgr.request_approval("m", &step, "authorized-operator", 3600).unwrap();
+    let step = MissionStep::new(
+        "s",
+        "m",
+        1,
+        "d",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "1"}),
+        true,
+        vec![],
+    );
+    let app = approval_mgr
+        .request_approval("m", &step, "authorized-operator", 3600)
+        .unwrap();
 
     // Operador não autorizado tenta conceder aprovação
     let res = approval_mgr.grant_approval(&app.id, "unauthorized-attacker");
     assert!(res.is_err());
-    assert!(matches!(res.unwrap_err(), MissionError::ApprovalMismatch(_)));
+    assert!(matches!(
+        res.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
 }
 
 #[test]
@@ -653,9 +826,36 @@ fn test_32_tentativa_de_roubo_de_credenciais_do_vault_via_missao() {
 #[test]
 fn test_33_loop_infinito_ou_ciclos_no_dag_detectados() {
     // Grafo: 1 -> 2 -> 3 -> 1
-    let s1 = MissionStep::new("s1", "m", 1, "p1", None, serde_json::json!({}), false, vec![3]);
-    let s2 = MissionStep::new("s2", "m", 2, "p2", None, serde_json::json!({}), false, vec![1]);
-    let s3 = MissionStep::new("s3", "m", 3, "p3", None, serde_json::json!({}), false, vec![2]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m",
+        1,
+        "p1",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![3],
+    );
+    let s2 = MissionStep::new(
+        "s2",
+        "m",
+        2,
+        "p2",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
+    let s3 = MissionStep::new(
+        "s3",
+        "m",
+        3,
+        "p3",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![2],
+    );
     let plan = MissionPlan::new(vec![s1, s2, s3]);
 
     assert!(plan.validate(&MissionExecutionPolicy::default()).is_err());
@@ -664,11 +864,27 @@ fn test_33_loop_infinito_ou_ciclos_no_dag_detectados() {
 #[test]
 fn test_34_recuperacao_na_inicializacao_reconciliacao() {
     let store = SqliteMissionStore::open_in_memory().unwrap();
-    let mut m1 = Mission::new("m_active", "T", "O", "op", "c", MissionExecutionPolicy::default());
+    let mut m1 = Mission::new(
+        "m_active",
+        "T",
+        "O",
+        "op",
+        "c",
+        MissionExecutionPolicy::default(),
+    );
     m1.status = MissionStatus::InProgress;
     store.create_mission(&m1).unwrap();
 
-    let mut step = MissionStep::new("s_run", "m_active", 1, "Etapa rodando", None, serde_json::json!({}), false, vec![]);
+    let mut step = MissionStep::new(
+        "s_run",
+        "m_active",
+        1,
+        "Etapa rodando",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![],
+    );
     step.status = MissionStepStatus::Running;
     store.save_step(&step).unwrap();
 
@@ -690,7 +906,10 @@ fn test_34_recuperacao_na_inicializacao_reconciliacao() {
 #[tokio::test]
 async fn test_35_conversacao_de_texto_pura_inalterada() {
     let core = YukiCore::new();
-    let res = core.process_input_async(UserInput::new("Bom dia Yuki!")).await.unwrap();
+    let res = core
+        .process_input_async(UserInput::new("Bom dia Yuki!"))
+        .await
+        .unwrap();
     assert_eq!(res.status, yuki::contracts::output::ResultStatus::Success);
     assert!(!res.content.is_empty());
 }
@@ -713,9 +932,21 @@ fn test_37_orcamento_contextual_respeitado() {
 #[test]
 fn test_38_capacidades_limitadas_ao_seu_dominio() {
     let registry = CapabilityRegistry::new();
-    assert!(registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new("system.echo")));
-    assert!(registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new("research.search")));
-    assert!(!registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new("system.execute_root_bash")));
+    assert!(
+        registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new(
+            "system.echo"
+        ))
+    );
+    assert!(
+        registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new(
+            "research.search"
+        ))
+    );
+    assert!(
+        !registry.has_capability(&yuki::contracts::identifiers::CapabilityId::new(
+            "system.execute_root_bash"
+        ))
+    );
 }
 
 #[test]
@@ -750,7 +981,9 @@ fn test_40_cofre_de_credenciais_intacto() {
     ));
     let master = SecretMaterial::new("SenhaForteSeguraDoOperador123!");
     let vault = CredentialVault::open_or_create(&path, master).unwrap();
-    vault.store("openai_key", "sk-live-12345", "openai", None).unwrap();
+    vault
+        .store("openai_key", "sk-live-12345", "openai", None)
+        .unwrap();
 
     let retrieved = vault.get("openai_key").unwrap();
     assert_eq!(retrieved.expose_secret(), "sk-live-12345");
@@ -767,7 +1000,8 @@ fn test_41_identidade_e_tom_vocal_preservados() {
     assert!(identity.avoid_biological_feigning);
 
     let base_config = VoiceConfiguration::default();
-    let adapted = identity.adapt_configuration(&base_config, None, Some(&ContextUrgency::SecurityCritical));
+    let adapted =
+        identity.adapt_configuration(&base_config, None, Some(&ContextUrgency::SecurityCritical));
     // Alta urgência torna o tom mais direto e ligeiramente mais rápido
     assert!(adapted.speaking_rate >= 1.0);
 }
@@ -799,7 +1033,13 @@ async fn test_44_prevencao_de_replay_de_etapas_mutadoras() {
     let capability_registry = Arc::new(CapabilityRegistry::new());
     let verifier = Arc::new(Verifier::new());
 
-    let runner = MissionRunner::new(store.clone(), approval_mgr.clone(), capability_registry, verifier, None);
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr.clone(),
+        capability_registry,
+        verifier,
+        None,
+    );
 
     let mut step = MissionStep::new(
         "s_replay",

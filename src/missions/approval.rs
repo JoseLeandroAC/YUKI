@@ -1,10 +1,8 @@
 use crate::contracts::events::{AuditEvent, EventType};
 use crate::contracts::identifiers::{CausationId, CorrelationId};
-use crate::contracts::missions::{
-    ApprovalStatus, MissionApproval, MissionError, MissionStep,
-};
-use crate::persistence::sqlite::SqliteAuditStore;
+use crate::contracts::missions::{ApprovalStatus, MissionApproval, MissionError, MissionStep};
 use crate::missions::store::SqliteMissionStore;
+use crate::persistence::sqlite::SqliteAuditStore;
 use std::sync::Arc;
 
 /// Gerenciador governado do protocolo de aprovação humana (*human-in-the-loop*).
@@ -19,10 +17,7 @@ pub struct MissionApprovalManager {
 }
 
 impl MissionApprovalManager {
-    pub fn new(
-        store: Arc<SqliteMissionStore>,
-        audit_store: Option<Arc<SqliteAuditStore>>,
-    ) -> Self {
+    pub fn new(store: Arc<SqliteMissionStore>, audit_store: Option<Arc<SqliteAuditStore>>) -> Self {
         Self { store, audit_store }
     }
 
@@ -72,10 +67,9 @@ impl MissionApprovalManager {
         approval_id: &str,
         operator_id: &str,
     ) -> Result<MissionApproval, MissionError> {
-        let mut approval = self
-            .store
-            .get_approval(approval_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id)))?;
+        let mut approval = self.store.get_approval(approval_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id))
+        })?;
 
         if approval.status != ApprovalStatus::Pending {
             return Err(MissionError::ApprovalMismatch(format!(
@@ -125,10 +119,9 @@ impl MissionApprovalManager {
         operator_id: &str,
         reason: &str,
     ) -> Result<MissionApproval, MissionError> {
-        let mut approval = self
-            .store
-            .get_approval(approval_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id)))?;
+        let mut approval = self.store.get_approval(approval_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id))
+        })?;
         if approval.status != ApprovalStatus::Pending {
             return Err(MissionError::ApprovalMismatch(format!(
                 "Aprovação '{}' não está pendente (status atual: {:?})",
@@ -168,17 +161,17 @@ impl MissionApprovalManager {
         step: &MissionStep,
         operator_id: &str,
     ) -> Result<(), MissionError> {
-        let app_id = step.approval_id.as_ref().ok_or_else(|| {
-            MissionError::ApprovalRequired {
+        let app_id = step
+            .approval_id
+            .as_ref()
+            .ok_or_else(|| MissionError::ApprovalRequired {
                 step_id: step.id.clone(),
                 capability_id: step.capability_id.clone().unwrap_or_default(),
-            }
-        })?;
+            })?;
 
-        let approval = self
-            .store
-            .get_approval(app_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Aprovação '{}' não encontrada", app_id)))?;
+        let approval = self.store.get_approval(app_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Aprovação '{}' não encontrada", app_id))
+        })?;
 
         let cap = step.capability_id.as_deref().unwrap_or("unknown");
 

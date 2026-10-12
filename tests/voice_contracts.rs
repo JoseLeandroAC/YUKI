@@ -71,25 +71,33 @@ fn test_voice_session_valid_transitions() {
     assert_eq!(session.state, VoiceSessionState::Idle);
 
     // Idle -> WakeListening
-    assert!(session.transition_to(VoiceSessionState::WakeListening).is_ok());
+    assert!(session
+        .transition_to(VoiceSessionState::WakeListening)
+        .is_ok());
 
     // WakeListening -> Capturing
     assert!(session.transition_to(VoiceSessionState::Capturing).is_ok());
 
     // Capturing -> Transcribing
-    assert!(session.transition_to(VoiceSessionState::Transcribing).is_ok());
+    assert!(session
+        .transition_to(VoiceSessionState::Transcribing)
+        .is_ok());
 
     // Transcribing -> Processing
     assert!(session.transition_to(VoiceSessionState::Processing).is_ok());
 
     // Processing -> Synthesizing
-    assert!(session.transition_to(VoiceSessionState::Synthesizing).is_ok());
+    assert!(session
+        .transition_to(VoiceSessionState::Synthesizing)
+        .is_ok());
 
     // Synthesizing -> Speaking
     assert!(session.transition_to(VoiceSessionState::Speaking).is_ok());
 
     // Speaking -> WakeListening
-    assert!(session.transition_to(VoiceSessionState::WakeListening).is_ok());
+    assert!(session
+        .transition_to(VoiceSessionState::WakeListening)
+        .is_ok());
 
     // Interrupted from WakeListening
     assert!(session.interrupt().is_ok());
@@ -107,18 +115,27 @@ fn test_voice_session_invalid_transitions() {
 
     // Idle cannot transition directly to Speaking
     let res = session.transition_to(VoiceSessionState::Speaking);
-    assert!(matches!(res, Err(VoiceError::InvalidStateTransition { .. })));
+    assert!(matches!(
+        res,
+        Err(VoiceError::InvalidStateTransition { .. })
+    ));
 
     // Idle cannot transition directly to Synthesizing
     let res = session.transition_to(VoiceSessionState::Synthesizing);
-    assert!(matches!(res, Err(VoiceError::InvalidStateTransition { .. })));
+    assert!(matches!(
+        res,
+        Err(VoiceError::InvalidStateTransition { .. })
+    ));
 
     // Set to Capturing (valid from Idle)
     assert!(session.transition_to(VoiceSessionState::Capturing).is_ok());
 
     // Capturing cannot jump directly to Speaking
     let res = session.transition_to(VoiceSessionState::Speaking);
-    assert!(matches!(res, Err(VoiceError::InvalidStateTransition { .. })));
+    assert!(matches!(
+        res,
+        Err(VoiceError::InvalidStateTransition { .. })
+    ));
 }
 
 #[test]
@@ -137,8 +154,10 @@ fn test_voice_session_cancellation_and_interruption() {
 
 #[test]
 fn test_voice_session_timeout() {
-    let mut config = VoiceConfiguration::default();
-    config.session_timeout_secs = 0; // immediate timeout
+    let config = VoiceConfiguration {
+        session_timeout_secs: 0, // immediate timeout
+        ..Default::default()
+    };
 
     let mut session = VoiceSession::new("s4", "mic-0", config);
     // Give a tiny delay or check elapsed
@@ -152,7 +171,9 @@ fn test_voice_session_manager_concurrency_conflict() {
     let config = VoiceConfiguration::default();
 
     // Start first session for device-1
-    let mut s1 = manager.start_session("sess-1", "device-1", config.clone()).unwrap();
+    let mut s1 = manager
+        .start_session("sess-1", "device-1", config.clone())
+        .unwrap();
     s1.transition_to(VoiceSessionState::Capturing).unwrap();
     manager.update_session(&s1);
 
@@ -177,7 +198,10 @@ async fn test_provider_failures_and_unavailable() {
     assert!(stt.health().await.is_err());
     let dummy_audio = AudioInput::new(vec![], AudioFormat::default(), 100, "test");
     let transcribe_res = stt.transcribe(&dummy_audio).await;
-    assert!(matches!(transcribe_res, Err(VoiceError::TranscriptionFailed(_))));
+    assert!(matches!(
+        transcribe_res,
+        Err(VoiceError::TranscriptionFailed(_))
+    ));
 
     let tts = DummyFailingTts;
     assert!(tts.health().await.is_err());
@@ -224,14 +248,8 @@ fn test_audio_codec_corrupted_wav_fails_closed() {
 fn test_audio_constraints_and_duration_validation() {
     let format = AudioFormat::default();
     // 32000 samples at 16000Hz = 2000ms
-    let duration = AudioCodec::validate_constraints(
-        64000,
-        32000,
-        &format,
-        1024 * 1024,
-        5000,
-    )
-    .expect("Valid constraints");
+    let duration = AudioCodec::validate_constraints(64000, 32000, &format, 1024 * 1024, 5000)
+        .expect("Valid constraints");
     assert_eq!(duration, 2000);
 
     // Exceed max duration
@@ -246,10 +264,7 @@ fn test_audio_constraints_and_duration_validation() {
 
     // Exceed max bytes
     let size_err = AudioCodec::validate_constraints(
-        2000,
-        100,
-        &format,
-        1000, // max 1000 bytes
+        2000, 100, &format, 1000, // max 1000 bytes
         5000,
     );
     assert!(matches!(size_err, Err(VoiceError::AudioTooLarge { .. })));

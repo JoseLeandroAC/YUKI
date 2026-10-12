@@ -14,9 +14,11 @@ use yuki::voice::tts::{
 
 #[tokio::test]
 async fn test_stt_local_whisper_unconfigured_instructions_and_safety() {
-    let mut config = LocalWhisperConfig::default();
-    config.binary_path = None;
-    config.model_path = None;
+    let config = LocalWhisperConfig {
+        binary_path: None,
+        model_path: None,
+        ..Default::default()
+    };
 
     let provider = LocalWhisperSttProvider::new(config);
     assert!(!provider.is_environment_ready());
@@ -80,9 +82,11 @@ async fn test_tts_local_acoustic_real_synthesis() {
 
 #[tokio::test]
 async fn test_tts_local_piper_unconfigured_instructions() {
-    let mut config = LocalPiperConfig::default();
-    config.binary_path = None;
-    config.model_path = None;
+    let config = LocalPiperConfig {
+        binary_path: None,
+        model_path: None,
+        ..Default::default()
+    };
 
     let piper = LocalPiperTtsProvider::new(config);
     assert!(!piper.is_environment_ready());
@@ -124,7 +128,8 @@ fn test_voice_identity_contextual_adaptation() {
     let base_cfg = VoiceConfiguration::default();
 
     // Standard urgency
-    let adapted_std = identity.adapt_configuration(&base_cfg, None, Some(&ContextUrgency::Standard));
+    let adapted_std =
+        identity.adapt_configuration(&base_cfg, None, Some(&ContextUrgency::Standard));
     assert_eq!(adapted_std.speaking_rate, 1.0);
     assert_eq!(adapted_std.pitch, 1.0);
 
@@ -135,9 +140,11 @@ fn test_voice_identity_contextual_adaptation() {
     assert!(adapted_crit.pitch < 1.0);
 
     // Personality modulation
-    let mut profile = PersonalityProfile::default();
-    profile.warmth = 0.9;
-    profile.expressiveness = 0.8;
+    let profile = PersonalityProfile {
+        warmth: 0.9,
+        expressiveness: 0.8,
+        ..Default::default()
+    };
     let adapted_prof =
         identity.adapt_configuration(&base_cfg, Some(&profile), Some(&ContextUrgency::Standard));
     assert_ne!(adapted_prof.pitch, base_cfg.pitch);

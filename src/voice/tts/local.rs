@@ -85,8 +85,18 @@ impl LocalPiperTtsProvider {
     }
 
     pub fn is_environment_ready(&self) -> bool {
-        let bin_ok = self.config.binary_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
-        let model_ok = self.config.model_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+        let bin_ok = self
+            .config
+            .binary_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+        let model_ok = self
+            .config
+            .model_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
         bin_ok && model_ok
     }
 }
@@ -213,8 +223,9 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
                 )));
             }
 
-            let wav_bytes = std::fs::read(&temp_out)
-                .map_err(|e| VoiceError::Io(format!("Falha ao ler áudio gerado pelo piper: {}", e)))?;
+            let wav_bytes = std::fs::read(&temp_out).map_err(|e| {
+                VoiceError::Io(format!("Falha ao ler áudio gerado pelo piper: {}", e))
+            })?;
 
             let (format, samples) = AudioCodec::decode_wav(&wav_bytes)?;
             let duration_ms = ((samples.len() as u64) * 1000)

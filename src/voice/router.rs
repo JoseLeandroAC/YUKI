@@ -11,13 +11,13 @@ use std::sync::Arc;
 ///
 /// 1. Tenta prioritariamente o provedor local de maior soberania e menor latência.
 /// 2. Se o provedor local falhar ou estiver inacessível:
-///    a) Valida se o fallback em nuvem está habilitado nas configurações (`cloud_fallback_allowed`).
-///    b) Valida se o operador concedeu expressamente a permissão específica:
-///       - Para transcrição de áudio: `egress:voice_cloud_stt`
-///       - Para síntese de texto: `egress:voice_cloud_tts`
-///       (Essas permissões são formalmente desacopladas: permitir envio de texto não autoriza envio de áudio bruto).
-///    c) Somente após essa dupla verificação despacha a transmissão ao provedor externo.
-///    d) Se não autorizado, falha fechado mantendo a integridade e os limites de privacidade.
+///    - Valida se o fallback em nuvem está habilitado nas configurações (`cloud_fallback_allowed`).
+///    - Valida se o operador concedeu expressamente a permissão específica:
+///      - Para transcrição de áudio: `egress:voice_cloud_stt`
+///      - Para síntese de texto: `egress:voice_cloud_tts`
+///        (Essas permissões são formalmente desacopladas: permitir envio de texto não autoriza envio de áudio bruto).
+///    - Somente após essa dupla verificação despacha a transmissão ao provedor externo.
+///    - Se não autorizado, falha fechado mantendo a integridade e os limites de privacidade.
 pub struct GovernedVoiceRouter {
     local_stt: Arc<dyn SpeechToTextProvider>,
     cloud_stt: Option<Arc<dyn SpeechToTextProvider>>,

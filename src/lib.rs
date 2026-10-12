@@ -5,13 +5,13 @@ pub mod contracts;
 pub mod core;
 pub mod execution;
 pub mod memory;
+pub mod missions;
 pub mod models;
 pub mod persistence;
 pub mod personality;
 pub mod security;
 pub mod verification;
 pub mod voice;
-pub mod missions;
 
 pub use contracts::*;
 pub use core::*;

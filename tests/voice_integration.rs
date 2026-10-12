@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use yuki::contracts::voice::{
-    AudioFormat, AudioFrame, AudioInput, VoiceConfiguration, VoiceError,
-};
+use yuki::contracts::voice::{AudioFormat, AudioFrame, AudioInput, VoiceConfiguration, VoiceError};
 use yuki::core::yuki_core::YukiCore;
 use yuki::models::mock::MockModelProvider;
 use yuki::voice::audio::AudioCodec;
@@ -31,8 +29,10 @@ async fn test_governed_voice_router_local_first_cloud_only_when_authorized() {
         true,
     ));
 
-    let mut config = VoiceConfiguration::default();
-    config.cloud_fallback_allowed = false; // Política restritiva padrão
+    let config = VoiceConfiguration {
+        cloud_fallback_allowed: false,
+        ..Default::default()
+    };
 
     let router = GovernedVoiceRouter::new(
         failing_local_stt.clone(),
@@ -90,8 +90,10 @@ async fn test_governed_voice_router_stt_and_tts_permissions_isolated() {
         true,
     ));
 
-    let mut config = VoiceConfiguration::default();
-    config.cloud_fallback_allowed = true;
+    let config = VoiceConfiguration {
+        cloud_fallback_allowed: true,
+        ..Default::default()
+    };
 
     let router = GovernedVoiceRouter::new(
         failing_local_stt,
@@ -104,11 +106,17 @@ async fn test_governed_voice_router_stt_and_tts_permissions_isolated() {
     // Autorização de TTS NÃO autoriza STT
     let dummy_audio = AudioInput::new(vec![0u8; 100], AudioFormat::default(), 200, "test");
     let stt_res = router.transcribe(&dummy_audio, false).await;
-    assert!(matches!(stt_res, Err(VoiceError::UnauthorizedCloudFallback(_))));
+    assert!(matches!(
+        stt_res,
+        Err(VoiceError::UnauthorizedCloudFallback(_))
+    ));
 
     // Autorização de STT NÃO autoriza TTS
     let tts_res = router.synthesize("Texto de teste", false).await;
-    assert!(matches!(tts_res, Err(VoiceError::UnauthorizedCloudFallback(_))));
+    assert!(matches!(
+        tts_res,
+        Err(VoiceError::UnauthorizedCloudFallback(_))
+    ));
 
     // Autorização explícita de TTS
     let tts_ok = router.synthesize("Texto de teste", true).await;
@@ -129,11 +137,7 @@ async fn test_voice_conversation_button_turn_end_to_end() {
     let config = VoiceConfiguration::default();
 
     let router = Arc::new(GovernedVoiceRouter::new(
-        local_stt,
-        None,
-        local_tts,
-        None,
-        config,
+        local_stt, None, local_tts, None, config,
     ));
 
     let session_mgr = Arc::new(VoiceSessionManager::new());
@@ -161,7 +165,10 @@ async fn test_voice_conversation_button_turn_end_to_end() {
 
     assert!(result.content.contains("Yuki"));
     assert!(audio_output.duration_ms > 0);
-    assert_eq!(playback.status(), yuki::voice::playback::PlaybackStatus::Playing);
+    assert_eq!(
+        playback.status(),
+        yuki::voice::playback::PlaybackStatus::Playing
+    );
 }
 
 #[tokio::test]
@@ -204,13 +211,22 @@ fn test_voice_interruption_barge_in() {
 
     // Inicia reprodução
     playback.play(&dummy_output).unwrap();
-    assert_eq!(playback.status(), yuki::voice::playback::PlaybackStatus::Playing);
+    assert_eq!(
+        playback.status(),
+        yuki::voice::playback::PlaybackStatus::Playing
+    );
 
     // Usuário interrompe
     playback.interrupt().unwrap();
-    assert_eq!(playback.status(), yuki::voice::playback::PlaybackStatus::Interrupted);
+    assert_eq!(
+        playback.status(),
+        yuki::voice::playback::PlaybackStatus::Interrupted
+    );
 
     // Reset limpa
     playback.reset();
-    assert_eq!(playback.status(), yuki::voice::playback::PlaybackStatus::Idle);
+    assert_eq!(
+        playback.status(),
+        yuki::voice::playback::PlaybackStatus::Idle
+    );
 }

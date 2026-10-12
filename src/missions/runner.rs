@@ -51,10 +51,9 @@ impl MissionRunner {
 
     /// Executa as etapas elegíveis de uma missão até a conclusão ou até necessitar de aprovação humana.
     pub async fn run_mission(&self, mission_id: &str) -> Result<Mission, MissionError> {
-        let mut mission = self
-            .store
-            .get_mission(mission_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id)))?;
+        let mut mission = self.store.get_mission(mission_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id))
+        })?;
 
         if mission.status.is_terminal() {
             return Ok(mission);
@@ -86,14 +85,20 @@ impl MissionRunner {
             let completed_step_numbers: HashSet<u32> = mission
                 .steps
                 .iter()
-                .filter(|s| s.status == MissionStepStatus::Completed || s.status == MissionStepStatus::Skipped)
+                .filter(|s| {
+                    s.status == MissionStepStatus::Completed
+                        || s.status == MissionStepStatus::Skipped
+                })
                 .map(|s| s.step_number)
                 .collect();
 
             // Encontra o próximo passo elegível cujas dependências já foram satisfeitas
             let next_step_opt = mission.steps.iter().find(|s| {
-                (s.status == MissionStepStatus::Pending || s.status == MissionStepStatus::WaitingApproval)
-                    && s.dependencies.iter().all(|dep| completed_step_numbers.contains(dep))
+                (s.status == MissionStepStatus::Pending
+                    || s.status == MissionStepStatus::WaitingApproval)
+                    && s.dependencies
+                        .iter()
+                        .all(|dep| completed_step_numbers.contains(dep))
             });
 
             let next_step = match next_step_opt {
@@ -101,15 +106,18 @@ impl MissionRunner {
                 None => {
                     // Não há passos pendentes executáveis no momento
                     // Verifica se todos foram completados
-                    let all_done = mission
-                        .steps
-                        .iter()
-                        .all(|s| s.status == MissionStepStatus::Completed || s.status == MissionStepStatus::Skipped);
+                    let all_done = mission.steps.iter().all(|s| {
+                        s.status == MissionStepStatus::Completed
+                            || s.status == MissionStepStatus::Skipped
+                    });
 
                     if all_done {
                         mission.transition_to(MissionStatus::Completed)?;
-                        self.store
-                            .update_mission_status(&mission.id, MissionStatus::Completed, None)?;
+                        self.store.update_mission_status(
+                            &mission.id,
+                            MissionStatus::Completed,
+                            None,
+                        )?;
 
                         self.record_audit(
                             EventType::MissionCompleted,
@@ -127,38 +135,46 @@ impl MissionRunner {
             if next_step.requires_approval {
                 let is_approved = if let Some(app_id) = &next_step.approval_id {
                     let app_opt = self.store.get_approval(app_id)?;
-                    app_opt.map(|a| a.status == ApprovalStatus::Granted).unwrap_or(false)
+                    app_opt
+                        .map(|a| a.status == ApprovalStatus::Granted)
+                        .unwrap_or(false)
                 } else {
                     false
                 };
 
                 if !is_approved {
                     // Cria solicitação de aprovação se não existir
-                    let approval = if next_step.approval_id.is_none() {
-                        let app = self.approval_manager.request_approval(
-                            &mission.id,
-                            &next_step,
-                            &mission.operator_id,
-                            3600, // Validade de 1 hora
-                        )?;
-                        let mut updated_step = next_step.clone();
-                        updated_step.approval_id = Some(app.id.clone());
-                        updated_step.status = MissionStepStatus::WaitingApproval;
-                        self.store.save_step(&updated_step)?;
-                        app
-                    } else {
-                        self.store
-                            .get_approval(next_step.approval_id.as_ref().unwrap())?
-                            .unwrap()
+                    let approval = match &next_step.approval_id {
+                        None => {
+                            let app = self.approval_manager.request_approval(
+                                &mission.id,
+                                &next_step,
+                                &mission.operator_id,
+                                3600, // Validade de 1 hora
+                            )?;
+                            let mut updated_step = next_step.clone();
+                            updated_step.approval_id = Some(app.id.clone());
+                            updated_step.status = MissionStepStatus::WaitingApproval;
+                            self.store.save_step(&updated_step)?;
+                            app
+                        }
+                        Some(app_id) => self.store.get_approval(app_id)?.ok_or_else(|| {
+                            MissionError::NotFound(format!("Aprovação '{}' não encontrada", app_id))
+                        })?,
                     };
 
                     mission.transition_to(MissionStatus::AwaitingApproval)?;
-                    self.store
-                        .update_mission_status(&mission.id, MissionStatus::AwaitingApproval, None)?;
+                    self.store.update_mission_status(
+                        &mission.id,
+                        MissionStatus::AwaitingApproval,
+                        None,
+                    )?;
 
                     tracing::info!(
                         "Missão '{}' aguardando aprovação humana para a etapa {} ('{}')",
-                        mission.id, next_step.step_number, approval.id
+                        mission.id,
+                        next_step.step_number,
+                        approval.id
                     );
                     return Ok(mission);
                 }
@@ -181,12 +197,8 @@ impl MissionRunner {
         step: &MissionStep,
     ) -> Result<(), MissionError> {
         // 1. Marca etapa como Running
-        self.store.update_step_status(
-            &step.id,
-            MissionStepStatus::Running,
-            None,
-            None,
-        )?;
+        self.store
+            .update_step_status(&step.id, MissionStepStatus::Running, None, None)?;
 
         // 2. Executa capacidade associada (se houver)
         let output_val = if let Some(cap_name) = &step.capability_id {
@@ -201,14 +213,12 @@ impl MissionRunner {
                     ))
                 })?;
 
-            let exec_res = handler
-                .execute(&step.parameters)
-                .map_err(|e| {
-                    MissionError::ExecutionFailed(format!(
-                        "Falha na execução da capacidade '{}': {}",
-                        cap_name, e
-                    ))
-                })?;
+            let exec_res = handler.execute(&step.parameters).map_err(|e| {
+                MissionError::ExecutionFailed(format!(
+                    "Falha na execução da capacidade '{}': {}",
+                    cap_name, e
+                ))
+            })?;
 
             exec_res
         } else {
@@ -252,10 +262,9 @@ impl MissionRunner {
 
     /// Pausa uma missão em andamento.
     pub fn pause_mission(&self, mission_id: &str) -> Result<(), MissionError> {
-        let mut mission = self
-            .store
-            .get_mission(mission_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id)))?;
+        let mut mission = self.store.get_mission(mission_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id))
+        })?;
 
         mission.transition_to(MissionStatus::Paused)?;
         self.store
@@ -265,10 +274,9 @@ impl MissionRunner {
 
     /// Retoma uma missão pausada.
     pub async fn resume_mission(&self, mission_id: &str) -> Result<Mission, MissionError> {
-        let mut mission = self
-            .store
-            .get_mission(mission_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id)))?;
+        let mut mission = self.store.get_mission(mission_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id))
+        })?;
 
         if mission.status == MissionStatus::Paused {
             mission.transition_to(MissionStatus::InProgress)?;
@@ -281,10 +289,9 @@ impl MissionRunner {
 
     /// Cancela formalmente uma missão.
     pub fn cancel_mission(&self, mission_id: &str, reason: &str) -> Result<(), MissionError> {
-        let mut mission = self
-            .store
-            .get_mission(mission_id)?
-            .ok_or_else(|| MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id)))?;
+        let mut mission = self.store.get_mission(mission_id)?.ok_or_else(|| {
+            MissionError::NotFound(format!("Missão '{}' não encontrada", mission_id))
+        })?;
 
         mission.transition_to(MissionStatus::Cancelled)?;
         self.store

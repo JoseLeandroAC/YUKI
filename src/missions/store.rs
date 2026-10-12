@@ -331,7 +331,10 @@ impl SqliteMissionStore {
         let lock = self.conn.lock().unwrap();
         let params_json = serde_json::to_string(&step.parameters).unwrap_or_default();
         let deps_json = serde_json::to_string(&step.dependencies).unwrap_or_default();
-        let output_json = step.output_payload.as_ref().map(|o| serde_json::to_string(o).unwrap());
+        let output_json = step
+            .output_payload
+            .as_ref()
+            .map(|o| serde_json::to_string(o).unwrap());
         let status_json = serde_json::to_string(&step.status).unwrap();
 
         lock.execute(
@@ -402,7 +405,10 @@ impl SqliteMissionStore {
         Ok(())
     }
 
-    pub fn get_steps_for_mission(&self, mission_id: &str) -> Result<Vec<MissionStep>, MissionError> {
+    pub fn get_steps_for_mission(
+        &self,
+        mission_id: &str,
+    ) -> Result<Vec<MissionStep>, MissionError> {
         let lock = self.conn.lock().unwrap();
         let mut stmt = lock
             .prepare(
@@ -434,8 +440,8 @@ impl SqliteMissionStore {
                 let created_str: String = row.get(12)?;
                 let updated_str: String = row.get(13)?;
 
-                let parameters: serde_json::Value = serde_json::from_str(&params_str)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let parameters: serde_json::Value =
+                    serde_json::from_str(&params_str).unwrap_or_else(|_| serde_json::json!({}));
                 let status: MissionStepStatus = serde_json::from_str(&status_str)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 let dependencies: Vec<u32> = serde_json::from_str(&deps_str).unwrap_or_default();
@@ -517,7 +523,9 @@ impl SqliteMissionStore {
             "UPDATE mission_approvals SET status = ?1 WHERE id = ?2",
             params![status_json, approval_id],
         )
-        .map_err(|e| MissionError::Storage(format!("Falha ao atualizar status de aprovação: {}", e)))?;
+        .map_err(|e| {
+            MissionError::Storage(format!("Falha ao atualizar status de aprovação: {}", e))
+        })?;
 
         Ok(())
     }
@@ -617,8 +625,8 @@ impl SqliteMissionStore {
             let snapshot_str: String = row.get(3)?;
             let created_str: String = row.get(4)?;
 
-            let snapshot: serde_json::Value = serde_json::from_str(&snapshot_str)
-                .unwrap_or_else(|_| serde_json::json!({}));
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&snapshot_str).unwrap_or_else(|_| serde_json::json!({}));
             let created_at = DateTime::parse_from_rfc3339(&created_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;

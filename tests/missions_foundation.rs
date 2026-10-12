@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use yuki::capabilities::registry::CapabilityRegistry;
 use yuki::contracts::missions::{
-    ApprovalStatus, MissionError, MissionExecutionPolicy, MissionPlan, MissionStatus,
-    MissionStep, MissionStepStatus,
+    ApprovalStatus, MissionError, MissionExecutionPolicy, MissionPlan, MissionStatus, MissionStep,
+    MissionStepStatus,
 };
 use yuki::missions::approval::MissionApprovalManager;
 use yuki::missions::planner::MissionPlanner;
@@ -26,7 +26,9 @@ fn test_mission_state_transitions() {
     assert!(mission.transition_to(MissionStatus::InProgress).is_ok());
 
     // InProgress -> AwaitingApproval
-    assert!(mission.transition_to(MissionStatus::AwaitingApproval).is_ok());
+    assert!(mission
+        .transition_to(MissionStatus::AwaitingApproval)
+        .is_ok());
 
     // AwaitingApproval -> InProgress
     assert!(mission.transition_to(MissionStatus::InProgress).is_ok());
@@ -50,32 +52,106 @@ fn test_mission_plan_acyclic_and_cycle_detection() {
     let policy = MissionExecutionPolicy::default();
 
     // 1. Grafo linear válido: 1 -> 2 -> 3
-    let s1 = MissionStep::new("s1", "m", 1, "passo 1", None, serde_json::json!({}), false, vec![]);
-    let s2 = MissionStep::new("s2", "m", 2, "passo 2", None, serde_json::json!({}), false, vec![1]);
-    let s3 = MissionStep::new("s3", "m", 3, "passo 3", None, serde_json::json!({}), false, vec![2]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m",
+        1,
+        "passo 1",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![],
+    );
+    let s2 = MissionStep::new(
+        "s2",
+        "m",
+        2,
+        "passo 2",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
+    let s3 = MissionStep::new(
+        "s3",
+        "m",
+        3,
+        "passo 3",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![2],
+    );
     let plan = MissionPlan::new(vec![s1, s2, s3]);
     assert!(plan.validate(&policy).is_ok());
 
     // 2. Auto-dependência direta (passo 1 depende de si mesmo)
-    let bad1 = MissionStep::new("b1", "m", 1, "auto", None, serde_json::json!({}), false, vec![1]);
+    let bad1 = MissionStep::new(
+        "b1",
+        "m",
+        1,
+        "auto",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
     let bad_plan1 = MissionPlan::new(vec![bad1]);
-    assert!(matches!(bad_plan1.validate(&policy), Err(MissionError::CircularDependencyDetected(_))));
+    assert!(matches!(
+        bad_plan1.validate(&policy),
+        Err(MissionError::CircularDependencyDetected(_))
+    ));
 
     // 3. Ciclo indireto: 1 -> 2 -> 1
-    let c1 = MissionStep::new("c1", "m", 1, "p1", None, serde_json::json!({}), false, vec![2]);
-    let c2 = MissionStep::new("c2", "m", 2, "p2", None, serde_json::json!({}), false, vec![1]);
+    let c1 = MissionStep::new(
+        "c1",
+        "m",
+        1,
+        "p1",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![2],
+    );
+    let c2 = MissionStep::new(
+        "c2",
+        "m",
+        2,
+        "p2",
+        None,
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
     let cycle_plan = MissionPlan::new(vec![c1, c2]);
-    assert!(matches!(cycle_plan.validate(&policy), Err(MissionError::CircularDependencyDetected(_))));
+    assert!(matches!(
+        cycle_plan.validate(&policy),
+        Err(MissionError::CircularDependencyDetected(_))
+    ));
 
     // 4. Excesso de passos
     let mut many_steps = Vec::new();
     for i in 1..=20 {
-        many_steps.push(MissionStep::new(format!("s{}", i), "m", i, "p", None, serde_json::json!({}), false, vec![]));
+        many_steps.push(MissionStep::new(
+            format!("s{}", i),
+            "m",
+            i,
+            "p",
+            None,
+            serde_json::json!({}),
+            false,
+            vec![],
+        ));
     }
-    let mut strict_policy = MissionExecutionPolicy::default();
-    strict_policy.max_steps = 10;
+    let strict_policy = MissionExecutionPolicy {
+        max_steps: 10,
+        ..Default::default()
+    };
     let big_plan = MissionPlan::new(many_steps);
-    assert!(matches!(big_plan.validate(&strict_policy), Err(MissionError::StepLimitExceeded { .. })));
+    assert!(matches!(
+        big_plan.validate(&strict_policy),
+        Err(MissionError::StepLimitExceeded { .. })
+    ));
 }
 
 #[test]
@@ -104,7 +180,12 @@ fn test_mission_sqlite_persistence_and_recovery() {
 
     // Altera passo 1 para Running para simular crash durante execução
     store
-        .update_step_status("m-test-recovery_step_1", MissionStepStatus::Running, None, None)
+        .update_step_status(
+            "m-test-recovery_step_1",
+            MissionStepStatus::Running,
+            None,
+            None,
+        )
         .unwrap();
     store
         .update_mission_status("m-test-recovery", MissionStatus::InProgress, None)
@@ -147,14 +228,21 @@ fn test_mission_human_approval_protocol_strictness() {
 
     // 3. Operador incorreto tenta aprovar -> Falha
     let wrong_op_res = approval_mgr.grant_approval(&approval.id, "hacker");
-    assert!(matches!(wrong_op_res, Err(MissionError::ApprovalMismatch(_))));
+    assert!(matches!(
+        wrong_op_res,
+        Err(MissionError::ApprovalMismatch(_))
+    ));
 
     // 4. Operador legítimo aprova
-    let granted = approval_mgr.grant_approval(&approval.id, "operator-1").unwrap();
+    let granted = approval_mgr
+        .grant_approval(&approval.id, "operator-1")
+        .unwrap();
     assert_eq!(granted.status, ApprovalStatus::Granted);
 
     // 5. Verificação com parâmetros originais -> Sucesso
-    assert!(approval_mgr.verify_step_approval(&step_with_id, "operator-1").is_ok());
+    assert!(approval_mgr
+        .verify_step_approval(&step_with_id, "operator-1")
+        .is_ok());
 
     // 6. Mutação adversarial de parâmetros após aprovação -> Rejeita imediatamente!
     let mut tampered_step = step_with_id.clone();
@@ -217,7 +305,9 @@ async fn test_mission_runner_end_to_end_research_mission() {
     let app_id = steps[2].approval_id.as_ref().unwrap();
 
     // 2. Operador concede aprovação formal para a etapa 3
-    approval_mgr.grant_approval(app_id, "operator-jose").unwrap();
+    approval_mgr
+        .grant_approval(app_id, "operator-jose")
+        .unwrap();
 
     // 3. Retoma execução da missão após aprovação humana
     let final_mission = runner.run_mission(&mission.id).await.unwrap();
@@ -248,8 +338,26 @@ async fn test_mission_pause_resume_cancel() {
         None,
     );
 
-    let s1 = MissionStep::new("s1", "m_pause", 1, "step 1", Some("system.echo".to_string()), serde_json::json!({}), false, vec![]);
-    let s2 = MissionStep::new("s2", "m_pause", 2, "step 2", Some("system.echo".to_string()), serde_json::json!({}), false, vec![1]);
+    let s1 = MissionStep::new(
+        "s1",
+        "m_pause",
+        1,
+        "step 1",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        false,
+        vec![],
+    );
+    let s2 = MissionStep::new(
+        "s2",
+        "m_pause",
+        2,
+        "step 2",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        false,
+        vec![1],
+    );
     let plan = MissionPlan::new(vec![s1, s2]);
 
     let mission = MissionPlanner::default()
@@ -267,7 +375,9 @@ async fn test_mission_pause_resume_cancel() {
     assert_eq!(m.status, MissionStatus::Paused);
 
     // Cancelar
-    runner.cancel_mission("m_pause", "Cancelado pelo usuário").unwrap();
+    runner
+        .cancel_mission("m_pause", "Cancelado pelo usuário")
+        .unwrap();
     let m = store.get_mission("m_pause").unwrap().unwrap();
     assert_eq!(m.status, MissionStatus::Cancelled);
     assert_eq!(m.failure_reason, Some("Cancelado pelo usuário".to_string()));

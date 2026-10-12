@@ -35,8 +35,14 @@ impl MissionStatus {
         use MissionStatus::*;
         match (self, next) {
             // Qualquer estado não terminal pode ser Cancelado ou Falhar
-            (Planned, Cancelled) | (InProgress, Cancelled) | (AwaitingApproval, Cancelled) | (Paused, Cancelled) => true,
-            (Planned, Failed) | (InProgress, Failed) | (AwaitingApproval, Failed) | (Paused, Failed) => true,
+            (Planned, Cancelled)
+            | (InProgress, Cancelled)
+            | (AwaitingApproval, Cancelled)
+            | (Paused, Cancelled) => true,
+            (Planned, Failed)
+            | (InProgress, Failed)
+            | (AwaitingApproval, Failed)
+            | (Paused, Failed) => true,
 
             // Planned -> InProgress ou Paused
             (Planned, InProgress) => true,
@@ -95,18 +101,18 @@ impl fmt::Display for MissionStepStatus {
 impl MissionStepStatus {
     pub fn can_transition_to(&self, next: &MissionStepStatus) -> bool {
         use MissionStepStatus::*;
-        match (self, next) {
-            (Pending, Running) => true,
-            (Pending, WaitingApproval) => true,
-            (Pending, Skipped) => true,
-            (WaitingApproval, Running) => true,
-            (WaitingApproval, Skipped) => true,
-            (WaitingApproval, Failed) => true,
-            (Running, Completed) => true,
-            (Running, Failed) => true,
-            (Running, WaitingApproval) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (Pending, Running)
+                | (Pending, WaitingApproval)
+                | (Pending, Skipped)
+                | (WaitingApproval, Running)
+                | (WaitingApproval, Skipped)
+                | (WaitingApproval, Failed)
+                | (Running, Completed)
+                | (Running, Failed)
+                | (Running, WaitingApproval)
+        )
     }
 }
 
@@ -162,6 +168,7 @@ pub struct MissionStep {
 }
 
 impl MissionStep {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         mission_id: impl Into<String>,
@@ -446,11 +453,7 @@ impl MissionPlan {
             visited.insert(node, 0);
         }
 
-        fn dfs(
-            node: u32,
-            adj: &HashMap<u32, Vec<u32>>,
-            visited: &mut HashMap<u32, i32>,
-        ) -> bool {
+        fn dfs(node: u32, adj: &HashMap<u32, Vec<u32>>, visited: &mut HashMap<u32, i32>) -> bool {
             visited.insert(node, 1);
             if let Some(neighbors) = adj.get(&node) {
                 for &neighbor in neighbors {

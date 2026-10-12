@@ -96,9 +96,7 @@ impl AudioCodec {
         })?;
 
         let samples = data_samples.ok_or_else(|| {
-            VoiceError::InvalidAudioFormat(
-                "Chunk 'data' não encontrado no arquivo WAV".to_string(),
-            )
+            VoiceError::InvalidAudioFormat("Chunk 'data' não encontrado no arquivo WAV".to_string())
         })?;
 
         Ok((format, samples))
@@ -189,7 +187,10 @@ impl AudioCodec {
     pub fn count_clipping(samples: &[i16], threshold: i16) -> usize {
         let pos_thresh = threshold.saturating_abs();
         let neg_thresh = -pos_thresh;
-        samples.iter().filter(|&&s| s >= pos_thresh || s <= neg_thresh).count()
+        samples
+            .iter()
+            .filter(|&&s| s >= pos_thresh || s <= neg_thresh)
+            .count()
     }
 
     /// Valida restrições de tamanho em bytes e duração em milissegundos.
@@ -213,8 +214,8 @@ impl AudioCodec {
             ));
         }
 
-        let duration_ms = ((samples_len as u64) * 1000)
-            / (format.sample_rate as u64 * format.channels as u64);
+        let duration_ms =
+            ((samples_len as u64) * 1000) / (format.sample_rate as u64 * format.channels as u64);
 
         if duration_ms > max_duration_ms {
             return Err(VoiceError::AudioTooLong {

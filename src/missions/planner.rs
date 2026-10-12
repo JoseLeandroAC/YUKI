@@ -24,6 +24,7 @@ impl MissionPlanner {
     }
 
     /// Cria uma nova missão a partir de um objetivo, plano e operador.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_mission(
         &self,
         mission_id: impl Into<String>,
@@ -77,7 +78,7 @@ impl MissionPlanner {
             "Sintetizar achados técnicos com fontes e citações verificáveis",
             Some("system.echo".to_string()),
             serde_json::json!({ "message": format!("Relatório Técnico de Fontes para: {}", query) }),
-            false, // Síntese interna não mutadora
+            false,   // Síntese interna não mutadora
             vec![1], // Depende do passo 1
         );
 
@@ -85,10 +86,13 @@ impl MissionPlanner {
             format!("{}_step_3", mission_id),
             mission_id,
             3,
-            format!("Gravar relatório consolidado no arquivo '{}' do operador", target_file),
+            format!(
+                "Gravar relatório consolidado no arquivo '{}' do operador",
+                target_file
+            ),
             Some("system.echo".to_string()),
             serde_json::json!({ "message": format!("Gravação aprovada no arquivo: {}", target_file) }),
-            true, // Efeito externo mutador EXIGE aprovação humana!
+            true,    // Efeito externo mutador EXIGE aprovação humana!
             vec![2], // Depende do passo 2
         );
 

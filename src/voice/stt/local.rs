@@ -42,7 +42,14 @@ impl Default for LocalWhisperConfig {
 
 fn which_whisper() -> Option<PathBuf> {
     // Procura por executáveis conhecidos whisper.cpp / whisper
-    let candidates = ["whisper-cli.exe", "whisper.exe", "whisper-cli", "whisper", "main.exe", "main"];
+    let candidates = [
+        "whisper-cli.exe",
+        "whisper.exe",
+        "whisper-cli",
+        "whisper",
+        "main.exe",
+        "main",
+    ];
     for name in &candidates {
         if let Ok(path) = std::env::var("PATH") {
             for dir in std::env::split_paths(&path) {
@@ -94,8 +101,18 @@ impl LocalWhisperSttProvider {
     }
 
     pub fn is_environment_ready(&self) -> bool {
-        let bin_ok = self.config.binary_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
-        let model_ok = self.config.model_path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+        let bin_ok = self
+            .config
+            .binary_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
+        let model_ok = self
+            .config
+            .model_path
+            .as_ref()
+            .map(|p| p.is_file())
+            .unwrap_or(false);
         bin_ok && model_ok
     }
 }
@@ -223,7 +240,10 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
             let output_res = match tokio::time::timeout(timeout_duration, join_handle).await {
                 Ok(join_res) => match join_res {
                     Ok(cmd_res) => cmd_res.map_err(|e| {
-                        VoiceError::TranscriptionFailed(format!("Erro ao executar processo whisper: {}", e))
+                        VoiceError::TranscriptionFailed(format!(
+                            "Erro ao executar processo whisper: {}",
+                            e
+                        ))
                     })?,
                     Err(join_err) => {
                         return Err(VoiceError::TranscriptionFailed(format!(
@@ -249,7 +269,9 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
                 )));
             }
 
-            let text = String::from_utf8_lossy(&output_res.stdout).trim().to_string();
+            let text = String::from_utf8_lossy(&output_res.stdout)
+                .trim()
+                .to_string();
             Ok(text)
         })
     }

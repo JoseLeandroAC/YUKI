@@ -6,10 +6,7 @@ pub enum WakeWordDetection {
     /// Nenhuma palavra de ativação detectada no quadro.
     None,
     /// Palavra de ativação "Yuki" detectada com o score de confiança especificado.
-    Detected {
-        confidence: f32,
-        timestamp_ms: u64,
-    },
+    Detected { confidence: f32, timestamp_ms: u64 },
 }
 
 /// Detector soberano e 100% local da palavra de ativação "Yuki".
