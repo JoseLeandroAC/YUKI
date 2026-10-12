@@ -97,7 +97,7 @@ impl VoiceConversationCoordinator {
             .transcribe(&audio_input, allow_cloud_stt)
             .await?;
 
-        // Registra evento de auditoria VoiceInputReceived
+        // Registra evento de auditoria VoiceInputReceived (minimização de dados: apenas metadados técnicos)
         self.record_audit_event(
             EventType::VoiceInputReceived,
             serde_json::json!({
@@ -105,7 +105,7 @@ impl VoiceConversationCoordinator {
                 "duration_ms": audio_input.duration_ms,
                 "sample_rate": audio_input.format.sample_rate,
                 "text_char_count": transcribed_text.chars().count(),
-                "transcribed_text": transcribed_text,
+                "source": audio_input.source,
             }),
         )
         .await;
