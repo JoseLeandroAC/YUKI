@@ -1,16 +1,16 @@
 Yuki — Status Atual do Projeto
 
-Última atualização: 2026-10-11
-Status geral: Marco 7.2 (Hardening Final, Integridade e Validação Independente) — Fechamento Definitivo concluído, testado e validado; 443 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 447 testes; 0 falhas) no workspace
+Última atualização: 2026-10-12
+Status geral: Marco 8 (Voice v1 & Missions Foundation) — Implementação Completa, Integrada, Testada e Validada; 528 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 532 testes; 0 falhas) no workspace
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/marco-7.2-hardening"
-Baselines preservados: "v0.1.0-foundation" (654c181) e "v0.2.0-mvp1" (6a9d070)
+Branch de trabalho: "feature/marco-8-voice-missions"
+Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070) e "marco-7.2-final" (961be2c)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução) e o **Marco 7.2 (Hardening Final, Integridade e Validação Independente)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente) e o **Marco 8 (Voice v1 & Missions Foundation)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -18,16 +18,17 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7 (Personal Context v1):** `PersonalContextBuilder` com orçamento estrito de caracteres/tokens e priorização em 5 camadas (Diretrizes, Identidade, Memória de Trabalho, Perfil/Preferências, Fatos/Episódica), auditado via `ContextBuilt`;
 - **Marco 7 (Personality v1):** Identidade estável de 3 camadas com salvaguardas ontológicas imutáveis contra simulação de consciência humana (`YUKI_CORE_IDENTITY_DIRECTIVES`), perfil tipado com padrão canônico `Yuki Default` e adaptação contextual dinâmica (`ContextUrgency`);
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
-- **Marco 7.2 (Hardening Final, Integridade e Validação Independente):**
-  1. Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), eliminando heurísticas frágeis de tempo e validado contra 5 cenários multiprocesso reais entre processos independentes de SO (exclusão mútua com `ProcessLockBusy`, lock mantido > 6s sem roubo ou expiração indevida, liberação normal, crash abrupto por `abort()` com liberação imediata pelo kernel, e múltiplos escritores concorrentes com recarregamento sob lock preservando integridade);
-  2. Proteção contra adoção silenciosa de senha arbitrária na migração de cofres legados vazios (`UnverifiableLegacyVault`), exigindo intervenção administrativa explícita (`initialize_unverifiable_legacy`);
-  3. Proteção nativa de permissões de arquivos restritas e verificáveis (`0o600` em Unix com checagem de modo pós-aplicação; e obtenção do SID exato via `whoami /user`, remoção de herança `/inheritance:r` e concessão exclusiva `/grant:r <target>:(F)` com verificação ativa de permissões efetivas no Windows; além de arquivos temporários criados diretamente com `share_mode(0)` e `mode(0o600)`);
-  4. Suíte de concorrência com asserção estrita de `ProcessLockBusy` em todas as plataformas;
-  5. Propagação estrita de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com emissão de `MemoryRetrievalFailed` e `YukiError::ExecutionFailed` sem fallback silencioso;
-  6. Orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers ontológicos, integrado diretamente no caminho de produção de `YukiCore::process_input_internal`, protegendo inviolavelmente as Instruções Essenciais de Sistema (Tier 1), descontando delimitadores e avisos de truncamento sem mascaramento por `saturating_sub`, falhando fechado com erros tipados (`UserTurnExceedsBudget`, `EssentialInstructionsExceedBudget`) e registrando auditoria em `PersonalityApplied`;
-  7. Defesa ativa contra injeção e quebra de delimitadores em memórias (`sanitize_untrusted_memory_content`), com neutralização insensível a maiúsculas/minúsculas e tolerante a espaços para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`);
-  8. Orçamento Integral de Prompt Refinado: Remoção de piso artificial de 500 chars em `effective_input_char_limit` (limite estrito fail-closed para janelas restritas); truncamento real de Tier 2 Personality quando exceder o orçamento restante (preservando o núcleo de identidade prioritariamente e registrando em `truncated_tiers` exclusivamente quando houver redução efetiva); contabilização antecipada de overhead e esquemas de declaração de ferramentas (`tool_declarations_chars`), com propagação fail-closed de erros de serialização sem mascaramento `unwrap_or(0)`;
-  9. Consistência Transacional Estrita do Vault: Distinção explícita entre criação legítima inicial, desaparecimento inesperado de arquivo em instância ativa (`VaultError::VaultFileDisappeared`), arquivo inacessível (`VaultError::Io`) e substituição não autorizada (`VaultError::VaultSubstituted`), com recarregamento sob lock exclusivo sem recriação automática e sem sobrescrita do disco por estado em memória.
+- **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
+- **Marco 8 (Voice v1 & Missions Foundation):**
+  1. **Voice v1 (Contratos, Codec e Sessão):** `AudioFormat`, `AudioFrame`, `AudioInput`, `AudioOutput`, codec puro em Rust `AudioCodec` (codificação/decodificação RIFF/WAV PCM linear, validação estrita de duração e limites com rejeição fail-closed de corrupção ou clipping) e `VoiceSessionManager` com máquina de estados de sessão de áudio protegida contra transições ilegais;
+  2. **STT Local (Whisper):** `LocalWhisperSttProvider` integrando `whisper.cpp` com execução segura isolada, limites de áudio por turno (30s) e tratamento determinístico de ausência de binários;
+  3. **TTS Local (Piper & Acústico):** Identidade vocal feminina `VoiceIdentity` (tom caloroso e competente sem simulação biológica, adaptação de prosódia para urgência e estilo de personalidade), motor neural `LocalPiperTtsProvider` e fallback determinístico puro em Rust `LocalAcousticTtsProvider` (F0 melódico de 220Hz com formantes e vibrato natural);
+  4. **Roteamento Híbrido Governado:** `GovernedVoiceRouter` sob o princípio "Local First — Cloud Only When Authorized", com desacoplamento formal de permissões (autorização de envio de texto não autoriza envio de áudio bruto capturado);
+  5. **Wake Word & Barge-In:** Detector offline de palavra-chave "Yuki" (`WakeWordDetector`) e controlador de reprodução segura (`AudioPlaybackController`) com cancelamento instantâneo da fala da Yuki quando o operador começa a falar;
+  6. **Conversação Bidirecional por Voz:** Coordenador assíncrono `VoiceConversationCoordinator` conectando captura, transcrição, núcleo cognitivo governado, síntese e reprodução;
+  7. **Missions Foundation (DAG, Persistência e Portões):** Contratos de missões em grafos acíclicos dirigidos (DAG) com validação de limites de passos e detecção de ciclos topológicos (`MissionPlan::validate`), armazenamento relacional atômico SQLite (`SqliteMissionStore`), protocolo criptográfico de aprovação humana vinculada a hash SHA-256 e operador (`MissionApprovalManager`), executor por etapas com checkpoints duráveis (`MissionRunner`) e reconciliação durável após desligamento/queda (`reconcile_and_recover_on_startup`);
+  8. **CLI Administrativa de Missões e Voz:** Subcomandos integrados `yuki mission [list|show|approve|deny|pause|resume|cancel|run|create-research]` e `yuki voice [status|speak|listen]`;
+  9. **Suíte Adversarial Completa do Marco 8:** 45 cenários adversariais passando 100% cobrindo áudios gigantes, ruído/clipping, injeção de prompt em transcrição, dependências circulares de DAG, violação de hash de parâmetros, expiração de aprovações e integridade de isolamento.
 
 A situação atual pode ser resumida como:
 
@@ -39,13 +40,13 @@ CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
 FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-RESEARCH V1, MARCOS 6, 7, 7.1 & 7.2
+RESEARCH V1, MARCOS 6, 7, 7.1, 7.2 & 8
 ████████████████████████████████████████
 IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-455 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 459 TESTES)
+528 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 532 TESTES)
 
 
 ---

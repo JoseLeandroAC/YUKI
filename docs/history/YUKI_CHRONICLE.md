@@ -1134,4 +1134,66 @@ Durante a auditoria pós-fechamento do commit `67cb447`, foram solucionadas duas
 - **Classificação:**
   - **MARCO 7.2 (HARDENING FINAL, INTEGRIDADE E VALIDAÇÃO INDEPENDENTE) — CONCLUÍDO, AUDITADO E VALIDADO DEFINITIVAMENTE**.
 
+---
+
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8 — Voice v1 & Missions Foundation
+
+- **Branch**: `feature/marco-8-voice-missions`
+- **Baseline Auditada**: `961be2c` (Marco 7.2 final)
+- **Contexto**: Implementação da fundação de conversação por voz bidirecional (local-first) e do motor transacional de missões em grafos acíclicos dirigidos (DAG) com portão de aprovação humana criptográfica.
+
+##### 1. O que se pretendia
+Transformar a Yuki em uma inteligência verdadeiramente multimodal e agentic sem comprometer sua soberania e princípios constitucionais. O subsistema de voz deveria operar sob a filosofia "Local First — Cloud Only When Authorized", com síntese neural feminina calorosa e competente sem simulação biológica de consciência, detecção offline de palavra-chave ("Yuki") e suporte a interrupção instantânea (barge-in). O subsistema de missões deveria possibilitar planos complexos compostos em DAG, com persistência relacional atômica no SQLite, checkpoints por etapa, recuperação durável pós-falha e subordinação absoluta a portões de aprovação humana com validação de parâmetros via hash SHA-256.
+
+##### 2. O que foi implementado e consolidado no Marco 8
+1. **Contratos de Áudio, Codec e Gerenciamento de Sessão (`src/contracts/voice.rs`, `src/voice/audio.rs` e `src/voice/session.rs`):**
+   - Tipos canônicos `AudioFormat`, `AudioFrame`, `AudioInput`, `AudioOutput`, `VoiceConfiguration` e `VoiceSessionState`.
+   - Codec puro em Rust `AudioCodec` para codificação e decodificação do padrão RIFF/WAV PCM linear (16 kHz, 16-bit mono), com cálculo exato de duração, verificação de saturação/clipping e validação estrita de integridade contra áudios truncados ou corrompidos.
+   - `VoiceSessionManager` gerenciando o ciclo de vida concorrente de sessões com máquina de estados imutável (`Idle -> WakeListening -> Capturing -> Transcribing -> Processing -> Synthesizing -> Speaking -> WakeListening`) e prevenção de transições ilegais.
+2. **Reconhecimento de Fala Local (Whisper STT - `src/voice/stt/local.rs`):**
+   - `LocalWhisperSttProvider` integrando inferência local via `whisper.cpp` com validação de binários e modelos GGML, execução subprocessada segura, limite de 30 segundos por turno e tratamento determinístico de ausência de dependências externas.
+3. **Identidade Vocal e Síntese de Voz Local (Piper & Acústico - `src/voice/tts/`):**
+   - `VoiceIdentity`: identidade vocal feminina natural, calorosa e competente, com rejeição expressa a fingimento biológico (`avoid_biological_feigning: true`) e adaptação dinâmica de prosódia para urgência e estilo de personalidade.
+   - `LocalPiperTtsProvider`: integração local ao motor neural Piper com vozes em português brasileiro (ONNX).
+   - `LocalAcousticTtsProvider`: fallback paramétrico determinístico em Rust puro com frequência fundamental de F0 = 220 Hz, harmônicos formânticos e modulação sutil de vibrato, garantindo síntese funcional sem nenhuma dependência externa instalada.
+4. **Roteamento Híbrido Governado (`src/voice/router.rs`):**
+   - `GovernedVoiceRouter`: aplicação estrita do princípio "Local First — Cloud Only When Authorized", exigindo dupla verificação (configuração de fallback ativa e autorização explícita de egress).
+   - Desacoplamento formal de permissões: autorização de envio de texto (`egress:voice_cloud_tts`) **nunca** autoriza o envio de áudio bruto capturado (`egress:voice_cloud_stt`).
+5. **Palavra de Ativação Soberana e Barge-In (`src/voice/wakeword.rs` e `src/voice/playback.rs`):**
+   - `WakeWordDetector`: detecção contínua e offline da palavra de ativação "Yuki" com análise de energia e espectro sem dependência de nuvem.
+   - `AudioPlaybackController`: controle atômico de reprodução com suporte a interrupção instantânea (barge-in) no momento em que o operador começa a falar.
+6. **Coordenador de Conversação Bidirecional (`src/voice/conversation.rs`):**
+   - `VoiceConversationCoordinator`: orquestração assíncrona conectando captura, transcrição governada, núcleo cognitivo `YukiCore`, síntese de resposta e reprodução áudio.
+7. **Contratos de Missões e Grafo Acíclico Dirigido (`src/contracts/missions.rs` e `src/missions/planner.rs`):**
+   - Contratos estruturais `Mission`, `MissionStep`, `MissionPlan`, `MissionExecutionPolicy`, `MissionCheckpoint` e `MissionApproval`.
+   - Validador topológico formal de DAG (`plan.validate`) com detecção estrita de ciclos, prevenção de auto-dependência, dependências inexistentes e garantia de limites máximos de etapas configurados na política.
+8. **Persistência Relacional SQLite e Checkpoints Duráveis (`src/missions/store.rs`):**
+   - `SqliteMissionStore`: armazenamento atômico com transações ACID no SQLite, consultas estruturadas de passos e aprovações, e checkpoints duráveis após cada etapa concluída.
+   - Reconciliação Soberana no Startup (`reconcile_and_recover_on_startup`): missões interrompidas abruptamente por encerramento de processo têm suas etapas em `Running` revertidas com segurança para `Pending` e o status da missão ajustado para `Paused`, prevenindo repetição involuntária de mutações externas.
+9. **Portão Humano e Protocolo Criptográfico de Aprovação (`src/missions/approval.rs`):**
+   - `MissionApprovalManager`: vinculação criptográfica obrigatória via hash SHA-256 dos parâmetros da operação, operador autorizado e tempo de expiração.
+   - Bloqueio intransigente contra adulteração de parâmetros, aprovações expiradas ou aprovação por operadores não autorizados.
+10. **Executor de Missões com Checkpoints (`src/missions/runner.rs`):**
+    - `MissionRunner`: motor assíncrono que navega topologicamente pelo grafo, pausa a missão em `AwaitingApproval` ao atingir etapas mutadoras, e retoma após aprovação formal registrada.
+11. **Interface de Linha de Comando (CLI - `src/main.rs`):**
+    - Subcomandos de missões: `yuki mission list`, `yuki mission show`, `yuki mission approve`, `yuki mission deny`, `yuki mission pause`, `yuki mission resume`, `yuki mission cancel`, `yuki mission run` e `yuki mission create-research`.
+    - Subcomandos de voz: `yuki voice status`, `yuki voice speak` e `yuki voice listen`.
+
+##### 3. Suíte de Testes e Validação Adversarial
+- **Suíte Adversarial Dedicada (`tests/marco_8_adversarial.rs`):**
+  - **45 cenários adversariais** implementados e 100% aprovados, cobrindo:
+    - Grupo 1 (Áudio e Voz): áudio vazio/corrompido, áudios gigantes excedendo limites, formatos não suportados, concorrência de microfone, falhas de STT/TTS, timeout de áudio, cancelamento de sessão durante captura, interrupção imediata por barge-in, falsos positivos de ruído na wake word, repetições de wake word, ruído com clipping, bloqueio de fallback não autorizado para nuvem, falha de rede em nuvem autorizada, injeção de prompt dentro de áudio e rejeição de aprovação oral de missão.
+    - Grupo 2 (Missões e DAG): capacidade inexistente tratada no runner, dependência circular em DAG, estouro de limite de etapas, parada no portão humano, rejeição de aprovação expirada, detecção de adulteração de hash SHA-256 de parâmetros, rejeição de reuso de aprovação antiga, concorrência de aprovações, cancelamento de missão, pausa e retomada de missão, recuperação de checkpoints, rollback em falhas de persistência, efeitos externos com resultado desconhecido (Unknown), injeção de SQL/prompt em parâmetros, tentativa de escalação de privilégios de operador, vazamento de credenciais em payloads de missão, detecção de loops infinitos no DAG e reconciliação soberana de inicialização.
+    - Grupo 3 (Invariantes e Integração): preservação da conversação em texto puro, preservação das políticas de memória e esquecimento, respeito integral ao orçamento contextual, capacidades contidas em seus domínios, ausência de segredos em eventos de auditoria, cofre de credenciais intacto, identidade vocal preservada, respeito às políticas de privacidade, validação determinística de hash SHA-256, prevenção de replay de etapas mutadoras e garantia da invariante ontológica `Modelo Propõe != Sistema Executa`.
+- **Métricas Finais de Testes:**
+  - Total de testes no workspace: **528 testes ativos aprovados** (4 testes live opt-in ignorados, 0 falhas).
+  - Portões de qualidade:
+    - `cargo fmt --all -- --check`: 100% aderente.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: zero warnings e zero erros.
+    - `cargo build --release`: compilação limpa concluída.
+
+##### 4. Classificação
+- **MARCO 8 (VOICE V1 & MISSIONS FOUNDATION) — IMPLEMENTADO, ADVERSARIALMENTE TESTADO, INTEGRADO E VALIDADO**.
+
 

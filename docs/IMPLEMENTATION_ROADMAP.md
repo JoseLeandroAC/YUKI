@@ -65,7 +65,7 @@ Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente — Fech
 ████████████████████████████████████████  implementado e validado (455 testes ativos aprovados, 4 live opt-in ignorados, totalizando 459 testes; 38/38 testes de hardening no Marco 7.2, concorrência multiprocesso, permissões DACL/0600, orçamento integral de prompt com overhead exato de ferramentas sem unwrap, transacionalidade estrita do vault com tratamento de desaparecimento e substituição de arquivo)
 
 Yuki Marco 8 (Voice v1 & Missions Foundation)
-🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)
+████████████████████████████████████████  implementado, testado e validado (528 testes ativos aprovados, 4 live opt-in ignorados, totalizando 532 testes; Voice v1 local-first, Whisper STT, Piper TTS e acústico fallback, identidade vocal adaptativa, detecção soberana de palavra-chave 'Yuki', barge-in, conversação bidirecional, DAG de missões acíclico com validação estrita, persistência SQLite durável, portão humano criptográfico SHA-256, checkpoints e reconciliação de inicialização)
 
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
