@@ -1,5 +1,5 @@
 use crate::contracts::voice::VoiceConfiguration;
-use crate::personality::adapter::ContextUrgency;
+pub use crate::personality::adapter::ContextUrgency;
 use crate::personality::profile::PersonalityProfile;
 use serde::{Deserialize, Serialize};
 

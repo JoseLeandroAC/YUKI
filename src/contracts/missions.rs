@@ -288,6 +288,23 @@ pub struct MissionCheckpoint {
     pub created_at: DateTime<Utc>,
 }
 
+impl MissionCheckpoint {
+    pub fn new(
+        id: impl Into<String>,
+        mission_id: impl Into<String>,
+        step_number: u32,
+        snapshot: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            mission_id: mission_id.into(),
+            step_number,
+            snapshot,
+            created_at: now_utc(),
+        }
+    }
+}
+
 /// Entidade raiz de uma Missão na Yuki.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mission {

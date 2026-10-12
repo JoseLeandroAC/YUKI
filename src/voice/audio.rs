@@ -187,7 +187,9 @@ impl AudioCodec {
 
     /// Conta quantas amostras atingiram os limites extremos de saturação (clipping).
     pub fn count_clipping(samples: &[i16], threshold: i16) -> usize {
-        samples.iter().filter(|&&s| s.abs() >= threshold).count()
+        let pos_thresh = threshold.saturating_abs();
+        let neg_thresh = -pos_thresh;
+        samples.iter().filter(|&&s| s >= pos_thresh || s <= neg_thresh).count()
     }
 
     /// Valida restrições de tamanho em bytes e duração em milissegundos.

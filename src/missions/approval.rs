@@ -129,6 +129,19 @@ impl MissionApprovalManager {
             .store
             .get_approval(approval_id)?
             .ok_or_else(|| MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id)))?;
+        if approval.status != ApprovalStatus::Pending {
+            return Err(MissionError::ApprovalMismatch(format!(
+                "Aprovação '{}' não está pendente (status atual: {:?})",
+                approval_id, approval.status
+            )));
+        }
+
+        if approval.operator_id != operator_id {
+            return Err(MissionError::ApprovalMismatch(format!(
+                "Operador '{}' não autorizado a rejeitar aprovação vinculada ao operador '{}'",
+                operator_id, approval.operator_id
+            )));
+        }
 
         approval.status = ApprovalStatus::Denied;
         self.store
