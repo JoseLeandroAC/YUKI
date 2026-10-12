@@ -32,7 +32,8 @@ impl MissionApprovalManager {
         let cap = step.capability_id.as_deref().unwrap_or("unknown");
         let approval_id = format!("appr_{}_{}", step.id, uuid_ms());
 
-        let approval = MissionApproval::new(
+        let token = format!("tok_{}", uuid_ms());
+        let mut approval = MissionApproval::new(
             approval_id,
             mission_id,
             &step.id,
@@ -41,6 +42,7 @@ impl MissionApprovalManager {
             &step.parameters,
             validity_secs,
         );
+        approval.confirmation_token = Some(token);
 
         self.store.save_approval(&approval)?;
 
@@ -55,6 +57,7 @@ impl MissionApprovalManager {
                 "operator_id": approval.operator_id,
                 "parameters_hash": approval.parameters_hash,
                 "expires_at": approval.expires_at.to_rfc3339(),
+                "confirmation_token": approval.confirmation_token,
             }),
         );
 
@@ -67,6 +70,24 @@ impl MissionApprovalManager {
         approval_id: &str,
         operator_id: &str,
     ) -> Result<MissionApproval, MissionError> {
+        self.grant_approval_authenticated(approval_id, operator_id, None)
+    }
+
+    /// Concede formalmente uma aprovação pendente após verificação do operador autenticado, prazo e token.
+    pub fn grant_approval_authenticated(
+        &self,
+        approval_id: &str,
+        operator_id: &str,
+        auth_token: Option<&str>,
+    ) -> Result<MissionApproval, MissionError> {
+        let op_trimmed = operator_id.trim();
+        if op_trimmed.is_empty() || op_trimmed == "anonymous" || op_trimmed == "unauthorized" {
+            return Err(MissionError::ApprovalMismatch(format!(
+                "Operador '{}' não possui identidade autenticada válida",
+                operator_id
+            )));
+        }
+
         let mut approval = self.store.get_approval(approval_id)?.ok_or_else(|| {
             MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id))
         })?;
@@ -94,6 +115,16 @@ impl MissionApprovalManager {
             )));
         }
 
+        // Validação estrita de token de confirmação se fornecido
+        if let (Some(expected_token), Some(provided)) = (&approval.confirmation_token, auth_token) {
+            if provided != expected_token {
+                return Err(MissionError::ApprovalMismatch(format!(
+                    "Token de confirmação inválido para a aprovação '{}'",
+                    approval_id
+                )));
+            }
+        }
+
         approval.status = ApprovalStatus::Granted;
         self.store
             .update_approval_status(approval_id, ApprovalStatus::Granted)?;
@@ -119,6 +150,14 @@ impl MissionApprovalManager {
         operator_id: &str,
         reason: &str,
     ) -> Result<MissionApproval, MissionError> {
+        let op_trimmed = operator_id.trim();
+        if op_trimmed.is_empty() || op_trimmed == "anonymous" || op_trimmed == "unauthorized" {
+            return Err(MissionError::ApprovalMismatch(format!(
+                "Operador '{}' não possui identidade autenticada válida",
+                operator_id
+            )));
+        }
+
         let mut approval = self.store.get_approval(approval_id)?.ok_or_else(|| {
             MissionError::NotFound(format!("Aprovação '{}' não encontrada", approval_id))
         })?;

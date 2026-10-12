@@ -112,6 +112,7 @@ impl MissionStepStatus {
                 | (Running, Completed)
                 | (Running, Failed)
                 | (Running, WaitingApproval)
+                | (Running, Pending)
         )
     }
 }
@@ -206,6 +207,7 @@ pub enum ApprovalStatus {
     Granted,
     Denied,
     Expired,
+    Consumed,
 }
 
 /// Registro estrito de aprovação humana vinculada.
@@ -224,6 +226,8 @@ pub struct MissionApproval {
     pub status: ApprovalStatus,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub confirmation_token: Option<String>,
 }
 
 impl MissionApproval {
@@ -250,7 +254,13 @@ impl MissionApproval {
             status: ApprovalStatus::Pending,
             created_at: now,
             expires_at,
+            confirmation_token: None,
         }
+    }
+
+    pub fn with_confirmation_token(mut self, token: impl Into<String>) -> Self {
+        self.confirmation_token = Some(token.into());
+        self
     }
 
     pub fn compute_hash(parameters: &serde_json::Value) -> String {

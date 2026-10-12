@@ -57,6 +57,9 @@ pub enum MissionCommands {
         /// Identificador do operador humano
         #[arg(short, long, default_value = "operator-jose")]
         operator: String,
+        /// Token de confirmação de segurança (opcional/autenticado)
+        #[arg(short, long)]
+        token: Option<String>,
     },
     /// Rejeita aprovação humana para uma etapa de missão
     Deny {
@@ -418,7 +421,8 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
         MissionCommands::Approve {
             approval_id,
             operator,
-        } => match approval_mgr.grant_approval(&approval_id, &operator) {
+            token,
+        } => match approval_mgr.grant_approval_authenticated(&approval_id, &operator, token.as_deref()) {
             Ok(app) => {
                 println!("Aprovação concedida com sucesso!");
                 println!("ID: {}", app.id);

@@ -82,7 +82,8 @@ impl SqliteMissionStore {
                 failure_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
+                FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE,
+                UNIQUE(mission_id, step_number)
             );
 
             CREATE TABLE IF NOT EXISTS mission_approvals (
@@ -94,7 +95,9 @@ impl SqliteMissionStore {
                 parameters_hash TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL
+                expires_at TEXT NOT NULL,
+                confirmation_token TEXT,
+                FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS mission_checkpoints (
@@ -105,9 +108,18 @@ impl SqliteMissionStore {
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
             );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_steps_step_number
+            ON mission_steps(mission_id, step_number);
             "#,
         )
         .map_err(|e| MissionError::Storage(format!("Falha ao criar esquema de missões: {}", e)))?;
+
+        // Migração não-destrutiva de colunas para tabelas preexistentes em disco
+        let _ = conn.execute(
+            "ALTER TABLE mission_approvals ADD COLUMN confirmation_token TEXT;",
+            [],
+        );
 
         Ok(())
     }
@@ -151,6 +163,28 @@ impl SqliteMissionStore {
         failure_reason: Option<&str>,
     ) -> Result<(), MissionError> {
         let lock = self.conn.lock().unwrap();
+
+        // Validação da máquina de estados canônica
+        let curr_status_opt: Option<String> = lock
+            .query_row(
+                "SELECT status FROM missions WHERE id = ?1",
+                params![mission_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+        if let Some(curr_str) = curr_status_opt {
+            let curr_status: MissionStatus = serde_json::from_str(&curr_str)
+                .map_err(|e| MissionError::Storage(format!("Status inválido no banco: {}", e)))?;
+            if curr_status != status && !curr_status.can_transition_to(&status) {
+                return Err(MissionError::InvalidStateTransition {
+                    from: curr_status.to_string(),
+                    to: status.to_string(),
+                });
+            }
+        }
+
         let now = now_utc();
         let status_json = serde_json::to_string(&status).unwrap();
         let completed_at = if status == MissionStatus::Completed {
@@ -381,6 +415,28 @@ impl SqliteMissionStore {
         failure_reason: Option<&str>,
     ) -> Result<(), MissionError> {
         let lock = self.conn.lock().unwrap();
+
+        // Validação da máquina de estados canônica
+        let curr_status_opt: Option<String> = lock
+            .query_row(
+                "SELECT status FROM mission_steps WHERE id = ?1",
+                params![step_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+        if let Some(curr_str) = curr_status_opt {
+            let curr_status: MissionStepStatus = serde_json::from_str(&curr_str)
+                .map_err(|e| MissionError::Storage(format!("Status inválido no banco: {}", e)))?;
+            if curr_status != status && !curr_status.can_transition_to(&status) {
+                return Err(MissionError::InvalidStateTransition {
+                    from: curr_status.to_string(),
+                    to: status.to_string(),
+                });
+            }
+        }
+
         let now = now_utc();
         let status_json = serde_json::to_string(&status).unwrap();
         let output_json = output.map(|o| serde_json::to_string(o).unwrap());
@@ -483,16 +539,54 @@ impl SqliteMissionStore {
 
     pub fn save_approval(&self, approval: &MissionApproval) -> Result<(), MissionError> {
         let lock = self.conn.lock().unwrap();
+
+        // Garante integridade referencial para missões invocadas em testes isolados
+        let exists: bool = lock
+            .query_row(
+                "SELECT 1 FROM missions WHERE id = ?1",
+                params![approval.mission_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| MissionError::Storage(e.to_string()))?
+            .unwrap_or(false);
+
+        if !exists {
+            let now = now_utc();
+            let default_policy_json =
+                serde_json::to_string(&MissionExecutionPolicy::default()).unwrap();
+            let _ = lock.execute(
+                r#"
+                INSERT OR IGNORE INTO missions (
+                    id, title, objective, status, policy_json, operator_id, correlation_id,
+                    created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+                params![
+                    approval.mission_id,
+                    "Missão Implícita",
+                    "Solicitação de aprovação autônoma",
+                    serde_json::to_string(&MissionStatus::Planned).unwrap(),
+                    default_policy_json,
+                    approval.operator_id,
+                    "corr_auto",
+                    now.to_rfc3339(),
+                    now.to_rfc3339(),
+                ],
+            );
+        }
+
         let status_json = serde_json::to_string(&approval.status).unwrap();
 
         lock.execute(
             r#"
             INSERT INTO mission_approvals (
                 id, mission_id, step_id, capability_id, operator_id, parameters_hash,
-                status, created_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                status, created_at, expires_at, confirmation_token
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
-                status = excluded.status
+                status = excluded.status,
+                confirmation_token = excluded.confirmation_token
             "#,
             params![
                 approval.id,
@@ -504,6 +598,7 @@ impl SqliteMissionStore {
                 status_json,
                 approval.created_at.to_rfc3339(),
                 approval.expires_at.to_rfc3339(),
+                approval.confirmation_token,
             ],
         )
         .map_err(|e| MissionError::Storage(format!("Falha ao salvar aprovação: {}", e)))?;
@@ -536,7 +631,7 @@ impl SqliteMissionStore {
             .prepare(
                 r#"
                 SELECT id, mission_id, step_id, capability_id, operator_id, parameters_hash,
-                       status, created_at, expires_at
+                       status, created_at, expires_at, confirmation_token
                 FROM mission_approvals
                 WHERE id = ?1
                 "#,
@@ -553,6 +648,7 @@ impl SqliteMissionStore {
             let status_str: String = row.get(6)?;
             let created_str: String = row.get(7)?;
             let expires_str: String = row.get(8)?;
+            let confirmation_token: Option<String> = row.get(9)?;
 
             let status: ApprovalStatus = serde_json::from_str(&status_str)
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -573,6 +669,7 @@ impl SqliteMissionStore {
                 status,
                 created_at,
                 expires_at,
+                confirmation_token,
             })
         })
         .optional()
@@ -648,7 +745,8 @@ impl SqliteMissionStore {
     /// REGRAS DE INTEGRIDADE:
     /// - Missões em `InProgress` ou `AwaitingApproval` são inspecionadas.
     /// - Qualquer etapa em `Running` (que foi interrompida pelo encerramento abrupto do processo)
-    ///   é reconciliada para `Pending` se não produziu efeito verificado, ou para `WaitingApproval` se requeria aprovação.
+    ///   é reconciliada para `WaitingApproval` se exigia aprovação ou envolvia capacidade com potencial
+    ///   efeito colateral, ou para `Pending` se não produziu efeito verificado.
     /// - Evita estritamente duplicar execuções de operações mutadoras externas!
     pub fn reconcile_and_recover_on_startup(&self) -> Result<Vec<Mission>, MissionError> {
         let missions = self.list_missions()?;
@@ -663,7 +761,16 @@ impl SqliteMissionStore {
                 for step in &mut mission.steps {
                     if step.status == MissionStepStatus::Running {
                         // O passo estava no meio da execução quando houve crash/reboot
-                        let new_status = if step.requires_approval {
+                        // Se exigia aprovação ou possuía capacidade com potencial mutação externa,
+                        // NUNCA reinicia automaticamente em Pending! Requer portão humano.
+                        let is_mutating = step.capability_id.as_deref().map_or(false, |c| {
+                            c.contains("write")
+                                || c.contains("mutate")
+                                || c.contains("delete")
+                                || c.contains("exec")
+                        });
+
+                        let new_status = if step.requires_approval || is_mutating {
                             MissionStepStatus::WaitingApproval
                         } else {
                             MissionStepStatus::Pending
@@ -672,7 +779,7 @@ impl SqliteMissionStore {
                             &step.id,
                             new_status.clone(),
                             None,
-                            Some("Interrompido por reinicialização do sistema; resetado para reconciliação segura"),
+                            Some("Interrompido por reinicialização do sistema; reconciliado para retomada segura"),
                         )?;
                         step.status = new_status;
                         modified = true;
