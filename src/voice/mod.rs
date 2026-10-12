@@ -1,14 +1,20 @@
 pub mod audio;
+pub mod conversation;
 pub mod playback;
+pub mod router;
 pub mod session;
 pub mod stt;
 pub mod tts;
+pub mod wakeword;
 
 pub use audio::*;
+pub use conversation::*;
 pub use playback::*;
+pub use router::*;
 pub use session::*;
-pub use stt::{LocalWhisperConfig, LocalWhisperSttProvider, MockSttProvider};
+pub use stt::{CloudSttProvider, LocalWhisperConfig, LocalWhisperSttProvider, MockSttProvider};
 pub use tts::{
-    LocalAcousticTtsProvider, LocalPiperConfig, LocalPiperTtsProvider, MockTtsProvider, VocalTone,
-    VoiceIdentity,
+    CloudTtsProvider, LocalAcousticTtsProvider, LocalPiperConfig, LocalPiperTtsProvider,
+    MockTtsProvider, VocalTone, VoiceIdentity,
 };
+pub use wakeword::*;
