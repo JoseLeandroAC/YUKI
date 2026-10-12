@@ -1196,4 +1196,45 @@ Transformar a Yuki em uma inteligência verdadeiramente multimodal e agentic sem
 ##### 4. Classificação
 - **MARCO 8 (VOICE V1 & MISSIONS FOUNDATION) — IMPLEMENTADO, ADVERSARIALMENTE TESTADO, INTEGRADO E VALIDADO**.
 
+---
+
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8.1 — Hardening, Integração Real com SO, Segurança e Auditoria Final de Voice v1 & Missions Foundation
+
+- **Branch**: `feature/marco-8.1-hardening`
+- **Baseline de Entrada**: `40eee94` (Marco 8 inicial)
+- **Contexto**: Auditoria independente identificou 14 divergências entre arquitetura declarada e código efetivo. O Marco 8.1 executou as correções estruturais, implementou integração nativa com o Windows, reforçou a integridade relacional e transacional de missões e expandiu a suíte adversarial para 57 cenários.
+
+##### 1. O que se pretendia
+Eliminar vulnerabilidades concretas, afastar mocks de produção onde cabia integração com o sistema operacional, consolidar o princípio "Local First — Cloud Only When Authorized" com governança tipada de egress, garantir que o portão humano seja inviolável mesmo diante de alucinações de LLMs, implementar mutual exclusion na execução de missões e manter 100% de compatibilidade reversa com os Marcos 1 a 8 sem quebrar nenhum teste pré-existente.
+
+##### 2. O que foi corrigido e consolidado (14 Resoluções Técnicas)
+1. **Playback Real no SO (`WindowsAudioPlaybackSink`):** APIs multimídia nativas do Windows (`winmm.dll`), detecção de hardware de reprodução (`waveOutGetNumDevs`) e cancelamento imediato síncrono para barge-in via ponteiro nulo (VOICE-01).
+2. **Captura Real e Push-to-Talk Seguro:** `WindowsAudioCaptureBackend` via comandos MCI waveaudio em buffer PCM canônico WAV (16kHz 16-bit mono), `PushToTalkController` com limites estritos (30s e 1MB) e flag CLI `--mic` (VOICE-02).
+3. **VAD Acústico e Motor Fonético Separados:** Detecção de atividade de voz baseada em RMS, ZCR, variância temporal e fator de crista (`VoiceActivityDetector`), seguida de validação espectral de formantes de /ju:ki/ com rejeição de ruído contínuo e clicks (`PhoneticPatternWakeWordEngine`) (VOICE-03).
+4. **Subprocessos Assíncronos sem Órfãos:** Invocação assíncrona de `whisper.cpp` e `piper` via `tokio::process::Command`, tempfiles criptograficamente imprevisíveis e terminação garantida com `child.kill().await` e `child.wait().await` em timeouts (VOICE-04).
+5. **TTS Diagnóstico Honesto:** Reclassificação do sintetizador paramétrico em Rust como gerador de tons diagnósticos sem alegações espúrias de naturalidade vocal (VOICE-05).
+6. **Governança Tipada de Egress:** `VoiceEgressAuthorization` com hashes SHA-256 de parâmetros, TTL, operador autenticado e isolamento formal entre `egress:voice_cloud_stt` e `egress:voice_cloud_tts` (VOICE-06).
+7. **Minimização de Dados em Auditoria:** Omissão da transcrição em claro nos eventos persistidos de `VoiceInputReceived` (VOICE-07).
+8. **Integridade Relacional de Missões:** Chaves estrangeiras e cascades explícitos em `mission_approvals` e `mission_steps` no SQLite (MISS-01).
+9. **Transições Canônicas de Estado:** Validação rigorosa via `can_transition_to` antes de mutações de status de missão ou passos (MISS-02).
+10. **Reconciliação Não-Cega na Inicialização:** Passos mutadores interrompidos durante quedas do sistema são recuperados estritamente para `WaitingApproval` e missão para `Paused`, eliminando replays de efeitos colaterais externos (MISS-03).
+11. **Mutual Exclusion por Leases:** Bloqueio concorrente de execuções simultâneas conflitantes da mesma missão no `MissionRunner` (MISS-04).
+12. **Governança Ontológica de Risco Independente:** Interrupção no portão humano para qualquer passo de `RiskClass >= High`, independentemente de alucinações de flags do modelo (MISS-05).
+13. **Verificação Dinâmica de Efeitos pós-Etapa:** Execução integrada do `Verifier` com comprovação formal gravada nos checkpoints (MISS-06).
+14. **Anti-Replay e Autenticação de Operador:** Estado `ApprovalStatus::Consumed` de uso único atômico e `grant_approval_authenticated` com tokens de confirmação (MISS-07).
+
+##### 3. Métricas Finais e Portões de Qualidade
+- **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **57 cenários adversariais** (12 novos cenários do Marco 8.1), 100% aprovados.
+- **Total de Testes no Workspace:** **554 testes ativos aprovados** (3 testes live opt-in ignorados, 0 falhas).
+- **Portões de Qualidade Aprovados:**
+  - `cargo fmt --all -- --check`: 100% aprovado.
+  - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+  - `cargo test --workspace --all-targets`: 100% aprovado.
+  - `cargo build --release`: compilação limpa concluída.
+
+##### 4. Classificação
+- **MARCO 8.1 (HARDENING, INTEGRAÇÃO REAL COM SO, SEGURANÇA E AUDITORIA FINAL DE VOICE V1 & MISSIONS FOUNDATION) — CONCLUÍDO, AUDITADO E HOMOLOGADO DEFINITIVAMENTE**.
+
+
 

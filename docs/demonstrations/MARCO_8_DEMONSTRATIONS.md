@@ -139,5 +139,65 @@ Garantir que um crash ou encerramento abrupto do sistema não corrompa missões 
 
 ### Resultado Verificado
 - O método `reconcile_and_recover_on_startup()` identifica passos que estavam em `Running` durante a queda.
-- Reseta passos de forma segura para `Pending` (ou `WaitingApproval`) e coloca a missão em `Paused`.
+- Reseta passos de forma segura: passos de leitura/idempotentes para `Pending`, e passos com mutação externa ou aprovação prévia para `WaitingApproval`, colocando a missão em `Paused`.
 - Permite que o operador humano inspecione o estado e decida retomar (`yuki mission resume`) com segurança e previsibilidade.
+
+---
+
+## Demonstração G: Captura Real de Microfone e Push-to-Talk Seguro no Windows (Marco 8.1)
+
+### Objetivo
+Validar a captura real de áudio do microfone através de APIs nativas multimídia do Windows (MCI/WinMM) com controles rígidos de segurança de buffer (limite de 30s e 1MB).
+
+### Passos de Reprodução
+1. Iniciar escuta via microfone físico por 5 segundos:
+   ```bash
+   yuki voice listen --mic --seconds 5
+   ```
+2. Testes automatizados correspondentes:
+   ```bash
+   cargo test --test marco_8_adversarial test_47_push_to_talk_duracao_e_overflow
+   cargo test --lib voice::capture::tests
+   ```
+
+### Resultado Verificado
+- Dispositivo físico de gravação detectado via `waveInGetNumDevs()`.
+- Buffer PCM gravado em contêiner canônico WAV 16kHz 16-bit mono.
+- Rejeição atômica (`VoiceError::AudioTooLarge` / `VoiceError::AudioTooLong`) se os limites forem violados.
+
+---
+
+## Demonstração H: Reprodução Real com Cancelamento Instantâneo para Barge-in (Marco 8.1)
+
+### Objetivo
+Comprovar o envio de som real ao dispositivo de saída de áudio do Windows (`winmm.dll`) e o cancelamento síncrono em menos de 1ms ao detectar fala do operador.
+
+### Passos de Reprodução
+1. Executar teste automatizado do sink e interrupção:
+   ```bash
+   cargo test --test marco_8_adversarial test_46_audio_playback_sink_interrupcao_e_hardware
+   cargo test --lib voice::playback::tests
+   ```
+
+### Resultado Verificado
+- O sink `WindowsAudioPlaybackSink` gerencia `PlaySoundA` de forma assíncrona.
+- A chamada `interrupt()` despacha ponteiro nulo para o driver de áudio, interrompendo o som instantaneamente a nível de SO sem travar threads.
+
+---
+
+## Demonstração I: Portão Humano Autenticado com Token Criptográfico e Anti-Replay (Marco 8.1)
+
+### Objetivo
+Garantir que a aprovação humana de missões seja irrepetível (`ApprovalStatus::Consumed`) e associada ao operador autorizado portando token de segurança válido.
+
+### Passos de Reprodução
+1. Executar testes automatizados correspondentes:
+   ```bash
+   cargo test --test marco_8_adversarial test_53_mission_runner_anti_replay_aprovacao_consumida
+   cargo test --test marco_8_adversarial test_57_autenticacao_de_operador_com_token_de_seguranca
+   ```
+
+### Resultado Verificado
+- Tentativas de reusar uma aprovação já concedida resultam em falha fechada.
+- Operadores vazios ("") ou "anonymous" são sumariamente rejeitados com `MissionError::ApprovalMismatch`.
+

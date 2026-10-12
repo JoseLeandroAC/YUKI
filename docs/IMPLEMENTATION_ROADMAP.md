@@ -65,7 +65,10 @@ Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente — Fech
 ████████████████████████████████████████  implementado e validado (455 testes ativos aprovados, 4 live opt-in ignorados, totalizando 459 testes; 38/38 testes de hardening no Marco 7.2, concorrência multiprocesso, permissões DACL/0600, orçamento integral de prompt com overhead exato de ferramentas sem unwrap, transacionalidade estrita do vault com tratamento de desaparecimento e substituição de arquivo)
 
 Yuki Marco 8 (Voice v1 & Missions Foundation)
-████████████████████████████████████████  implementado, testado e validado (528 testes ativos aprovados, 4 live opt-in ignorados, totalizando 532 testes; Voice v1 local-first, Whisper STT, Piper TTS e acústico fallback, identidade vocal adaptativa, detecção soberana de palavra-chave 'Yuki', barge-in, conversação bidirecional, DAG de missões acíclico com validação estrita, persistência SQLite durável, portão humano criptográfico SHA-256, checkpoints e reconciliação de inicialização)
+████████████████████████████████████████  implementado, testado e validado (528 testes ativos aprovados, 4 live opt-in ignorados, totalizando 532 testes)
+
+Yuki Marco 8.1 (Hardening, Integração Real com SO, Segurança e Auditoria Final de Voice v1 & Missions Foundation)
+████████████████████████████████████████  implementado, integrado ao SO, testado e homologado (554 testes ativos aprovados, 3 live opt-in ignorados, totalizando 557 testes; 57/57 suíte adversarial; playback winmm real, captura MCI com PTT, VAD acústico com motor fonético /ju:ki/, subprocessos tokio assíncronos protegidos contra órfãos, governança tipada de egress, minimização de dados em auditoria, integridade relacional com FKs em missões, transições canônicas com can_transition_to, reconciliação soberana com portão para mutadores, mutual exclusion por leases no runner, salvaguarda ontológica de risco independente de flags do modelo, verificação dinâmica pós-etapa e anti-replay com ApprovalStatus::Consumed)
 
 Produção
 ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  não iniciada
