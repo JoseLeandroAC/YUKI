@@ -32,7 +32,7 @@ impl MissionApprovalManager {
         let cap = step.capability_id.as_deref().unwrap_or("unknown");
         let approval_id = format!("appr_{}_{}", step.id, uuid_ms());
 
-        let token = format!("tok_{}", uuid_ms());
+        let token = generate_secure_token()?;
         let mut approval = MissionApproval::new(
             approval_id,
             mission_id,
@@ -46,7 +46,7 @@ impl MissionApprovalManager {
 
         self.store.save_approval(&approval)?;
 
-        // Emite evento de auditoria MissionApprovalRequested
+        // Emite evento de auditoria MissionApprovalRequested sem expor segredos em claro
         self.record_audit(
             EventType::MissionApprovalRequested,
             serde_json::json!({
@@ -57,7 +57,7 @@ impl MissionApprovalManager {
                 "operator_id": approval.operator_id,
                 "parameters_hash": approval.parameters_hash,
                 "expires_at": approval.expires_at.to_rfc3339(),
-                "confirmation_token": approval.confirmation_token,
+                "has_confirmation_token": approval.confirmation_token.is_some(),
             }),
         );
 
@@ -65,6 +65,7 @@ impl MissionApprovalManager {
     }
 
     /// Concede formalmente uma aprovação pendente após verificação do operador e prazo.
+    /// Falha fechado se a aprovação exigir token de confirmação criptográfico.
     pub fn grant_approval(
         &self,
         approval_id: &str,
@@ -115,9 +116,19 @@ impl MissionApprovalManager {
             )));
         }
 
-        // Validação estrita de token de confirmação se fornecido
-        if let (Some(expected_token), Some(provided)) = (&approval.confirmation_token, auth_token) {
-            if provided != expected_token {
+        // Validação estrita e obrigatória do token de confirmação
+        if let Some(expected_token) = &approval.confirmation_token {
+            let provided = match auth_token {
+                Some(t) if !t.trim().is_empty() => t.trim(),
+                _ => {
+                    return Err(MissionError::ApprovalMismatch(format!(
+                        "Aprovação '{}' requer token de confirmação de segurança obrigatório",
+                        approval_id
+                    )));
+                }
+            };
+
+            if !constant_time_eq(provided, expected_token) {
                 return Err(MissionError::ApprovalMismatch(format!(
                     "Token de confirmação inválido para a aprovação '{}'",
                     approval_id
@@ -253,4 +264,29 @@ fn uuid_ms() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{:x}", ms)
+}
+
+fn generate_secure_token() -> Result<String, MissionError> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| {
+        MissionError::Storage(format!(
+            "Falha ao gerar entropia criptográfica para token: {}",
+            e
+        ))
+    })?;
+    let hex_part: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    Ok(format!("tok_{}", hex_part))
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }

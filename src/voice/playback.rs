@@ -23,8 +23,10 @@ pub trait AudioPlaybackSink: Send + Sync + std::fmt::Debug {
 pub enum PlaybackStatus {
     Idle,
     Playing,
+    Completed,
     Interrupted,
     Stopped,
+    Failed,
 }
 
 // ---------------------------------------------------------------------------
@@ -56,9 +58,10 @@ mod winmm {
 ///
 /// Não requer dependências externas pesadas e garante controle direto de
 /// hardware, interrupção imediata de reprodução (barge-in) e detecção de dispositivos.
+/// Mantém o buffer de áudio fixo em memória (pinned Arc<Vec<u8>>) durante a execução assíncrona.
 #[derive(Debug)]
 pub struct WindowsAudioPlaybackSink {
-    current_wav_buffer: Arc<Mutex<Option<Vec<u8>>>>,
+    current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
 }
 
 impl Default for WindowsAudioPlaybackSink {
@@ -107,21 +110,24 @@ impl AudioPlaybackSink for WindowsAudioPlaybackSink {
                 ));
             }
 
-            let wav_bytes = self.prepare_wav_bytes(output)?;
+            let wav_bytes = Arc::new(self.prepare_wav_bytes(output)?);
 
             let mut buf_lock = self.current_wav_buffer.lock().unwrap();
-            *buf_lock = Some(wav_bytes);
+            // Interrompe reprodução prévia no driver antes de registrar novo buffer
+            unsafe {
+                winmm::PlaySoundA(std::ptr::null(), std::ptr::null_mut(), 0);
+            }
+            *buf_lock = Some(wav_bytes.clone());
 
-            if let Some(ref buf) = *buf_lock {
-                let ptr = buf.as_ptr() as winmm::LPCSTR;
-                let flags = winmm::SND_MEMORY | winmm::SND_ASYNC | winmm::SND_NODEFAULT;
-                let success = unsafe { winmm::PlaySoundA(ptr, std::ptr::null_mut(), flags) };
-                if success == 0 {
-                    return Err(VoiceError::PlaybackFailed(
-                        "Falha ao acionar winmm::PlaySoundA no subsistema de áudio do Windows"
-                            .to_string(),
-                    ));
-                }
+            let ptr = wav_bytes.as_ptr() as winmm::LPCSTR;
+            let flags = winmm::SND_MEMORY | winmm::SND_ASYNC | winmm::SND_NODEFAULT;
+            let success = unsafe { winmm::PlaySoundA(ptr, std::ptr::null_mut(), flags) };
+            if success == 0 {
+                *buf_lock = None;
+                return Err(VoiceError::PlaybackFailed(
+                    "Falha ao acionar winmm::PlaySoundA no subsistema de áudio do Windows"
+                        .to_string(),
+                ));
             }
             Ok(())
         }
@@ -265,6 +271,7 @@ pub struct AudioPlaybackController {
     status: Arc<Mutex<PlaybackStatus>>,
     current_output: Arc<Mutex<Option<AudioOutput>>>,
     device_available_override: Arc<Mutex<Option<bool>>>,
+    playback_timing: Arc<Mutex<Option<(std::time::Instant, u64)>>>,
     sink: Arc<dyn AudioPlaybackSink>,
 }
 
@@ -308,6 +315,7 @@ impl AudioPlaybackController {
             status: Arc::new(Mutex::new(PlaybackStatus::Idle)),
             current_output: Arc::new(Mutex::new(None)),
             device_available_override: Arc::new(Mutex::new(None)),
+            playback_timing: Arc::new(Mutex::new(None)),
             sink,
         }
     }
@@ -337,15 +345,25 @@ impl AudioPlaybackController {
         self.sink.is_device_available()
     }
 
-    /// Retorna o estado atual da reprodução.
+    /// Retorna o estado atual da reprodução, atualizando atomicamente para Completed se a duração do áudio tiver expirado.
     pub fn status(&self) -> PlaybackStatus {
-        *self.status.lock().unwrap()
+        let mut status_lock = self.status.lock().unwrap();
+        if *status_lock == PlaybackStatus::Playing {
+            if let Some((start_instant, duration_ms)) = *self.playback_timing.lock().unwrap() {
+                if start_instant.elapsed().as_millis() as u64 >= duration_ms {
+                    *status_lock = PlaybackStatus::Completed;
+                }
+            }
+        }
+        *status_lock
     }
 
     /// Envia um buffer de áudio sintetizado para reprodução física.
     /// Rejeita se o dispositivo estiver indisponível ou interrompe reprodução prévia em curso.
     pub fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
         if !self.is_device_available() {
+            let mut status_lock = self.status.lock().unwrap();
+            *status_lock = PlaybackStatus::Failed;
             return Err(VoiceError::DeviceUnavailable(
                 "Dispositivo de reprodução de áudio (alto-falante) não detectado ou inacessível"
                     .to_string(),
@@ -358,11 +376,26 @@ impl AudioPlaybackController {
         }
 
         // Envia para o sink físico/mock
-        self.sink.play(output)?;
+        if let Err(e) = self.sink.play(output) {
+            let mut status_lock = self.status.lock().unwrap();
+            *status_lock = PlaybackStatus::Failed;
+            *self.playback_timing.lock().unwrap() = None;
+            return Err(e);
+        }
 
         let mut status_lock = self.status.lock().unwrap();
         let mut out_lock = self.current_output.lock().unwrap();
 
+        let duration_ms = if output.duration_ms > 0 {
+            output.duration_ms
+        } else if output.format.sample_rate > 0 {
+            ((output.payload.len() as u64) * 1000)
+                / (output.format.sample_rate as u64 * output.format.channels as u64 * 2)
+        } else {
+            100
+        };
+
+        *self.playback_timing.lock().unwrap() = Some((std::time::Instant::now(), duration_ms));
         *out_lock = Some(output.clone());
         *status_lock = PlaybackStatus::Playing;
 
@@ -377,6 +410,7 @@ impl AudioPlaybackController {
         let mut out_lock = self.current_output.lock().unwrap();
 
         *status_lock = PlaybackStatus::Interrupted;
+        *self.playback_timing.lock().unwrap() = None;
         *out_lock = None; // Limpeza imediata do buffer
 
         Ok(())
@@ -390,6 +424,7 @@ impl AudioPlaybackController {
         let mut out_lock = self.current_output.lock().unwrap();
 
         *status_lock = PlaybackStatus::Stopped;
+        *self.playback_timing.lock().unwrap() = None;
         *out_lock = None;
     }
 
@@ -401,6 +436,7 @@ impl AudioPlaybackController {
         let mut out_lock = self.current_output.lock().unwrap();
 
         *status_lock = PlaybackStatus::Idle;
+        *self.playback_timing.lock().unwrap() = None;
         *out_lock = None;
     }
 }

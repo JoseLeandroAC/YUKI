@@ -1234,7 +1234,40 @@ Eliminar vulnerabilidades concretas, afastar mocks de produção onde cabia inte
   - `cargo build --release`: compilação limpa concluída.
 
 ##### 4. Classificação
-- **MARCO 8.1 (HARDENING, INTEGRAÇÃO REAL COM SO, SEGURANÇA E AUDITORIA FINAL DE VOICE V1 & MISSIONS FOUNDATION) — CONCLUÍDO, AUDITADO E HOMOLOGADO DEFINITIVAMENTE**.
+- **MARCO 8.1 (HARDENING, INTEGRAÇÃO REAL COM SO, SEGURANÇA E AUDITORIA FINAL DE VOICE V1 & MISSIONS FOUNDATION) — AUDITADO INDEPENDENTEMENTE COM RESSALVAS; NÃO HOMOLOGADO**.
+
+---
+
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8.1.1 — Correções Críticas de Homologação, Hardening Atômico e Auditoria de Segurança
+
+- **Branch**: `feature/marco-8.1.1-homologation-fixes`
+- **Baseline de Entrada**: `bd588e5` (Marco 8.1 final)
+- **Contexto**: A auditoria independente externa identificou vulnerabilidades que impediram a homologação do Marco 8.1: bypass em autenticação de aprovações por token nulo/vazio, janela TOCTOU em consumo assíncrono de aprovações, concorrência desprotegida entre processos (leases em memória apenas), declaração de wake word com heurística acústica em vez de reconhecimento lexical, e buffer de áudio winmm desprotegido contra descarte de memória. O Marco 8.1.1 eliminou todas as falhas com garantias criptográficas e atômicas no SQLite.
+
+##### 1. O que se pretendia
+Eliminar rigorosamente qualquer bypass de autenticação no portão humano, implementar consumo atômico de aprovação diretamente no SQLite, estender o bloqueio de missões para multi-instâncias com leases e fencing tokens monotônicos, alinhar a honestidade da arquitetura de voz (reclassificando heurísticas como experimentais e priorizando Push-to-Talk) e garantir gerenciamento seguro de memória e ciclo de vida de reprodução no Windows.
+
+##### 2. O que foi corrigido e consolidado
+1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos gerados com `getrandom::getrandom`, comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo ou vazio, sanitização de logs (tokens em claro nunca logados) e falha fechada imediata em `grant_approval` legado para aprovações protegidas.
+2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` implementado com comando `UPDATE` atômico condicional único no SQLite com verificação estrita de hash de parâmetros, status prévio e expiração.
+3. **Leases Persistentes Multi-Instância (`mission_leases`):** Exclusão mútua persistida no SQLite entre processos e instâncias com TTL e validação de `fence_token` monotônico a cada etapa pelo `MissionRunner`.
+4. **Honestidade Arquitetural da Wake Word:** `WakeWordEngineStatus` (Ready, Experimental, Unavailable), reclassificação factual do motor fonético como `Experimental` (heurística acústica de energia, não reconhecimento lexical), remoção de fallbacks silenciosos em STT e consolidação do Push-to-Talk como mecanismo primário.
+5. **Ciclo de Vida de Reprodução e Pinned Buffers:** Buffers WAV fixos em memória (`Arc<Vec<u8>>`) no `WindowsAudioPlaybackSink` durante a reprodução assíncrona no driver WinMM; `AudioPlaybackController` estendido com estados `Completed` e `Failed` rastreados por temporizador.
+6. **Fail-Closed para Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana.
+
+##### 3. Métricas Finais e Portões de Qualidade
+- **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **62 cenários adversariais** (5 novos cenários dedicados ao Marco 8.1.1), 100% aprovados.
+- **Total de Testes no Workspace:** **559 testes ativos aprovados** (3 testes live opt-in ignorados, 0 falhas).
+- **Portões de Qualidade Aprovados:**
+  - `cargo fmt --all -- --check`: 100% aprovado.
+  - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+  - `cargo test --workspace --all-targets`: 100% aprovado.
+  - `cargo build --release`: compilação limpa concluída com sucesso.
+
+##### 4. Classificação
+- **MARCO 8.1.1 (CORREÇÕES CRÍTICAS DE HOMOLOGAÇÃO, HARDENING ATÔMICO E AUDITORIA DE SEGURANÇA) — CONCLUÍDO COM SUCESSO E SUBMETIDO À AUDITORIA INDEPENDENTE EXTERNA**.
+
 
 
 

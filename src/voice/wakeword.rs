@@ -116,10 +116,21 @@ impl VoiceActivityDetector {
 }
 
 // ---------------------------------------------------------------------------
-// Trait WakeWordEngine
+// Trait WakeWordEngine e Status
 // ---------------------------------------------------------------------------
 
-/// Contrato para motores de reconhecimento lexical da palavra-chave "Yuki".
+/// Status operacional e maturidade do motor de detecção de palavra-chave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeWordEngineStatus {
+    /// Motor pronto e operacional com reconhecimento lexical local validado.
+    Ready,
+    /// Motor heurístico acústico experimental (não realiza reconhecimento lexical pleno).
+    Experimental,
+    /// Motor indisponível no ambiente atual (sem modelo ou hardware compatível).
+    Unavailable,
+}
+
+/// Contrato para motores de reconhecimento da palavra-chave "Yuki".
 pub trait WakeWordEngine: Send + Sync + std::fmt::Debug {
     /// Avalia uma janela de quadros confirmada pelo VAD como voz humana.
     /// Retorna `Some(confidence)` [0.0 .. 1.0] se houver evidência da palavra, ou `None`.
@@ -131,6 +142,11 @@ pub trait WakeWordEngine: Send + Sync + std::fmt::Debug {
 
     /// Nome identificador do motor.
     fn name(&self) -> &str;
+
+    /// Retorna o status operacional do motor de detecção.
+    fn status(&self) -> WakeWordEngineStatus {
+        WakeWordEngineStatus::Ready
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +238,11 @@ impl WakeWordEngine for PhoneticPatternWakeWordEngine {
     }
 
     fn name(&self) -> &str {
-        "PhoneticPatternWakeWordEngine"
+        "PhoneticPatternWakeWordEngine (Experimental Acoustic Heuristic)"
+    }
+
+    fn status(&self) -> WakeWordEngineStatus {
+        WakeWordEngineStatus::Experimental
     }
 }
 
@@ -231,9 +251,9 @@ impl WakeWordEngine for PhoneticPatternWakeWordEngine {
 // ---------------------------------------------------------------------------
 
 /// Motor que valida a palavra-chave submetendo a janela candidata para transcrição rápida STT local.
+/// NUNCA recorre a heurísticas acústicas em caso de falha de transcrição.
 pub struct SttWakeWordEngine {
     stt_provider: Arc<dyn SpeechToTextProvider>,
-    phonetic_fallback: PhoneticPatternWakeWordEngine,
 }
 
 impl std::fmt::Debug for SttWakeWordEngine {
@@ -248,10 +268,7 @@ impl std::fmt::Debug for SttWakeWordEngine {
 
 impl SttWakeWordEngine {
     pub fn new(stt_provider: Arc<dyn SpeechToTextProvider>) -> Self {
-        Self {
-            stt_provider,
-            phonetic_fallback: PhoneticPatternWakeWordEngine::new(),
-        }
+        Self { stt_provider }
     }
 }
 
@@ -274,7 +291,7 @@ impl WakeWordEngine for SttWakeWordEngine {
         let format = AudioFormat::default();
         let wav_bytes = match AudioCodec::encode_wav(&all_samples, &format) {
             Ok(b) => b,
-            Err(_) => return self.phonetic_fallback.verify_keyword(frames, keyword),
+            Err(_) => return Ok(None),
         };
 
         let duration_ms = ((all_samples.len() as u64) * 1000) / (format.sample_rate as u64);
@@ -302,14 +319,34 @@ impl WakeWordEngine for SttWakeWordEngine {
                 }
             }
             Err(_) => {
-                // Em caso de falha transitória ou STT não configurado, faz fallback fonético
-                self.phonetic_fallback.verify_keyword(frames, keyword)
+                // Em caso de erro de transcrição, NÃO recorre a heurísticas acústicas cegas
+                Ok(None)
             }
         }
     }
 
     fn name(&self) -> &str {
         "SttWakeWordEngine"
+    }
+
+    fn status(&self) -> WakeWordEngineStatus {
+        let meta = self.stt_provider.metadata();
+        if meta.provider_name.to_lowercase().contains("unavailable") {
+            return WakeWordEngineStatus::Unavailable;
+        }
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let health_res = tokio::task::block_in_place(|| {
+                handle.block_on(async { self.stt_provider.health().await })
+            });
+            if health_res.is_ok() {
+                WakeWordEngineStatus::Ready
+            } else {
+                WakeWordEngineStatus::Unavailable
+            }
+        } else {
+            WakeWordEngineStatus::Ready
+        }
     }
 }
 
@@ -354,6 +391,10 @@ impl WakeWordEngine for MockWakeWordEngine {
 
     fn name(&self) -> &str {
         "MockWakeWordEngine"
+    }
+
+    fn status(&self) -> WakeWordEngineStatus {
+        WakeWordEngineStatus::Ready
     }
 }
 
@@ -449,14 +490,26 @@ impl WakeWordDetector {
         &self.engine
     }
 
+    /// Retorna o status operacional do detector/motor subjacente.
+    pub fn status(&self) -> WakeWordEngineStatus {
+        if !self.enabled {
+            WakeWordEngineStatus::Unavailable
+        } else {
+            self.engine.status()
+        }
+    }
+
     /// Analisa um quadro de áudio PCM.
     ///
-    /// 1. Se desabilitado, ignora.
+    /// 1. Se desabilitado ou motor indisponível, ignora.
     /// 2. Acumula em janela deslizante.
     /// 3. Executa VAD para validar presença de voz humana.
     /// 4. Se houver voz, invoca o `WakeWordEngine` para verificar evidência da palavra-chave.
     pub fn process_frame(&mut self, frame: &AudioFrame) -> Result<WakeWordDetection, VoiceError> {
-        if !self.enabled || frame.samples.is_empty() {
+        if !self.enabled
+            || self.engine.status() == WakeWordEngineStatus::Unavailable
+            || frame.samples.is_empty()
+        {
             return Ok(WakeWordDetection::None);
         }
 

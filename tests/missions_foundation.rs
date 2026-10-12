@@ -227,15 +227,30 @@ fn test_mission_human_approval_protocol_strictness() {
     assert!(verify_res.is_err());
 
     // 3. Operador incorreto tenta aprovar -> Falha
-    let wrong_op_res = approval_mgr.grant_approval(&approval.id, "hacker");
+    let wrong_op_res = approval_mgr.grant_approval_authenticated(
+        &approval.id,
+        "hacker",
+        approval.confirmation_token.as_deref(),
+    );
     assert!(matches!(
         wrong_op_res,
         Err(MissionError::ApprovalMismatch(_))
     ));
 
-    // 4. Operador legítimo aprova
+    // 3b. Tentativa de aprovação sem token falha fechado imediatamente
+    let no_token_res = approval_mgr.grant_approval(&approval.id, "operator-1");
+    assert!(matches!(
+        no_token_res,
+        Err(MissionError::ApprovalMismatch(_))
+    ));
+
+    // 4. Operador legítimo aprova com token autenticado
     let granted = approval_mgr
-        .grant_approval(&approval.id, "operator-1")
+        .grant_approval_authenticated(
+            &approval.id,
+            "operator-1",
+            approval.confirmation_token.as_deref(),
+        )
         .unwrap();
     assert_eq!(granted.status, ApprovalStatus::Granted);
 
@@ -303,10 +318,15 @@ async fn test_mission_runner_end_to_end_research_mission() {
     assert!(steps[2].approval_id.is_some());
 
     let app_id = steps[2].approval_id.as_ref().unwrap();
+    let app_obj = store.get_approval(app_id).unwrap().unwrap();
 
-    // 2. Operador concede aprovação formal para a etapa 3
+    // 2. Operador concede aprovação formal para a etapa 3 com token autenticado
     approval_mgr
-        .grant_approval(app_id, "operator-jose")
+        .grant_approval_authenticated(
+            app_id,
+            "operator-jose",
+            app_obj.confirmation_token.as_deref(),
+        )
         .unwrap();
 
     // 3. Retoma execução da missão após aprovação humana

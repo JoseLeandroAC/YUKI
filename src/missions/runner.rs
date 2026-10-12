@@ -18,7 +18,7 @@ use crate::verification::verifier::Verifier;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-/// Guardião RAII para lease exclusivo por missão.
+/// Guardião RAII para lease exclusivo por missão em memória.
 struct MissionLeaseGuard {
     leases: Arc<Mutex<HashSet<String>>>,
     mission_id: String,
@@ -32,16 +32,32 @@ impl Drop for MissionLeaseGuard {
     }
 }
 
+/// Guardião RAII para lease persistente com fencing token no SQLite.
+struct PersistentMissionLeaseGuard {
+    store: Arc<SqliteMissionStore>,
+    mission_id: String,
+    runner_id: String,
+    fence_token: u64,
+}
+
+impl Drop for PersistentMissionLeaseGuard {
+    fn drop(&mut self) {
+        let _ =
+            self.store
+                .release_mission_lease(&self.mission_id, &self.runner_id, self.fence_token);
+    }
+}
+
 /// Executor governado de missões multi-etapas.
 ///
 /// DIRETRIZES DE SEGURANÇA E VERIFICAÇÃO:
 /// 1. Respeita estritamente o grafo de dependências (DAG): um passo só executa quando todas as dependências estão concluídas.
 /// 2. Portão Humano (*Human-in-the-loop*): Se um passo requer aprovação soberana (por plano ou classe de risco da capacidade),
 ///    a execução pausa no estado `AwaitingApproval` até que a aprovação seja concedida via CLI/canal seguro pelo operador.
-/// 3. Anti-replay criptográfico: A aprovação validada é imediatamente consumida (`Consumed`).
+/// 3. Anti-replay criptográfico: A aprovação validada é imediatamente consumida de forma atômica (`Consumed`).
 /// 4. Gravação atômica de checkpoints a cada passo concluído para permitir recuperação determinística após reinício.
 /// 5. Distinção entre execução e efeito verificado: sucesso do passo requer validação formal via `Verifier`.
-/// 6. Lease de exclusão mútua por missão para prevenir execuções concorrentes acidentais.
+/// 6. Lease persistente com fencing token no SQLite para exclusão mútua entre instâncias e processos.
 pub struct MissionRunner {
     store: Arc<SqliteMissionStore>,
     approval_manager: Arc<MissionApprovalManager>,
@@ -49,6 +65,7 @@ pub struct MissionRunner {
     verifier: Arc<Verifier>,
     audit_store: Option<Arc<SqliteAuditStore>>,
     active_leases: Arc<Mutex<HashSet<String>>>,
+    runner_id: String,
 }
 
 impl MissionRunner {
@@ -66,7 +83,17 @@ impl MissionRunner {
             verifier,
             audit_store,
             active_leases: Arc::new(Mutex::new(HashSet::new())),
+            runner_id: format!("runner_{}_{}", std::process::id(), uuid_ms()),
         }
+    }
+
+    pub fn runner_id(&self) -> &str {
+        &self.runner_id
+    }
+
+    pub fn with_runner_id(mut self, runner_id: impl Into<String>) -> Self {
+        self.runner_id = runner_id.into();
+        self
     }
 
     pub fn verifier(&self) -> &Verifier {
@@ -79,6 +106,7 @@ impl MissionRunner {
     /// O plano gerado pelo modelo NUNCA pode dispensar aprovação para capacidades
     /// de alto risco (`RiskClass >= High`) ou operações com efeito colateral mutador
     /// se a política da missão exigir aprovação para mutações.
+    /// CAPACIDADES DESCONHECIDAS OU NÃO REGISTRADAS FALHAM FECHADO (requerem aprovação humana obrigatória).
     fn step_requires_approval(&self, mission: &Mission, step: &MissionStep) -> bool {
         // 1. Se o próprio plano declarou explicitamente que requer aprovação
         if step.requires_approval {
@@ -99,6 +127,9 @@ impl MissionRunner {
                 {
                     return true;
                 }
+            } else {
+                // FALHA FECHADA: Capacidade desconhecida ou não registrada NUNCA recebe bypass implícito
+                return true;
             }
         }
 
@@ -107,8 +138,8 @@ impl MissionRunner {
 
     /// Executa as etapas elegíveis de uma missão até a conclusão ou até necessitar de aprovação humana.
     pub async fn run_mission(&self, mission_id: &str) -> Result<Mission, MissionError> {
-        // Exclusão mútua / lease por missão (MISS-04)
-        let _lease_guard = {
+        // 1. Exclusão mútua em memória (mesmo processo)
+        let _in_memory_lease_guard = {
             let mut leases = self.active_leases.lock().map_err(|_| {
                 MissionError::Storage("Lock de lease de missão envenenado".to_string())
             })?;
@@ -123,6 +154,17 @@ impl MissionRunner {
                 leases: Arc::clone(&self.active_leases),
                 mission_id: mission_id.to_string(),
             }
+        };
+
+        // 2. Lease persistente exclusivo com fencing token no SQLite (multi-processo / multi-instância)
+        let fence_token = self
+            .store
+            .acquire_mission_lease(mission_id, &self.runner_id, 300)?;
+        let _persistent_lease_guard = PersistentMissionLeaseGuard {
+            store: Arc::clone(&self.store),
+            mission_id: mission_id.to_string(),
+            runner_id: self.runner_id.clone(),
+            fence_token,
         };
 
         let mut mission = self.store.get_mission(mission_id)?.ok_or_else(|| {
@@ -210,26 +252,20 @@ impl MissionRunner {
 
             if step_needs_approval {
                 let is_approved = if let Some(app_id) = &next_step.approval_id {
-                    let app_opt = self.store.get_approval(app_id)?;
-                    match app_opt {
-                        Some(ref app) => {
-                            let cap_name = next_step.capability_id.as_deref().unwrap_or("unknown");
-                            if app.is_valid_for(
-                                &mission.operator_id,
-                                &mission.id,
-                                &next_step.id,
-                                cap_name,
-                                &next_step.parameters,
-                            ) {
-                                // Anti-replay: consome a aprovação para que não possa ser reutilizada
-                                self.store
-                                    .update_approval_status(&app.id, ApprovalStatus::Consumed)?;
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        None => false,
+                    let cap_name = next_step.capability_id.as_deref().unwrap_or("unknown");
+                    match self.store.consume_approval_atomically(
+                        app_id,
+                        &mission.id,
+                        &next_step.id,
+                        cap_name,
+                        &mission.operator_id,
+                        &next_step.parameters,
+                    ) {
+                        Ok(_consumed) => true,
+                        Err(MissionError::ApprovalMismatch(_))
+                        | Err(MissionError::ApprovalExpired(_))
+                        | Err(MissionError::NotFound(_)) => false,
+                        Err(e) => return Err(e),
                     }
                 } else {
                     false
@@ -295,8 +331,16 @@ impl MissionRunner {
                     .update_mission_status(&mission.id, MissionStatus::InProgress, None)?;
             }
 
-            // Executa o passo
-            self.execute_step(&mut mission, &next_step).await?;
+            // Valida e renova o lease persistente com fencing token antes de executar o passo
+            self.store
+                .verify_mission_lease(&mission.id, &self.runner_id, fence_token)?;
+            let _ = self
+                .store
+                .renew_mission_lease(&mission.id, &self.runner_id, fence_token, 300);
+
+            // Executa o passo sob fence token
+            self.execute_step(&mut mission, &next_step, fence_token)
+                .await?;
         }
     }
 
@@ -304,7 +348,12 @@ impl MissionRunner {
         &self,
         mission: &mut Mission,
         step: &MissionStep,
+        fence_token: u64,
     ) -> Result<(), MissionError> {
+        // Valida lease antes de iniciar mutação de estado
+        self.store
+            .verify_mission_lease(&mission.id, &self.runner_id, fence_token)?;
+
         // 1. Marca etapa como Running
         self.store
             .update_step_status(&step.id, MissionStepStatus::Running, None, None)?;
@@ -382,6 +431,10 @@ impl MissionRunner {
                 None,
             )
         };
+
+        // Valida lease antes de persistir conclusão e checkpoint
+        self.store
+            .verify_mission_lease(&mission.id, &self.runner_id, fence_token)?;
 
         // 3. Atualiza status do passo para Completed
         self.store.update_step_status(

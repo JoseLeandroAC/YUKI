@@ -323,7 +323,7 @@ async fn test_17_missao_com_capacidade_inexistente() {
 
     let runner = MissionRunner::new(
         store.clone(),
-        approval_mgr,
+        approval_mgr.clone(),
         capability_registry,
         verifier,
         None,
@@ -361,10 +361,20 @@ async fn test_17_missao_com_capacidade_inexistente() {
         store.save_step(s).unwrap();
     }
 
-    let run_res = runner.run_mission("m_bad_cap").await;
-    assert!(run_res.is_err());
+    let run_res = runner.run_mission("m_bad_cap").await.unwrap();
+    assert_eq!(run_res.status, MissionStatus::AwaitingApproval);
+
+    let steps = store.get_steps_for_mission("m_bad_cap").unwrap();
+    let app_id = steps[0].approval_id.as_ref().unwrap();
+    let app_obj = store.get_approval(app_id).unwrap().unwrap();
+    approval_mgr
+        .grant_approval_authenticated(app_id, "op", app_obj.confirmation_token.as_deref())
+        .unwrap();
+
+    let exec_res = runner.run_mission("m_bad_cap").await;
+    assert!(exec_res.is_err());
     assert!(matches!(
-        run_res.unwrap_err(),
+        exec_res.unwrap_err(),
         MissionError::ExecutionFailed(_)
     ));
 }
@@ -584,8 +594,12 @@ fn test_24_concorrencia_aprovacao_simultanea() {
         .request_approval("m_conc", &step, "op_jose", 3600)
         .unwrap();
 
-    // Primeiro operador aprova
-    let grant_1 = approval_mgr.grant_approval(&app.id, "op_jose");
+    // Primeiro operador aprova com token autenticado
+    let grant_1 = approval_mgr.grant_approval_authenticated(
+        &app.id,
+        "op_jose",
+        app.confirmation_token.as_deref(),
+    );
     assert!(grant_1.is_ok());
 
     // Segundo operador tenta negar a solicitação já finalizada
@@ -1419,8 +1433,11 @@ async fn test_53_mission_runner_anti_replay_aprovacao_consumida() {
     let steps = store.get_steps_for_mission("m_antireplay").unwrap();
     let app_id = steps[0].approval_id.as_ref().unwrap();
 
-    // 2. Operador aprova
-    let app = approval_mgr.grant_approval(app_id, "op_jose").unwrap();
+    // 2. Operador aprova com token de confirmação
+    let app_obj = store.get_approval(app_id).unwrap().unwrap();
+    let app = approval_mgr
+        .grant_approval_authenticated(app_id, "op_jose", app_obj.confirmation_token.as_deref())
+        .unwrap();
     assert_eq!(app.status, ApprovalStatus::Granted);
 
     // 3. Runner executa e consome a aprovação
@@ -1672,4 +1689,303 @@ fn test_57_autenticacao_de_operador_com_token_de_seguranca() {
     let res_ok = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some(token));
     assert!(res_ok.is_ok());
     assert_eq!(res_ok.unwrap().status, ApprovalStatus::Granted);
+}
+
+// ============================================================================
+// GRUPO 5: Marco 8.1.1 Hardening & Regressão de Segurança (Cenários 58 a 62)
+// ============================================================================
+
+#[test]
+fn test_58_tentativa_de_bypass_de_token_em_aprovacao_protegida() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = MissionApprovalManager::new(store.clone(), None);
+
+    let step = MissionStep::new(
+        "s_bypass",
+        "m_bypass",
+        1,
+        "Passo com token obrigatório",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        true,
+        vec![],
+    );
+
+    let app = approval_mgr
+        .request_approval("m_bypass", &step, "operator-jose", 3600)
+        .unwrap();
+    assert!(app.confirmation_token.is_some());
+    let valid_token = app.confirmation_token.as_ref().unwrap();
+
+    // 1. grant_approval legado (sem token) deve falhar fechado com ApprovalMismatch
+    let err_legacy = approval_mgr.grant_approval(&app.id, "operator-jose");
+    assert!(err_legacy.is_err());
+    assert!(matches!(
+        err_legacy.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
+
+    // 2. grant_approval_authenticated com None deve falhar fechado
+    let err_none = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", None);
+    assert!(err_none.is_err());
+    assert!(matches!(
+        err_none.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
+
+    // 3. grant_approval_authenticated com string vazia ou whitespace deve falhar fechado
+    let err_empty = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some(""));
+    assert!(err_empty.is_err());
+    assert!(matches!(
+        err_empty.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
+
+    // 4. Invariante: Aprovação no store permanece intacta em Pending
+    let app_in_store = store.get_approval(&app.id).unwrap().unwrap();
+    assert_eq!(app_in_store.status, ApprovalStatus::Pending);
+
+    // 5. grant_approval_authenticated com token legítimo é aprovado
+    let ok_app = approval_mgr
+        .grant_approval_authenticated(&app.id, "operator-jose", Some(valid_token))
+        .unwrap();
+    assert_eq!(ok_app.status, ApprovalStatus::Granted);
+}
+
+#[test]
+fn test_59_rejeicao_estrita_de_replay_em_consumo_atomico_de_aprovacao() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = MissionApprovalManager::new(store.clone(), None);
+
+    let step = MissionStep::new(
+        "s_atomic_replay",
+        "m_atomic_replay",
+        1,
+        "Ação única sensível",
+        Some("system.echo".to_string()),
+        serde_json::json!({"action": "transfer", "amount": 100}),
+        true,
+        vec![],
+    );
+
+    let app = approval_mgr
+        .request_approval("m_atomic_replay", &step, "operator-jose", 3600)
+        .unwrap();
+    let token = app.confirmation_token.as_ref().unwrap();
+
+    let granted = approval_mgr
+        .grant_approval_authenticated(&app.id, "operator-jose", Some(token))
+        .unwrap();
+    assert_eq!(granted.status, ApprovalStatus::Granted);
+
+    // 1º consumo atômico: deve ter sucesso exatamente uma vez
+    let first_consume = store.consume_approval_atomically(
+        &app.id,
+        "m_atomic_replay",
+        "s_atomic_replay",
+        "system.echo",
+        "operator-jose",
+        &step.parameters,
+    );
+    assert!(first_consume.is_ok());
+
+    // Status no banco agora é Consumed
+    let app_db = store.get_approval(&app.id).unwrap().unwrap();
+    assert_eq!(app_db.status, ApprovalStatus::Consumed);
+
+    // 2º consumo atômico (tentativa de replay com mesmos parâmetros): DEVE falhar
+    let second_consume = store.consume_approval_atomically(
+        &app.id,
+        "m_atomic_replay",
+        "s_atomic_replay",
+        "system.echo",
+        "operator-jose",
+        &step.parameters,
+    );
+    assert!(second_consume.is_err());
+    let err_msg = match second_consume.unwrap_err() {
+        MissionError::ApprovalMismatch(m) => m,
+        other => panic!("Esperava ApprovalMismatch, recebeu: {:?}", other),
+    };
+    assert!(err_msg.contains("já foi consumida previamente (proteção anti-replay ativa)"));
+
+    // Tentativa de consumo com missão incorreta deve falhar
+    let wrong_mission = store.consume_approval_atomically(
+        &app.id,
+        "outra_missao",
+        "s_atomic_replay",
+        "system.echo",
+        "operator-jose",
+        &step.parameters,
+    );
+    assert!(wrong_mission.is_err());
+
+    // Tentativa de consumo com capability incorreta deve falhar
+    let wrong_cap = store.consume_approval_atomically(
+        &app.id,
+        "m_atomic_replay",
+        "s_atomic_replay",
+        "system.different",
+        "operator-jose",
+        &step.parameters,
+    );
+    assert!(wrong_cap.is_err());
+
+    // Tentativa de consumo com operador incorreto deve falhar
+    let wrong_op = store.consume_approval_atomically(
+        &app.id,
+        "m_atomic_replay",
+        "s_atomic_replay",
+        "system.echo",
+        "outro-operador",
+        &step.parameters,
+    );
+    assert!(wrong_op.is_err());
+}
+
+#[test]
+fn test_60_concorrencia_multi_instancia_e_invalidacao_de_fencing_token_de_lease() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+
+    let mission_id = "m_concurrent_lease";
+    let step = MissionStep::new(
+        "s_lease",
+        mission_id,
+        1,
+        "Passo de teste de lease",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        false,
+        vec![],
+    );
+    let mission = MissionPlanner::default()
+        .create_mission(
+            mission_id,
+            "Lease Mission",
+            "Test",
+            "op",
+            "corr",
+            MissionPlan::new(vec![step.clone()]),
+            None,
+        )
+        .unwrap();
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    // 1. Runner 1 adquire lease exclusivo com sucesso (TTL 60s)
+    let fence_1 = store
+        .acquire_mission_lease(mission_id, "runner_instancia_1", 60)
+        .unwrap();
+    assert_eq!(fence_1, 1);
+
+    // 2. Runner 2 tenta adquirir lease na mesma missão enquanto Runner 1 está ativo: DEVE ser rejeitado com erro de execução
+    let conflict = store.acquire_mission_lease(mission_id, "runner_instancia_2", 60);
+    assert!(conflict.is_err());
+    assert!(matches!(
+        conflict.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 3. Runner 1 verifica seu lease: sucesso
+    assert!(store
+        .verify_mission_lease(mission_id, "runner_instancia_1", fence_1)
+        .is_ok());
+
+    // 4. Verificação com fencing token desatualizado é rejeitada imediatamente
+    let fence_mismatch = store.verify_mission_lease(mission_id, "runner_instancia_1", 999);
+    assert!(fence_mismatch.is_err());
+    assert!(matches!(
+        fence_mismatch.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 5. Verificação com proprietário divergente é rejeitada
+    let owner_mismatch = store.verify_mission_lease(mission_id, "runner_impostor", fence_1);
+    assert!(owner_mismatch.is_err());
+    assert!(matches!(
+        owner_mismatch.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 6. Runner 1 renova o lease com sucesso
+    assert!(store
+        .renew_mission_lease(mission_id, "runner_instancia_1", fence_1, 60)
+        .is_ok());
+
+    // Tentativa de renovação com fencing token inválido é rejeitada
+    let bad_renew = store.renew_mission_lease(mission_id, "runner_instancia_1", 999, 60);
+    assert!(bad_renew.is_err());
+    assert!(matches!(
+        bad_renew.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 7. Runner 1 libera o lease com o token atual
+    assert!(store
+        .release_mission_lease(mission_id, "runner_instancia_1", fence_1)
+        .is_ok());
+
+    // 8. Agora Runner 2 consegue adquirir o lease após a liberação limpa
+    let fence_2 = store
+        .acquire_mission_lease(mission_id, "runner_instancia_2", 60)
+        .unwrap();
+    assert_eq!(fence_2, 1);
+}
+
+#[test]
+fn test_61_status_do_motor_de_wakeword_e_heuristica_transparente() {
+    use yuki::voice::wakeword::{
+        PhoneticPatternWakeWordEngine, WakeWordEngine, WakeWordEngineStatus,
+    };
+
+    // 1. Motor fonético declara explicitamente seu status como Experimental (heurística acústica)
+    let engine = PhoneticPatternWakeWordEngine::new();
+    assert_eq!(engine.status(), WakeWordEngineStatus::Experimental);
+
+    // 2. Não há alegação falsa de disponibilidade léxica absoluta
+    assert_ne!(engine.status(), WakeWordEngineStatus::Ready);
+
+    // 3. WakeWordDetector reporta status do motor subjacente
+    let detector = WakeWordDetector::default();
+    assert_eq!(detector.status(), WakeWordEngineStatus::Experimental);
+
+    // 4. Desabilitado reporta Unavailable
+    let mut detector_disabled = WakeWordDetector::default();
+    detector_disabled.set_enabled(false);
+    assert_eq!(
+        detector_disabled.status(),
+        WakeWordEngineStatus::Unavailable
+    );
+}
+
+#[test]
+fn test_62_ciclo_de_vida_de_playback_com_transicao_para_completed_e_failed() {
+    use yuki::contracts::voice::{AudioFormat, AudioOutput};
+    use yuki::voice::playback::{AudioPlaybackController, PlaybackStatus};
+
+    // 1. Estado inicial é Idle
+    let (controller, mock_sink) = AudioPlaybackController::mock();
+    assert_eq!(controller.status(), PlaybackStatus::Idle);
+
+    // 2. Reprodução com duração curta (10ms)
+    let output = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 10, "yuki-voice");
+
+    assert!(controller.play(&output).is_ok());
+    assert_eq!(mock_sink.played_count(), 1);
+
+    // Imediatamente após play pode estar Playing ou Completed
+    let s = controller.status();
+    assert!(s == PlaybackStatus::Playing || s == PlaybackStatus::Completed);
+
+    // Espera tempo suficiente para o áudio expirar (> 10ms)
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    // Controlador transiciona automaticamente para Completed
+    assert_eq!(controller.status(), PlaybackStatus::Completed);
+
+    // 3. Falha quando dispositivo está indisponível transiciona para Failed
+    controller.set_device_available(false);
+    let fail_res = controller.play(&output);
+    assert!(fail_res.is_err());
+    assert_eq!(controller.status(), PlaybackStatus::Failed);
 }

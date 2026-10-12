@@ -1,16 +1,16 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1 (Hardening, Integração Real, Segurança e Auditoria Final de Voice v1 & Missions Foundation) — Concluído, Integrado ao SO, Testado e Homologado; 554 testes ativos aprovados (3 testes live opt-in ignorados, totalizando 557 testes; 0 falhas) no workspace
+Status geral: Marco 8.1.1 (Correções Críticas de Homologação, Hardening Atômico e Auditoria de Segurança) — Concluído, 100% Testado e Submetido à Auditoria Independente Externa; 559 testes ativos aprovados (3 testes live opt-in ignorados, totalizando 562 testes; 0 falhas) no workspace; 62/62 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
-Branch de trabalho: "feature/marco-8.1-hardening"
-Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070) e "marco-7.2-final" (961be2c)
+Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
+Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c) e "marco-8.1-final" (bd588e5)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8 e o **Marco 8.1 (Hardening, Integração Real com SO, Segurança e Auditoria Final de Voice v1 & Missions Foundation)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação e Auditoria de Segurança)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -19,22 +19,15 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7 (Personality v1):** Identidade estável de 3 camadas com salvaguardas ontológicas imutáveis contra simulação de consciência humana (`YUKI_CORE_IDENTITY_DIRECTIVES`), perfil tipado com padrão canônico `Yuki Default` e adaptação contextual dinâmica (`ContextUrgency`);
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
 - **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
-- **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):**
-  1. **Playback Real no SO (`WindowsAudioPlaybackSink`):** Integração à API multimídia nativa `winmm.dll`, detecção de hardware físico (`waveOutGetNumDevs`) e cancelamento síncrono instantâneo para barge-in real via ponteiro nulo (VOICE-01);
-  2. **Captura Real e Push-to-Talk Seguro:** `WindowsAudioCaptureBackend` via MCI waveaudio, detecção de microfone físico (`waveInGetNumDevs`), `PushToTalkController` com limites de 30s e 1MB e flag CLI `yuki voice listen --mic` (VOICE-02);
-  3. **VAD Acústico e Motor Fonético:** Separação estrita entre detecção de atividade de voz (`VoiceActivityDetector` avaliando RMS, ZCR, variância e crista) e motor fonético `PhoneticPatternWakeWordEngine` modelando formantes de /ju:ki/ com rejeição de ruído contínuo e clicks (VOICE-03);
-  4. **Subprocessos Assíncronos sem Órfãos:** Execuções de Whisper e Piper via `tokio::process::Command`, tempfiles criptograficamente imprevisíveis e garantia atômica de `kill` e `wait` em timeouts (VOICE-04);
-  5. **TTS Diagnóstico Honesto:** Reclassificação factual do sintetizador paramétrico como gerador de tons diagnósticos sem alegações infundadas de voz natural (VOICE-05);
-  6. **Governança Tipada de Egress:** `VoiceEgressAuthorization` com hashes SHA-256 de parâmetros, TTL, operador autenticado e isolamento formal entre STT e TTS (VOICE-06);
-  7. **Minimização de Dados em Auditoria:** Omissão de transcrições em claro nos registros persistidos de `VoiceInputReceived` (VOICE-07);
-  8. **Integridade Relacional de Missões:** Chaves estrangeiras e cascades explícitos em `mission_approvals` e `mission_steps` no SQLite (MISS-01);
-  9. **Transições Canônicas de Estado:** Validação rigorosa via `can_transition_to` antes de mutações de status de missão ou passos (MISS-02);
-  10. **Reconciliação Não-Cega na Inicialização:** Passos mutadores interrompidos durante quedas do sistema são recuperados estritamente para `WaitingApproval` e missão para `Paused`, eliminando replays de efeitos colaterais externos (MISS-03);
-  11. **Mutual Exclusion por Leases:** Bloqueio concorrente de execuções simultâneas conflitantes da mesma missão no `MissionRunner` (MISS-04);
-  12. **Governança Ontológica de Risco Independente:** Interrupção no portão humano para qualquer passo de `RiskClass >= High`, independentemente de alucinações de flags do modelo (MISS-05);
-  13. **Verificação Dinâmica de Efeitos pós-Etapa:** Execução integrada do `Verifier` com comprovação formal gravada nos checkpoints (MISS-06);
-  14. **Anti-Replay e Autenticação de Operador:** Estado `ApprovalStatus::Consumed` de uso único atômico e `grant_approval_authenticated` com tokens de confirmação (MISS-07);
-  15. **Suíte Adversarial de 57 Cenários:** 12 novos cenários adversariais somados aos 45 originais, totalizando 57/57 aprovados com 100% de sucesso.
+- **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):** Playback real via `winmm.dll`, captura e PTT no Windows, VAD acústico desacoplado, subprocessos assíncronos sem órfãos, integridade referencial com chaves estrangeiras, concorrência protegida, reconciliação soberana e portão de risco independente;
+- **Marco 8.1.1 (Correções Críticas de Homologação e Auditoria de Segurança):**
+  1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos (`getrandom`), comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo/vazio, sanitização estrita de auditoria (zero token vazado em logs) e falha fechada em `grant_approval` legado (SEC-01);
+  2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` com `UPDATE` atômico condicional único no SQLite verificando status, expiração e integridade de parâmetros, eliminando janela de corrida para reutilização de autorização humana (SEC-02);
+  3. **Leases Persistentes Multi-Instância com Fencing Tokens:** Tabela `mission_leases` no SQLite com TTL, lock exclusivo e tokens monotônicos (`fence_token`) validados em cada etapa pelo `MissionRunner`, impedindo split-brain e mutações por processos atrasados (SEC-03);
+  4. **Honestidade Arquitetural da Wake Word:** Enum `WakeWordEngineStatus` (Ready, Experimental, Unavailable), reclassificação factual do motor fonético como `Experimental` (heurística de energia, não reconhecimento lexical), remoção de fallbacks silenciosos em STT e consolidação do Push-to-Talk como mecanismo soberano primário (SEC-04);
+  5. **Ciclo de Vida de Reprodução e Pinned Buffer:** `WindowsAudioPlaybackSink` fixa buffers WAV em memória (`Arc<Vec<u8>>`) evitando use-after-free em execuções assíncronas do driver multimídia WinMM; `AudioPlaybackController` estendido com estados `Completed` e `Failed` rastreados por temporizador (SEC-05);
+  6. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
+  7. **Suíte Adversarial Expandida:** 62 cenários adversariais aprovados (5 novos testes específicos 58 a 62 cobrindo todos os vetores de vulnerabilidade do Marco 8.1.1).
 
 A situação atual pode ser resumida como:
 
@@ -46,15 +39,15 @@ CONTRATOS DE IMPLEMENTAÇÃO (FOUNDATION v0.1 & MVP-1)
 ████████████████████████████████████████
 FROZEN / IMUTÁVEIS (v0.1.0-foundation e v0.2.0-mvp1)
 
-RESEARCH V1, MARCOS 6, 7, 7.1, 7.2, 8 & 8.1
+RESEARCH V1, MARCOS 6, 7, 7.1, 7.2, 8, 8.1 & 8.1.1
 ████████████████████████████████████████
-IMPLEMENTADOS, HARDENED E HOMOLOGADOS
+IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-554 TESTES ATIVOS PASSANDO (0 FALHAS, 3 LIVE OPT-IN IGNORADOS, TOTALIZANDO 557 TESTES; 57/57 ADVERSARIAIS)
+559 TESTES ATIVOS PASSANDO (0 FALHAS, 3 LIVE OPT-IN IGNORADOS, TOTALIZANDO 562 TESTES; 62/62 ADVERSARIAIS)
 
-
+---
 
 ---
 

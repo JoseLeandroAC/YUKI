@@ -109,6 +109,16 @@ impl SqliteMissionStore {
                 FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS mission_leases (
+                mission_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                fence_token INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE CASCADE
+            );
+
             CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_steps_step_number
             ON mission_steps(mission_id, step_number);
             "#,
@@ -625,6 +635,197 @@ impl SqliteMissionStore {
         Ok(())
     }
 
+    /// Consome atomicamente uma aprovação válida, garantindo uso único (anti-replay) e eliminando TOCTOU.
+    pub fn consume_approval_atomically(
+        &self,
+        approval_id: &str,
+        mission_id: &str,
+        step_id: &str,
+        capability_id: &str,
+        operator_id: &str,
+        parameters: &serde_json::Value,
+    ) -> Result<MissionApproval, MissionError> {
+        let lock = self.conn.lock().unwrap();
+        let now = now_utc();
+        let expected_hash = MissionApproval::compute_hash(parameters);
+        let granted_status_json = serde_json::to_string(&ApprovalStatus::Granted).unwrap();
+        let consumed_status_json = serde_json::to_string(&ApprovalStatus::Consumed).unwrap();
+
+        // Tentativa de consumo atômico via UPDATE condicional estrito
+        let rows_affected = lock
+            .execute(
+                r#"
+                UPDATE mission_approvals
+                SET status = ?1
+                WHERE id = ?2
+                  AND mission_id = ?3
+                  AND step_id = ?4
+                  AND capability_id = ?5
+                  AND operator_id = ?6
+                  AND parameters_hash = ?7
+                  AND status = ?8
+                  AND expires_at > ?9
+                "#,
+                params![
+                    consumed_status_json,
+                    approval_id,
+                    mission_id,
+                    step_id,
+                    capability_id,
+                    operator_id,
+                    expected_hash,
+                    granted_status_json,
+                    now.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| {
+                MissionError::Storage(format!("Falha transacional ao consumir aprovação: {}", e))
+            })?;
+
+        if rows_affected == 1 {
+            // Sucesso atômico: recupera o registro com status atualizado
+            let mut stmt = lock
+                .prepare(
+                    r#"
+                    SELECT id, mission_id, step_id, capability_id, operator_id, parameters_hash,
+                           status, created_at, expires_at, confirmation_token
+                    FROM mission_approvals
+                    WHERE id = ?1
+                    "#,
+                )
+                .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+            let approval = stmt
+                .query_row(params![approval_id], |row| {
+                    let id: String = row.get(0)?;
+                    let m_id: String = row.get(1)?;
+                    let s_id: String = row.get(2)?;
+                    let c_id: String = row.get(3)?;
+                    let op_id: String = row.get(4)?;
+                    let p_hash: String = row.get(5)?;
+                    let status_str: String = row.get(6)?;
+                    let created_str: String = row.get(7)?;
+                    let expires_str: String = row.get(8)?;
+                    let confirmation_token: Option<String> = row.get(9)?;
+
+                    let status: ApprovalStatus = serde_json::from_str(&status_str)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    let created_at = DateTime::parse_from_rfc3339(&created_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    let expires_at = DateTime::parse_from_rfc3339(&expires_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                    Ok(MissionApproval {
+                        id,
+                        mission_id: m_id,
+                        step_id: s_id,
+                        capability_id: c_id,
+                        operator_id: op_id,
+                        parameters_hash: p_hash,
+                        status,
+                        created_at,
+                        expires_at,
+                        confirmation_token,
+                    })
+                })
+                .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+            return Ok(approval);
+        }
+
+        // Falha no UPDATE condicional: investiga causa exata para diagnóstico preciso
+        let mut check_stmt = lock
+            .prepare(
+                r#"
+                SELECT id, mission_id, step_id, capability_id, operator_id, parameters_hash,
+                       status, created_at, expires_at, confirmation_token
+                FROM mission_approvals
+                WHERE id = ?1
+                "#,
+            )
+            .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+        let existing_opt = check_stmt
+            .query_row(params![approval_id], |row| {
+                let id: String = row.get(0)?;
+                let m_id: String = row.get(1)?;
+                let s_id: String = row.get(2)?;
+                let c_id: String = row.get(3)?;
+                let op_id: String = row.get(4)?;
+                let p_hash: String = row.get(5)?;
+                let status_str: String = row.get(6)?;
+                let created_str: String = row.get(7)?;
+                let expires_str: String = row.get(8)?;
+                let confirmation_token: Option<String> = row.get(9)?;
+
+                let status: ApprovalStatus = serde_json::from_str(&status_str)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let created_at = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let expires_at = DateTime::parse_from_rfc3339(&expires_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+
+                Ok(MissionApproval {
+                    id,
+                    mission_id: m_id,
+                    step_id: s_id,
+                    capability_id: c_id,
+                    operator_id: op_id,
+                    parameters_hash: p_hash,
+                    status,
+                    created_at,
+                    expires_at,
+                    confirmation_token,
+                })
+            })
+            .optional()
+            .map_err(|e| MissionError::Storage(e.to_string()))?;
+
+        match existing_opt {
+            None => Err(MissionError::NotFound(format!(
+                "Aprovação '{}' não encontrada",
+                approval_id
+            ))),
+            Some(existing) => {
+                if existing.status == ApprovalStatus::Consumed {
+                    Err(MissionError::ApprovalMismatch(format!(
+                        "Aprovação '{}' já foi consumida previamente (proteção anti-replay ativa)",
+                        approval_id
+                    )))
+                } else if now > existing.expires_at {
+                    Err(MissionError::ApprovalExpired(format!(
+                        "Aprovação '{}' expirou em {}",
+                        approval_id, existing.expires_at
+                    )))
+                } else if existing.status != ApprovalStatus::Granted {
+                    Err(MissionError::ApprovalMismatch(format!(
+                        "Aprovação '{}' não está no estado concedido (status atual: {:?})",
+                        approval_id, existing.status
+                    )))
+                } else if existing.mission_id != mission_id
+                    || existing.step_id != step_id
+                    || existing.capability_id != capability_id
+                    || existing.operator_id != operator_id
+                    || existing.parameters_hash != expected_hash
+                {
+                    Err(MissionError::ApprovalMismatch(format!(
+                        "Divergência de parâmetros, etapa ou identidade para a aprovação '{}'",
+                        approval_id
+                    )))
+                } else {
+                    Err(MissionError::ApprovalMismatch(format!(
+                        "Falha ao validar e consumir atomicamente a aprovação '{}'",
+                        approval_id
+                    )))
+                }
+            }
+        }
+    }
+
     pub fn get_approval(&self, approval_id: &str) -> Result<Option<MissionApproval>, MissionError> {
         let lock = self.conn.lock().unwrap();
         let mut stmt = lock
@@ -796,5 +997,198 @@ impl SqliteMissionStore {
         }
 
         Ok(recovered)
+    }
+
+    /// Adquire um lease exclusivo persistente no SQLite com fencing token para uma missão.
+    /// Garante exclusão mútua estrita entre múltiplos processos ou instâncias concorrentes.
+    pub fn acquire_mission_lease(
+        &self,
+        mission_id: &str,
+        owner_id: &str,
+        ttl_secs: u64,
+    ) -> Result<u64, MissionError> {
+        let lock = self.conn.lock().unwrap();
+        let now = now_utc();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+
+        let row_opt: Option<(String, i64, String)> = lock
+            .query_row(
+                "SELECT owner_id, fence_token, expires_at FROM mission_leases WHERE mission_id = ?1",
+                params![mission_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| MissionError::Storage(format!("Falha ao consultar lease da missão: {}", e)))?;
+
+        match row_opt {
+            None => {
+                let fence_token = 1u64;
+                lock.execute(
+                    r#"
+                    INSERT INTO mission_leases (mission_id, owner_id, fence_token, acquired_at, expires_at, heartbeat_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                    params![
+                        mission_id,
+                        owner_id,
+                        fence_token as i64,
+                        now.to_rfc3339(),
+                        expires_at.to_rfc3339(),
+                        now.to_rfc3339(),
+                    ],
+                )
+                .map_err(|e| MissionError::Storage(format!("Falha ao registrar novo lease: {}", e)))?;
+                Ok(fence_token)
+            }
+            Some((current_owner, current_fence_i64, expires_str)) => {
+                let current_fence = current_fence_i64 as u64;
+                let current_expires = DateTime::parse_from_rfc3339(&expires_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(now);
+
+                if current_expires > now {
+                    if current_owner == owner_id {
+                        // O mesmo executor está renovando/reafirmando seu lease existente
+                        lock.execute(
+                            "UPDATE mission_leases SET expires_at = ?1, heartbeat_at = ?2 WHERE mission_id = ?3 AND owner_id = ?4",
+                            params![expires_at.to_rfc3339(), now.to_rfc3339(), mission_id, owner_id],
+                        )
+                        .map_err(|e| MissionError::Storage(format!("Falha ao atualizar lease existente: {}", e)))?;
+                        Ok(current_fence)
+                    } else {
+                        // Outro executor ativo detém o lease
+                        Err(MissionError::ExecutionFailed(format!(
+                            "Missão '{}' já possui lease ativo pelo executor '{}' (válido até {})",
+                            mission_id, current_owner, current_expires
+                        )))
+                    }
+                } else {
+                    // Lease anterior expirou (crash ou abandono pelo executor prévio).
+                    // Recuperação soberana com incremento monótono do fencing token!
+                    let new_fence = current_fence + 1;
+                    lock.execute(
+                        r#"
+                        UPDATE mission_leases
+                        SET owner_id = ?1, fence_token = ?2, acquired_at = ?3, expires_at = ?4, heartbeat_at = ?5
+                        WHERE mission_id = ?6
+                        "#,
+                        params![
+                            owner_id,
+                            new_fence as i64,
+                            now.to_rfc3339(),
+                            expires_at.to_rfc3339(),
+                            now.to_rfc3339(),
+                            mission_id,
+                        ],
+                    )
+                    .map_err(|e| MissionError::Storage(format!("Falha ao recuperar lease expirado: {}", e)))?;
+                    Ok(new_fence)
+                }
+            }
+        }
+    }
+
+    /// Valida que o executor e o fencing token continuam soberanamente válidos e ativos.
+    pub fn verify_mission_lease(
+        &self,
+        mission_id: &str,
+        owner_id: &str,
+        fence_token: u64,
+    ) -> Result<(), MissionError> {
+        let lock = self.conn.lock().unwrap();
+        let now = now_utc();
+
+        let row_opt: Option<(String, i64, String)> = lock
+            .query_row(
+                "SELECT owner_id, fence_token, expires_at FROM mission_leases WHERE mission_id = ?1",
+                params![mission_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| MissionError::Storage(format!("Falha ao verificar lease da missão: {}", e)))?;
+
+        match row_opt {
+            Some((current_owner, current_fence_i64, expires_str)) => {
+                let current_fence = current_fence_i64 as u64;
+                let current_expires = DateTime::parse_from_rfc3339(&expires_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(now);
+
+                if current_owner != owner_id || current_fence != fence_token {
+                    return Err(MissionError::ExecutionFailed(format!(
+                        "Lease da missão '{}' foi revogado ou superseded por outro executor (fencing token {} != {})",
+                        mission_id, fence_token, current_fence
+                    )));
+                }
+
+                if now > current_expires {
+                    return Err(MissionError::ExecutionFailed(format!(
+                        "Lease da missão '{}' expirou em {}",
+                        mission_id, current_expires
+                    )));
+                }
+
+                Ok(())
+            }
+            None => Err(MissionError::ExecutionFailed(format!(
+                "Nenhum lease ativo encontrado para a missão '{}'",
+                mission_id
+            ))),
+        }
+    }
+
+    /// Renova o tempo de vida do lease exclusivo para a missão em execução.
+    pub fn renew_mission_lease(
+        &self,
+        mission_id: &str,
+        owner_id: &str,
+        fence_token: u64,
+        ttl_secs: u64,
+    ) -> Result<(), MissionError> {
+        let lock = self.conn.lock().unwrap();
+        let now = now_utc();
+        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+
+        let rows_affected = lock
+            .execute(
+                r#"
+                UPDATE mission_leases
+                SET expires_at = ?1, heartbeat_at = ?2
+                WHERE mission_id = ?3 AND owner_id = ?4 AND fence_token = ?5 AND expires_at > ?6
+                "#,
+                params![
+                    expires_at.to_rfc3339(),
+                    now.to_rfc3339(),
+                    mission_id,
+                    owner_id,
+                    fence_token as i64,
+                    now.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| MissionError::Storage(format!("Falha ao renovar lease: {}", e)))?;
+
+        if rows_affected == 0 {
+            return Err(MissionError::ExecutionFailed(format!(
+                "Falha ao renovar lease da missão '{}': revogado, pertencente a outro executor ou expirado",
+                mission_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Libera formalmente o lease de uma missão ao concluir, pausar, cancelar ou abortar.
+    pub fn release_mission_lease(
+        &self,
+        mission_id: &str,
+        owner_id: &str,
+        fence_token: u64,
+    ) -> Result<(), MissionError> {
+        let lock = self.conn.lock().unwrap();
+        let _ = lock.execute(
+            "DELETE FROM mission_leases WHERE mission_id = ?1 AND owner_id = ?2 AND fence_token = ?3",
+            params![mission_id, owner_id, fence_token as i64],
+        );
+        Ok(())
     }
 }
