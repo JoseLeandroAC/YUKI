@@ -10,6 +10,7 @@ pub mod memory;
 pub mod output;
 pub mod research;
 pub mod verification;
+pub mod voice;
 
 pub use authorization::*;
 pub use capability::*;
@@ -23,3 +24,4 @@ pub use memory::*;
 pub use output::*;
 pub use research::*;
 pub use verification::*;
+pub use voice::*;

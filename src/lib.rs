@@ -10,6 +10,7 @@ pub mod persistence;
 pub mod personality;
 pub mod security;
 pub mod verification;
+pub mod voice;
 
 pub use contracts::*;
 pub use core::*;
