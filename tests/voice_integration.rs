@@ -224,7 +224,7 @@ fn test_voice_interruption_barge_in() {
     );
 
     // Reset limpa
-    playback.reset();
+    assert!(playback.reset().is_ok());
     assert_eq!(
         playback.status(),
         yuki::voice::playback::PlaybackStatus::Idle

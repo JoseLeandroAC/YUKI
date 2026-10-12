@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1.1 — alinhamento final implementado e submetido à auditoria independente; 564 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 568 testes; 0 falhas) no workspace; 67/67 testes adversariais aprovados
+Status geral: Marco 8.1.1 — correção final de áudio implementada e aguardando homologação independente; 570 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 575 testes; 0 falhas) no workspace; 69/69 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -20,16 +20,17 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
 - **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
 - **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):** Playback real via `winmm.dll`, captura e PTT no Windows, VAD acústico desacoplado, subprocessos assíncronos sem órfãos, integridade referencial com chaves estrangeiras, concorrência protegida, reconciliação soberana e portão de risco independente;
-- **Marco 8.1.1 (Alinhamento Técnico Final e Hardening Conclusivo):**
+- **Marco 8.1.1 (Alinhamento Técnico Final, Hardening Conclusivo e Correção Final de Áudio):**
   1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos (`getrandom`), comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo/vazio, sanitização estrita de auditoria (zero token vazado em logs) e falha fechada em `grant_approval` legado (SEC-01);
   2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` com `UPDATE` atômico condicional único no SQLite verificando status, expiração e integridade de parâmetros, eliminando janela de corrida para reutilização de autorização humana (SEC-02);
   3. **Máquina de Estados de Aprovação Estrita e Disputa Concorrente:** FSM formal com `can_transition_to` e `is_terminal` em `ApprovalStatus`; transições CAS no SQLite (`transition_approval_status`); resolução estrita de exclusão mútua entre Grant e Deny simultâneos onde exatamente um prevalece e o outro falha de forma limpa;
   4. **Leases Persistentes Multi-Instância com Fencing Tokens e Recuperação Pós-Expiração:** Tabela `mission_leases` no SQLite com TTL, lock exclusivo com transação imediata (`TransactionBehavior::Immediate`), rejeição de aquisições concorrentes em leases ativas, e recuperação pós-expiração com incremento atômico de `fence_token` invalidando o antigo proprietário;
   5. **Wake Word com Bloqueio de Auto-Ativação Experimental por Padrão:** Enum `WakeWordEngineStatus` (Ready, Experimental, Unavailable); motor heurístico classificado honestamente como `Experimental`; flag `allow_experimental` (padrão `false`) exigida para auto-ativação em motores experimentais; método `can_auto_activate()`; remoção de fallbacks silenciosos em STT e Push-to-Talk soberano;
-  6. **Controlador de Reprodução Unificado e Transparência Temporal:** Unificação do estado em `PlaybackStateInner` sob mutex único atômico; buffer WAV pinned com `Drop` seguro no driver `winmm`; declaração explícita `is_completion_estimated() -> true`;
-  7. **Invariante de Segurança Acústica em Testes:** Execução padrão de testes (`cargo test`) 100% silenciosa; emissão física em alto-falantes estritamente opt-in via `YUKI_LIVE_AUDIO_TESTS=1`;
-  8. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
-  9. **Suíte Adversarial Conclusiva:** 67 cenários adversariais aprovados (testes 63 a 67 cobrindo FSM de aprovações, concorrência Grant/Deny, expiração e fencing de leases, bloqueio de wake word experimental e segurança acústica do playback controller).
+  6. **Propagação Rigorosa de Falhas de Interrupção de Áudio e Anti-Sobreposição:** `play()`, `interrupt()`, `stop()` e `reset()` propagam formalmente qualquer falha do sink; se a interrupção prévia falhar em `play()`, o novo áudio é rejeitado imediatamente, prevenindo sobreposição de voz, com estado `PlaybackStatus::Failed` e limpeza de buffers e timing; `MockPlaybackSink` com suporte a injeção determinística de falha via `set_interrupt_fails(bool)`;
+  7. **Arquitetura de Áudio Silenciosa por Construção (Zero Heurísticas de Caminho):** Remoção total de `is_test_environment()` e checagens de `current_exe()`; enum `AudioOutputPolicy` (`Production`, `OptInTest`, `Silenced`); `AudioPlaybackController::new()` e `default()` usam `MockPlaybackSink` por construção; `WindowsAudioPlaybackSink::production()` exposto para uso operacional real;
+  8. **Revisão e Documentação do Backend WinMM:** Fixação de buffers WAV pinned em memória (`Arc<Vec<u8>>`), cancelamento atômico no `Drop` via `PlaySoundA(NULL, NULL, 0)` prevenindo use-after-free assíncrono e declaração explícita de término estimado via `is_completion_estimated() -> true`;
+  9. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
+  10. **Suíte Adversarial Conclusiva Expandida:** 69 cenários adversariais aprovados (testes 68 e 69 cobrindo rejeição de sobreposição pós-falha de interrupção e silêncio por construção).
 
 A situação atual pode ser resumida como:
 
@@ -47,7 +48,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-564 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 568 TESTES; 67/67 ADVERSARIAIS)
+570 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 575 TESTES; 69/69 ADVERSARIAIS)
 
 ---
 

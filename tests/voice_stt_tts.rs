@@ -171,11 +171,11 @@ fn test_audio_playback_controller_lifecycle_and_interruption() {
     assert_eq!(controller.status(), PlaybackStatus::Interrupted);
 
     // Stop
-    controller.stop();
+    assert!(controller.stop().is_ok());
     assert_eq!(controller.status(), PlaybackStatus::Stopped);
 
     // Reset
-    controller.reset();
+    assert!(controller.reset().is_ok());
     assert_eq!(controller.status(), PlaybackStatus::Idle);
 
     // Device unavailable failure

@@ -29,6 +29,22 @@ pub enum PlaybackStatus {
     Failed,
 }
 
+/// Política de autorização para emissão sonora física no subsistema de áudio.
+///
+/// Invariante de Segurança Acústica:
+/// A execução da suíte de testes (`cargo test`) DEVE ser 100% silenciosa por construção,
+/// sem depender de inspeção de caminhos de arquivos executáveis (`deps`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioOutputPolicy {
+    /// Produção: emite áudio diretamente no hardware via API nativa do sistema operacional (winmm::PlaySoundA).
+    Production,
+    /// Teste com opt-in explícito: só emite áudio físico no hardware se a variável de ambiente `YUKI_LIVE_AUDIO_TESTS=1`
+    /// estiver presente. Sem a variável, valida e armazena o buffer de áudio na memória, mantendo silêncio absoluto.
+    OptInTest,
+    /// Silenciado por construção: nunca aciona o hardware de áudio; valida o buffer e o mantém na memória.
+    Silenced,
+}
+
 // ---------------------------------------------------------------------------
 // Backend Windows nativo via winmm.dll
 // ---------------------------------------------------------------------------
@@ -54,7 +70,7 @@ mod winmm {
     }
 }
 
-/// Verifica se a execução atual possui autorização explícita para emissão de áudio físico.
+/// Verifica se a execução atual possui autorização explícita para emissão de áudio físico em testes.
 ///
 /// Invariante de Segurança Acústica:
 /// A execução de testes (`cargo test`) DEVE ser 100% silenciosa por padrão.
@@ -64,27 +80,27 @@ pub fn is_live_audio_test_allowed() -> bool {
     std::env::var("YUKI_LIVE_AUDIO_TESTS").as_deref() == Ok("1")
 }
 
-pub fn is_test_environment() -> bool {
-    if is_live_audio_test_allowed() {
-        return false;
-    }
-    cfg!(test)
-        || std::env::var("YUKI_MOCK_AUDIO").is_ok()
-        || std::env::current_exe()
-            .map(|p| {
-                let s = p.to_string_lossy();
-                s.contains("deps\\") || s.contains("deps/")
-            })
-            .unwrap_or(false)
-}
-
 /// Sink concreto para Windows usando APIs nativas multimídia (winmm.dll).
 ///
-/// Não requer dependências externas pesadas e garante controle direto de
-/// hardware, interrupção imediata de reprodução (barge-in) e detecção de dispositivos.
-/// Mantém o buffer de áudio fixo em memória (pinned Arc<Vec<u8>>) durante a execução assíncrona.
+/// ARQUITETURA E GERENCIAMENTO DE MEMÓRIA (WinMM Safety Invariants):
+/// 1. **Ciclo de Vida de Memória do `PlaySoundA`**:
+///    Quando invocado com `SND_MEMORY | SND_ASYNC`, o driver do Windows lê o ponteiro de memória
+///    de forma concorrente e assíncrona. O Windows NÃO duplica o buffer internamente na API;
+///    ele faz streaming diretamente da memória do processo.
+/// 2. **Buffer Pinned em Memória**:
+///    Para prevenir corrupção de memória e use-after-free, o `WindowsAudioPlaybackSink` armazena
+///    uma referência `Arc<Vec<u8>>` em `current_wav_buffer` durante todo o período em que o som
+///    pode estar sendo tocado pelo driver de áudio do kernel.
+/// 3. **Interrupção Atômica e Implementação de `Drop`**:
+///    Ao substituir um buffer ou destruir a instância (`Drop`), invocamos `PlaySoundA(NULL, NULL, 0)`.
+///    Isso força a interrupção imediata da leitura do hardware antes que o ponteiro anterior seja liberado.
+/// 4. **Conclusão Estimada vs Confirmação Física**:
+///    A API clássica `PlaySoundA` não fornece callbacks assíncronos de finalização (como `waveOutWrite`
+///    com eventos de cabeçalho). O `AudioPlaybackController` rastreia o ciclo de vida via temporizador
+///    baseado no número de amostras PCM e sample rate (`is_completion_estimated() -> true`).
 #[derive(Debug)]
 pub struct WindowsAudioPlaybackSink {
+    policy: AudioOutputPolicy,
     current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
 }
 
@@ -106,10 +122,38 @@ impl Default for WindowsAudioPlaybackSink {
 }
 
 impl WindowsAudioPlaybackSink {
+    /// Construtor seguro padrão: utiliza `AudioOutputPolicy::OptInTest`.
+    /// Garante que testes que instanciem este sink diretamente não emitam som sem autorização explícita.
     pub fn new() -> Self {
+        Self::with_policy(AudioOutputPolicy::OptInTest)
+    }
+
+    /// Construtor de produção: emite áudio físico diretamente no hardware sem depender de variáveis de teste.
+    pub fn production() -> Self {
+        Self::with_policy(AudioOutputPolicy::Production)
+    }
+
+    /// Construtor para testes com opt-in: só emite som se `YUKI_LIVE_AUDIO_TESTS=1`.
+    pub fn opt_in_test() -> Self {
+        Self::with_policy(AudioOutputPolicy::OptInTest)
+    }
+
+    /// Construtor estritamente silenciado: nunca emite som no hardware.
+    pub fn silenced() -> Self {
+        Self::with_policy(AudioOutputPolicy::Silenced)
+    }
+
+    /// Construtor parametrizado com a política desejada.
+    pub fn with_policy(policy: AudioOutputPolicy) -> Self {
         Self {
+            policy,
             current_wav_buffer: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Retorna a política de saída de áudio ativa.
+    pub fn policy(&self) -> AudioOutputPolicy {
+        self.policy
     }
 
     /// Prepara um buffer de áudio WAV válido a partir do payload fornecido.
@@ -138,9 +182,15 @@ impl AudioPlaybackSink for WindowsAudioPlaybackSink {
     fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
         #[cfg(windows)]
         {
-            if is_test_environment() {
-                // Em ambiente de testes sem opt-in explícito YUKI_LIVE_AUDIO_TESTS=1,
-                // silencia a saída física no hardware mas valida e retém o buffer em memória.
+            let should_emit_physical = match self.policy {
+                AudioOutputPolicy::Production => true,
+                AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
+                AudioOutputPolicy::Silenced => false,
+            };
+
+            if !should_emit_physical {
+                // Em modo não-físico (teste sem opt-in ou silenciado), valida a integridade
+                // do buffer WAV e retém o buffer em memória para inspeção, mantendo silêncio absoluto.
                 let wav_bytes = Arc::new(self.prepare_wav_bytes(output)?);
                 let mut buf_lock = self.current_wav_buffer.lock().unwrap();
                 *buf_lock = Some(wav_bytes);
@@ -228,6 +278,7 @@ pub struct MockPlaybackSink {
     played_outputs: Arc<Mutex<Vec<AudioOutput>>>,
     interrupted_count: Arc<AtomicUsize>,
     device_available: Arc<AtomicBool>,
+    interrupt_fails: Arc<AtomicBool>,
 }
 
 impl Default for MockPlaybackSink {
@@ -242,6 +293,7 @@ impl MockPlaybackSink {
             played_outputs: Arc::new(Mutex::new(Vec::new())),
             interrupted_count: Arc::new(AtomicUsize::new(0)),
             device_available: Arc::new(AtomicBool::new(true)),
+            interrupt_fails: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -253,6 +305,14 @@ impl MockPlaybackSink {
 
     pub fn set_device_available(&self, available: bool) {
         self.device_available.store(available, Ordering::SeqCst);
+    }
+
+    pub fn set_interrupt_fails(&self, fails: bool) {
+        self.interrupt_fails.store(fails, Ordering::SeqCst);
+    }
+
+    pub fn is_interrupt_failing(&self) -> bool {
+        self.interrupt_fails.load(Ordering::SeqCst)
     }
 
     pub fn played_count(&self) -> usize {
@@ -270,6 +330,7 @@ impl MockPlaybackSink {
     pub fn clear(&self) {
         self.played_outputs.lock().unwrap().clear();
         self.interrupted_count.store(0, Ordering::SeqCst);
+        self.interrupt_fails.store(false, Ordering::SeqCst);
     }
 }
 
@@ -285,6 +346,11 @@ impl AudioPlaybackSink for MockPlaybackSink {
     }
 
     fn interrupt(&self) -> Result<(), VoiceError> {
+        if self.interrupt_fails.load(Ordering::SeqCst) {
+            return Err(VoiceError::PlaybackFailed(
+                "Falha simulada na interrupção do sink de áudio".to_string(),
+            ));
+        }
         self.interrupted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -328,9 +394,12 @@ impl Default for PlaybackStateInner {
 /// - Acoplamento direto com o subsistema de áudio via `AudioPlaybackSink`.
 /// - Prevenção estrita de sobreposição acidental de fala.
 /// - Interrupção física instantânea na detecção de fala do operador (barge-in).
+/// - Propagação rigorosa de falhas em interrupção com transição para `PlaybackStatus::Failed`.
+/// - Rejeição segura de novo áudio caso a interrupção da reprodução anterior falhe.
 /// - Tratamento explícito de dispositivo de áudio indisponível ou inacessível.
 /// - Limpeza imediata de buffers e recursos na finalização ou cancelamento.
 /// - Proteção de concorrência com mutex único atômico (`PlaybackStateInner`).
+/// - Silêncio absoluto por padrão na suíte de testes (`MockPlaybackSink` por construção).
 #[derive(Debug, Clone)]
 pub struct AudioPlaybackController {
     state: Arc<Mutex<PlaybackStateInner>>,
@@ -344,27 +413,45 @@ impl Default for AudioPlaybackController {
 }
 
 impl AudioPlaybackController {
-    /// Construtor padrão da plataforma.
+    /// Construtor padrão seguro: inicializa com `MockPlaybackSink`.
     ///
-    /// No Windows com hardware de áudio detectado, inicializa com `WindowsAudioPlaybackSink`.
-    /// Em ambientes CI ou de teste (sem opt-in explícito `YUKI_LIVE_AUDIO_TESTS=1`), faz fallback
-    /// limpo para `MockPlaybackSink` para garantir silêncio absoluto.
+    /// Por construção, qualquer chamada a `new()` ou `default()` em testes ou instâncias
+    /// genéricas é 100% silenciosa e não depende de inspeção de caminho de arquivo executável.
     pub fn new() -> Self {
+        Self::with_sink(Arc::new(MockPlaybackSink::new()))
+    }
+
+    /// Construtor para ambiente de produção: conecta diretamente ao subsistema nativo do sistema operacional.
+    ///
+    /// No Windows com hardware de áudio detectado, inicializa com `WindowsAudioPlaybackSink::production()`.
+    /// Se nenhum dispositivo físico for detectado, realiza fallback limpo para `MockPlaybackSink`.
+    pub fn production() -> Self {
         #[cfg(windows)]
         {
-            if is_test_environment() {
-                Self::with_sink(Arc::new(MockPlaybackSink::new()))
+            let win_sink = WindowsAudioPlaybackSink::production();
+            if win_sink.is_device_available() {
+                Self::with_sink(Arc::new(win_sink))
             } else {
-                let win_sink = WindowsAudioPlaybackSink::new();
-                if win_sink.is_device_available() {
-                    Self::with_sink(Arc::new(win_sink))
-                } else {
-                    tracing::warn!(
-                        "Nenhum dispositivo de áudio físico detectado. Inicializando MockPlaybackSink como fallback limpo."
-                    );
-                    Self::with_sink(Arc::new(MockPlaybackSink::new()))
-                }
+                tracing::warn!(
+                    "Nenhum dispositivo de áudio físico detectado. Inicializando MockPlaybackSink como fallback limpo."
+                );
+                Self::with_sink(Arc::new(MockPlaybackSink::new()))
             }
+        }
+        #[cfg(not(windows))]
+        {
+            tracing::warn!(
+                "Sistema operacional não-Windows. Inicializando MockPlaybackSink como fallback limpo."
+            );
+            Self::with_sink(Arc::new(MockPlaybackSink::new()))
+        }
+    }
+
+    /// Construtor para testes ao vivo (opt-in explícito via `YUKI_LIVE_AUDIO_TESTS=1`).
+    pub fn live_test() -> Self {
+        #[cfg(windows)]
+        {
+            Self::with_sink(Arc::new(WindowsAudioPlaybackSink::opt_in_test()))
         }
         #[cfg(not(windows))]
         {
@@ -380,11 +467,16 @@ impl AudioPlaybackController {
         }
     }
 
-    /// Cria uma instância conectada a um `MockPlaybackSink`, retornando o controlador e o mock.
+    /// Cria uma instância conectada a um `MockPlaybackSink`, retornando o controlador e o mock observável.
     pub fn mock() -> (Self, Arc<MockPlaybackSink>) {
         let mock_sink = Arc::new(MockPlaybackSink::new());
         let controller = Self::with_sink(mock_sink.clone());
         (controller, mock_sink)
+    }
+
+    /// Construtor conveniente para testes determinísticos.
+    pub fn for_test() -> Self {
+        Self::mock().0
     }
 
     /// Retorna referência ao sink de reprodução ativo.
@@ -433,8 +525,17 @@ impl AudioPlaybackController {
         true
     }
 
-    /// Envia um buffer de áudio sintetizado para reprodução física.
-    /// Rejeita se o dispositivo estiver indisponível ou interrompe reprodução prévia em curso.
+    /// Envia um buffer de áudio sintetizado para reprodução.
+    ///
+    /// Invariantes de Segurança e Tratamento de Erro:
+    /// - Se o dispositivo estiver indisponível, falha imediatamente com `DeviceUnavailable`.
+    /// - Se houver reprodução ativa (`Playing`), tenta interrompê-la antes de iniciar a nova.
+    /// - SE A INTERRUPÇÃO PRÉVIA FALHAR:
+    ///   - O novo áudio NÃO é reproduzido sobre o áudio em falha.
+    ///   - O estado do controlador transita para `PlaybackStatus::Failed`.
+    ///   - Os recursos de timing e o buffer atual são limpos.
+    ///   - O erro retornado pelo sink é registrado em `tracing::error!` e propagado ao chamador.
+    /// - Se o envio para o sink falhar, transita para `Failed`, limpa buffers e retorna o erro.
     pub fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
         if !self.is_device_available() {
             let mut state = self.state.lock().unwrap();
@@ -447,11 +548,25 @@ impl AudioPlaybackController {
 
         // Interrompe reprodução prévia no sink se já estiver tocando
         if self.status() == PlaybackStatus::Playing {
-            let _ = self.sink.interrupt();
+            if let Err(e) = self.sink.interrupt() {
+                tracing::error!(
+                    error = %e,
+                    "Falha ao interromper reprodução ativa antes de iniciar novo áudio"
+                );
+                let mut state = self.state.lock().unwrap();
+                state.status = PlaybackStatus::Failed;
+                state.playback_timing = None;
+                state.current_output = None;
+                return Err(e);
+            }
         }
 
         // Envia para o sink físico/mock
         if let Err(e) = self.sink.play(output) {
+            tracing::error!(
+                error = %e,
+                "Falha ao enviar buffer para o sink de reprodução de áudio"
+            );
             let mut state = self.state.lock().unwrap();
             state.status = PlaybackStatus::Failed;
             state.playback_timing = None;
@@ -477,8 +592,23 @@ impl AudioPlaybackController {
     }
 
     /// Interrompe imediatamente a reprodução em andamento (ex: barge-in do usuário).
+    ///
+    /// Se a interrupção no sink falhar:
+    /// - O estado transita para `PlaybackStatus::Failed`.
+    /// - Os recursos de timing e buffers são limpos.
+    /// - O erro é registrado em `tracing::error!` e retornado formalmente.
     pub fn interrupt(&self) -> Result<(), VoiceError> {
-        let _ = self.sink.interrupt();
+        if let Err(e) = self.sink.interrupt() {
+            tracing::error!(
+                error = %e,
+                "Falha ao interromper sink de reprodução de áudio"
+            );
+            let mut state = self.state.lock().unwrap();
+            state.status = PlaybackStatus::Failed;
+            state.playback_timing = None;
+            state.current_output = None;
+            return Err(e);
+        }
 
         let mut state = self.state.lock().unwrap();
         state.status = PlaybackStatus::Interrupted;
@@ -488,24 +618,52 @@ impl AudioPlaybackController {
         Ok(())
     }
 
-    /// Encerra normalmente a reprodução e retorna o estado para parado.
-    pub fn stop(&self) {
-        let _ = self.sink.interrupt();
+    /// Encerra a reprodução e coloca o controlador no estado Stopped.
+    ///
+    /// Propaga falhas do sink de áudio, transitando para `PlaybackStatus::Failed` em caso de erro.
+    pub fn stop(&self) -> Result<(), VoiceError> {
+        if let Err(e) = self.sink.interrupt() {
+            tracing::error!(
+                error = %e,
+                "Falha ao interromper sink de reprodução durante stop()"
+            );
+            let mut state = self.state.lock().unwrap();
+            state.status = PlaybackStatus::Failed;
+            state.playback_timing = None;
+            state.current_output = None;
+            return Err(e);
+        }
 
         let mut state = self.state.lock().unwrap();
         state.status = PlaybackStatus::Stopped;
         state.playback_timing = None;
         state.current_output = None;
+
+        Ok(())
     }
 
-    /// Reseta o controlador para Idle.
-    pub fn reset(&self) {
-        let _ = self.sink.interrupt();
+    /// Reseta o controlador para o estado inicial Idle.
+    ///
+    /// Propaga falhas do sink de áudio, transitando para `PlaybackStatus::Failed` em caso de erro.
+    pub fn reset(&self) -> Result<(), VoiceError> {
+        if let Err(e) = self.sink.interrupt() {
+            tracing::error!(
+                error = %e,
+                "Falha ao interromper sink de reprodução durante reset()"
+            );
+            let mut state = self.state.lock().unwrap();
+            state.status = PlaybackStatus::Failed;
+            state.playback_timing = None;
+            state.current_output = None;
+            return Err(e);
+        }
 
         let mut state = self.state.lock().unwrap();
         state.status = PlaybackStatus::Idle;
         state.playback_timing = None;
         state.current_output = None;
+
+        Ok(())
     }
 }
 
@@ -515,10 +673,11 @@ mod tests {
     use crate::contracts::voice::AudioFormat;
 
     #[test]
-    fn test_mock_playback_sink_lifecycle() {
+    fn test_mock_playback_sink_lifecycle_and_interrupt_failure() {
         let sink = MockPlaybackSink::new();
         assert!(sink.is_device_available());
         assert_eq!(sink.played_count(), 0);
+        assert!(!sink.is_interrupt_failing());
 
         let output = AudioOutput::new(vec![0u8; 32], AudioFormat::default(), 1, "test");
         assert!(sink.play(&output).is_ok());
@@ -526,6 +685,22 @@ mod tests {
 
         assert!(sink.interrupt().is_ok());
         assert_eq!(sink.interrupted_count(), 1);
+
+        // Simula falha na interrupção do sink
+        sink.set_interrupt_fails(true);
+        assert!(sink.is_interrupt_failing());
+        let int_err = sink.interrupt();
+        assert!(int_err.is_err());
+        assert!(matches!(
+            int_err.unwrap_err(),
+            VoiceError::PlaybackFailed(_)
+        ));
+        assert_eq!(sink.interrupted_count(), 1); // Não incrementou por conta da falha
+
+        // Recupera sucesso
+        sink.set_interrupt_fails(false);
+        assert!(sink.interrupt().is_ok());
+        assert_eq!(sink.interrupted_count(), 2);
 
         sink.set_device_available(false);
         assert!(!sink.is_device_available());
@@ -551,6 +726,95 @@ mod tests {
     }
 
     #[test]
+    fn test_playback_controller_interrupt_error_propagation_and_cleanup() {
+        let (controller, mock) = AudioPlaybackController::mock();
+        let output = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 1000, "test-err");
+
+        assert!(controller.play(&output).is_ok());
+        assert_eq!(controller.status(), PlaybackStatus::Playing);
+        assert!(controller.current_output().is_some());
+
+        // Força falha na interrupção
+        mock.set_interrupt_fails(true);
+        let int_res = controller.interrupt();
+        assert!(int_res.is_err());
+        assert!(matches!(
+            int_res.unwrap_err(),
+            VoiceError::PlaybackFailed(_)
+        ));
+
+        // Invariante: estado transiciona para Failed e buffers são limpos
+        assert_eq!(controller.status(), PlaybackStatus::Failed);
+        assert_eq!(controller.current_output(), None);
+    }
+
+    #[test]
+    fn test_playback_controller_play_over_playing_fails_if_interrupt_fails() {
+        let (controller, mock) = AudioPlaybackController::mock();
+        let output1 = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 5000, "audio-1");
+        let output2 = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 5000, "audio-2");
+
+        // Inicia áudio 1
+        assert!(controller.play(&output1).is_ok());
+        assert_eq!(controller.status(), PlaybackStatus::Playing);
+        assert_eq!(mock.played_count(), 1);
+
+        // Simula que o sink de áudio falha ao tentar interromper o áudio 1
+        mock.set_interrupt_fails(true);
+
+        // Tentar tocar áudio 2 DEVE falhar imediatamente sem tocar o segundo áudio
+        let play2_res = controller.play(&output2);
+        assert!(play2_res.is_err());
+        assert!(matches!(
+            play2_res.unwrap_err(),
+            VoiceError::PlaybackFailed(_)
+        ));
+
+        // Áudio 2 não foi enviado ao sink
+        assert_eq!(mock.played_count(), 1);
+        assert_eq!(controller.status(), PlaybackStatus::Failed);
+        assert_eq!(controller.current_output(), None);
+    }
+
+    #[test]
+    fn test_playback_controller_stop_and_reset_error_propagation() {
+        let (controller, mock) = AudioPlaybackController::mock();
+        let output = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 1000, "test-stop");
+
+        assert!(controller.play(&output).is_ok());
+        mock.set_interrupt_fails(true);
+
+        // Stop com falha
+        let stop_err = controller.stop();
+        assert!(stop_err.is_err());
+        assert_eq!(controller.status(), PlaybackStatus::Failed);
+        assert_eq!(controller.current_output(), None);
+
+        // Reset com falha
+        let reset_err = controller.reset();
+        assert!(reset_err.is_err());
+        assert_eq!(controller.status(), PlaybackStatus::Failed);
+
+        // Com falha desativada, stop e reset retornam Ok
+        mock.set_interrupt_fails(false);
+        assert!(controller.stop().is_ok());
+        assert_eq!(controller.status(), PlaybackStatus::Stopped);
+        assert!(controller.reset().is_ok());
+        assert_eq!(controller.status(), PlaybackStatus::Idle);
+    }
+
+    #[test]
+    fn test_playback_controller_silent_by_construction_default() {
+        // Construtor padrão inicializa MockPlaybackSink por construção
+        let controller = AudioPlaybackController::new();
+        assert_eq!(controller.sink().name(), "MockPlaybackSink");
+        assert_eq!(controller.status(), PlaybackStatus::Idle);
+
+        let for_test_ctrl = AudioPlaybackController::for_test();
+        assert_eq!(for_test_ctrl.sink().name(), "MockPlaybackSink");
+    }
+
+    #[test]
     fn test_playback_controller_completion_estimation_and_output() {
         let (controller, _) = AudioPlaybackController::mock();
         assert!(controller.is_completion_estimated());
@@ -559,14 +823,15 @@ mod tests {
         let output = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 50, "test");
         assert!(controller.play(&output).is_ok());
         assert_eq!(controller.current_output(), Some(output));
-        controller.stop();
+        assert!(controller.stop().is_ok());
         assert_eq!(controller.current_output(), None);
     }
 
     #[cfg(windows)]
     #[test]
-    fn test_windows_sink_device_detection_and_safety_silence() {
-        let sink = WindowsAudioPlaybackSink::new();
+    fn test_windows_sink_device_detection_and_safety_policies() {
+        let sink = WindowsAudioPlaybackSink::opt_in_test();
+        assert_eq!(sink.policy(), AudioOutputPolicy::OptInTest);
         let available = sink.is_device_available();
         println!("Windows audio sink device available: {}", available);
 
@@ -574,6 +839,42 @@ mod tests {
         let output = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 10, "test-safety");
         let play_res = sink.play(&output);
         assert!(play_res.is_ok(), "Deve validar buffer sem erro");
+        assert!(sink.interrupt().is_ok());
+
+        // Sink silenciado por construção
+        let silenced_sink = WindowsAudioPlaybackSink::silenced();
+        assert_eq!(silenced_sink.policy(), AudioOutputPolicy::Silenced);
+        assert!(silenced_sink.play(&output).is_ok());
+        assert!(silenced_sink.interrupt().is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requer autorização física explícita no hardware de áudio via YUKI_LIVE_AUDIO_TESTS=1"]
+    fn test_windows_sink_live_opt_in_physical_playback() {
+        if !is_live_audio_test_allowed() {
+            println!("Pulando teste físico ao vivo: YUKI_LIVE_AUDIO_TESTS não configurada");
+            return;
+        }
+
+        let sink = WindowsAudioPlaybackSink::production();
+        if !sink.is_device_available() {
+            println!("Nenhum dispositivo de áudio disponível para teste ao vivo");
+            return;
+        }
+
+        let tone_samples: Vec<i16> = (0..8000)
+            .map(|i| {
+                let freq = 440.0;
+                let sample_rate = 16000.0;
+                ((i as f32 * freq * 2.0 * std::f32::consts::PI / sample_rate).sin() * 8000.0) as i16
+            })
+            .collect();
+        let wav_data = AudioCodec::encode_wav(&tone_samples, &AudioFormat::default()).unwrap();
+        let output = AudioOutput::new(wav_data, AudioFormat::default(), 500, "tone-live");
+
+        assert!(sink.play(&output).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(sink.interrupt().is_ok());
     }
 }

@@ -2326,7 +2326,7 @@ fn test_66_bloqueio_de_auto_ativacao_para_wake_word_experimental_e_opt_in_explic
 #[test]
 fn test_67_controlador_de_playback_unificado_estimativa_de_conclusao_e_silencio_seguro() {
     use yuki::voice::playback::{
-        is_live_audio_test_allowed, is_test_environment, WindowsAudioPlaybackSink,
+        is_live_audio_test_allowed, AudioOutputPolicy, WindowsAudioPlaybackSink,
     };
 
     // 1. Controlador indica que conclusão é baseada em estimativa temporal de quadros PCM
@@ -2335,7 +2335,6 @@ fn test_67_controlador_de_playback_unificado_estimativa_de_conclusao_e_silencio_
 
     // 2. Em ambiente de testes, a segurança acústica garante silêncio total sem a variável YUKI_LIVE_AUDIO_TESTS=1
     assert!(!is_live_audio_test_allowed());
-    assert!(is_test_environment());
 
     // 3. Validação do controlador: play, inspeção de buffer via current_output e interrupção limpa
     let output = AudioOutput::new(vec![0u8; 640], AudioFormat::default(), 20, "yuki-voice");
@@ -2348,9 +2347,100 @@ fn test_67_controlador_de_playback_unificado_estimativa_de_conclusao_e_silencio_
     assert_eq!(controller.status(), PlaybackStatus::Interrupted);
     assert_eq!(controller.current_output(), None);
 
-    // 4. WindowsAudioPlaybackSink direto sob ambiente de testes: valida buffer e executa sem tocar alto-falante
-    let win_sink = WindowsAudioPlaybackSink::new();
+    // 4. WindowsAudioPlaybackSink sob política OptInTest: valida buffer e executa sem tocar alto-falante
+    let win_sink = WindowsAudioPlaybackSink::opt_in_test();
+    assert_eq!(win_sink.policy(), AudioOutputPolicy::OptInTest);
     let win_play_res = win_sink.play(&output);
     assert!(win_play_res.is_ok());
     assert!(win_sink.interrupt().is_ok());
+}
+
+#[test]
+fn test_68_falha_de_interrupcao_de_audio_propaga_erro_bloqueia_novo_play_e_limpa_recursos() {
+    let (controller, mock_sink) = AudioPlaybackController::mock();
+    let output1 = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 2000, "yuki-track1");
+    let output2 = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 2000, "yuki-track2");
+
+    // 1. Toca o primeiro áudio com sucesso
+    assert!(controller.play(&output1).is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Playing);
+    assert!(controller.current_output().is_some());
+    assert_eq!(mock_sink.played_count(), 1);
+
+    // 2. Simula falha física/driver na interrupção do sink de áudio
+    mock_sink.set_interrupt_fails(true);
+
+    // 3. Tentar iniciar novo áudio quando a interrupção do anterior falha:
+    // Deve REJEITAR o novo áudio, propagar erro formal, transicionar para Failed e limpar buffers
+    let play_res = controller.play(&output2);
+    assert!(
+        play_res.is_err(),
+        "Deve falhar se a interrupção do áudio anterior falhar"
+    );
+    assert!(matches!(
+        play_res.unwrap_err(),
+        VoiceError::PlaybackFailed(_)
+    ));
+
+    // Invariante: áudio 2 NÃO pode ter sido enviado ao hardware/sink
+    assert_eq!(mock_sink.played_count(), 1);
+    assert_eq!(controller.status(), PlaybackStatus::Failed);
+    assert_eq!(controller.current_output(), None);
+
+    // 4. Interrupção direta com falha propaga erro e preserva Failed com buffers limpos
+    let int_res = controller.interrupt();
+    assert!(int_res.is_err());
+    assert_eq!(controller.status(), PlaybackStatus::Failed);
+    assert_eq!(controller.current_output(), None);
+
+    // 5. stop() e reset() também propagam erro e transicionam para Failed
+    let stop_res = controller.stop();
+    assert!(stop_res.is_err());
+    assert_eq!(controller.status(), PlaybackStatus::Failed);
+
+    let reset_res = controller.reset();
+    assert!(reset_res.is_err());
+    assert_eq!(controller.status(), PlaybackStatus::Failed);
+
+    // 6. Ao sanar a falha do sink, stop() e reset() recuperam com sucesso
+    mock_sink.set_interrupt_fails(false);
+    assert!(controller.stop().is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Stopped);
+    assert!(controller.reset().is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Idle);
+}
+
+#[test]
+fn test_69_arquitetura_de_audio_silenciosa_por_construcao_e_sem_heuristicas_de_caminho() {
+    use yuki::voice::playback::{
+        is_live_audio_test_allowed, AudioOutputPolicy, WindowsAudioPlaybackSink,
+    };
+
+    // 1. AudioPlaybackController::new() utiliza MockPlaybackSink por construção
+    let default_controller = AudioPlaybackController::new();
+    assert_eq!(default_controller.sink().name(), "MockPlaybackSink");
+    assert_eq!(default_controller.status(), PlaybackStatus::Idle);
+
+    // 2. AudioPlaybackController::for_test() também é explicitamente Mock
+    let test_controller = AudioPlaybackController::for_test();
+    assert_eq!(test_controller.sink().name(), "MockPlaybackSink");
+
+    // 3. Nenhuma heurística de caminho de arquivo (ex: 'deps') é utilizada
+    // A segurança acústica de WindowsAudioPlaybackSink é governada pelo enum AudioOutputPolicy
+    let opt_in_sink = WindowsAudioPlaybackSink::opt_in_test();
+    assert_eq!(opt_in_sink.policy(), AudioOutputPolicy::OptInTest);
+
+    let silenced_sink = WindowsAudioPlaybackSink::silenced();
+    assert_eq!(silenced_sink.policy(), AudioOutputPolicy::Silenced);
+
+    let prod_sink = WindowsAudioPlaybackSink::production();
+    assert_eq!(prod_sink.policy(), AudioOutputPolicy::Production);
+
+    // 4. Em execução padrão de testes, opt-in não está ativo
+    assert!(!is_live_audio_test_allowed());
+
+    // Valida que o sink com OptInTest processa e valida buffer de áudio sem erro e em silêncio
+    let output = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 10, "opt-in-safe");
+    assert!(opt_in_sink.play(&output).is_ok());
+    assert!(opt_in_sink.interrupt().is_ok());
 }

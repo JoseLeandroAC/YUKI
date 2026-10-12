@@ -1293,3 +1293,44 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
     - `cargo build --release`: compilação limpa concluída com sucesso.
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — alinhamento final implementado e submetido à auditoria independente"`.
+
+---
+
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8.1.1 — Correção Final de Homologação: Áudio, Tratamento Rigoroso de Erros e Silêncio por Construção
+
+- **Branch**: `feature/marco-8.1.1-homologation-fixes`
+- **Baseline de Entrada**: `3d650cf`
+- **Contexto**: A auditoria independente confirmou as melhorias do alinhamento anterior (transações SQLite imediatas, recuperação de leases com fencing token, FSM de aprovações, bloqueio padrão de wake word experimental e término estimado de playback). Restavam duas pendências técnicas para homologação integral: (1) falhas de interrupção de áudio eram ignoradas via `let _ = self.sink.interrupt();` e (2) a identificação do ambiente de testes dependia parcialmente de heurísticas do caminho do executável (`current_exe().contains("deps")`).
+- **Implementações Realizadas**:
+  1. **Propagação Rigorosa de Erros de Interrupção de Áudio:** Remoção definitiva de `let _ = self.sink.interrupt();`. Os métodos `play()`, `interrupt()`, `stop()` e `reset()` de `AudioPlaybackController` agora retornam `Result<(), VoiceError>` e propagam formalmente qualquer falha do sink. Se a interrupção falhar:
+     - O estado transita imediatamente para `PlaybackStatus::Failed`;
+     - Registra `tracing::error!`;
+     - Timing e buffers (`playback_timing`, `current_output`) são devidamente limpos;
+     - No método `play()`, se a interrupção do áudio ativo falhar, o novo áudio é prontamente REJEITADO, impedindo a sobreposição acidental de fala sobre falhas do subsistema;
+     - `MockPlaybackSink` foi enriquecido com `interrupt_fails: Arc<AtomicBool>` e `set_interrupt_fails(bool)` para testes determinísticos de falha de driver.
+  2. **Arquitetura de Áudio Silenciosa por Construção (Zero Heurísticas de Caminho):**
+     - Remoção integral da função `is_test_environment()` e de qualquer inspeção do caminho de arquivo (`current_exe().contains("deps")`);
+     - Introdução do enum `AudioOutputPolicy` (`Production`, `OptInTest`, `Silenced`) governando explicitamente o `WindowsAudioPlaybackSink`;
+     - `WindowsAudioPlaybackSink::production()`: emite áudio físico no hardware para operação regular;
+     - `WindowsAudioPlaybackSink::opt_in_test()`: só emite som se a variável de ambiente `YUKI_LIVE_AUDIO_TESTS=1` estiver explicitamente ativa; caso contrário, valida buffers em silêncio absoluto;
+     - `WindowsAudioPlaybackSink::silenced()`: 100% silenciado em qualquer condição;
+     - Construtor `AudioPlaybackController::new()` e `Default` instanciam `MockPlaybackSink` por construção, tornando toda a suíte de testes (`cargo test`) intrinsecamente silenciosa;
+     - Construtor `AudioPlaybackController::production()` exposto para uso operacional no sistema e serviços;
+     - Testes físicos com alto-falante real marcados estritamente com `#[ignore]` e ativados apenas via `YUKI_LIVE_AUDIO_TESTS=1`.
+  3. **Revisão e Documentação do Backend WinMM:**
+     - Documentação formal do ciclo de vida assíncrono do ponteiro de memória com `SND_MEMORY | SND_ASYNC`;
+     - Fixação de buffer pinned via `Arc<Vec<u8>>` em `current_wav_buffer` prevenindo corrupção por use-after-free;
+     - Interrupção atômica no `Drop` via `PlaySoundA(NULL, NULL, 0)`;
+     - Transparência formal da distinção entre término estimado de playback (`is_completion_estimated() -> true`) e conclusão por callback físico.
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **69 cenários adversariais** (testes 68 e 69 adicionados), 100% aprovados.
+  - **Total de Testes no Workspace:** **570 testes ativos aprovados** (5 testes live opt-in ignorados, totalizando 575 testes; 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — correção final de áudio implementada e aguardando homologação independente."`
+
