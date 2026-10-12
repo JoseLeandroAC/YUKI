@@ -2444,3 +2444,98 @@ fn test_69_arquitetura_de_audio_silenciosa_por_construcao_e_sem_heuristicas_de_c
     assert!(opt_in_sink.play(&output).is_ok());
     assert!(opt_in_sink.interrupt().is_ok());
 }
+
+#[tokio::test]
+async fn test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagacao_fechada() {
+    use yuki::contracts::voice::{AudioFormat, AudioInput, VoiceConfiguration, VoiceError};
+    use yuki::core::yuki_core::YukiCore;
+    use yuki::models::{MockBehavior, MockModelProvider};
+    use yuki::voice::audio::AudioCodec;
+    use yuki::voice::conversation::VoiceConversationCoordinator;
+    use yuki::voice::playback::{AudioPlaybackController, PlaybackEnvironment, PlaybackStatus};
+    use yuki::voice::router::GovernedVoiceRouter;
+    use yuki::voice::session::VoiceSessionManager;
+    use yuki::voice::stt::MockSttProvider;
+    use yuki::voice::tts::MockTtsProvider;
+    use yuki::voice::wakeword::WakeWordDetector;
+
+    // 1. Invariante: O ambiente operacional de produção NUNCA mascara ausência de dispositivo como mock
+    let prod_controller = AudioPlaybackController::production();
+    assert_eq!(
+        prod_controller.sink().name(),
+        "WindowsAudioPlaybackSink (winmm)"
+    );
+    prod_controller.set_device_available(false);
+
+    let dummy_audio = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 50, "adv-test");
+    let play_res = prod_controller.play(&dummy_audio);
+    assert!(play_res.is_err());
+    assert!(matches!(
+        play_res.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+    assert_eq!(prod_controller.status(), PlaybackStatus::Failed);
+
+    // 2. Invariante: VoiceConversationCoordinator::production conecta diretamente ao backend de produção
+    let model = Arc::new(MockModelProvider::with_behavior(MockBehavior::DirectText(
+        "Resposta adversarial".to_string(),
+    )));
+    let core = Arc::new(YukiCore::new().with_model_provider(model));
+    let stt = Arc::new(MockSttProvider::new().with_response("Comando de voz"));
+    let tts = Arc::new(MockTtsProvider::new());
+    let router = Arc::new(GovernedVoiceRouter::new(
+        stt,
+        None,
+        tts,
+        None,
+        VoiceConfiguration::default(),
+    ));
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let wake_detector = Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default()));
+
+    let prod_coord = VoiceConversationCoordinator::production(
+        core.clone(),
+        router.clone(),
+        session_mgr.clone(),
+        wake_detector.clone(),
+        None,
+    );
+    assert_eq!(
+        prod_coord.playback().sink().name(),
+        "WindowsAudioPlaybackSink (winmm)"
+    );
+
+    let env_prod_coord = VoiceConversationCoordinator::for_environment(
+        PlaybackEnvironment::Production,
+        core.clone(),
+        router.clone(),
+        session_mgr.clone(),
+        wake_detector.clone(),
+        None,
+    );
+    assert_eq!(
+        env_prod_coord.playback().sink().name(),
+        "WindowsAudioPlaybackSink (winmm)"
+    );
+
+    // 3. Invariante: VoiceConversationCoordinator propaga falha de playback sem mascaramento
+    let (test_coord, mock_sink) =
+        VoiceConversationCoordinator::for_test(core, router, session_mgr, wake_detector, None);
+    mock_sink.set_device_available(false);
+
+    let format = AudioFormat::default();
+    let samples = vec![100i16; 1600];
+    let payload = AudioCodec::encode_wav(&samples, &format).unwrap();
+    let input = AudioInput::new(payload, format, 100, "mic-adv");
+
+    let turn_err = test_coord
+        .process_button_turn("adv-device", input, false, false)
+        .await;
+
+    assert!(turn_err.is_err());
+    assert!(matches!(
+        turn_err.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+    assert_eq!(test_coord.playback().status(), PlaybackStatus::Failed);
+}

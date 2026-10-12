@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1.1 — correção final de áudio implementada e aguardando homologação independente; 570 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 575 testes; 0 falhas) no workspace; 69/69 testes adversariais aprovados
+Status geral: Marco 8.1.1 — integração operacional de áudio verificada e submetida à homologação independente; 576 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 581 testes; 0 falhas) no workspace; 70/70 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -30,7 +30,8 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
   7. **Arquitetura de Áudio Silenciosa por Construção (Zero Heurísticas de Caminho):** Remoção total de `is_test_environment()` e checagens de `current_exe()`; enum `AudioOutputPolicy` (`Production`, `OptInTest`, `Silenced`); `AudioPlaybackController::new()` e `default()` usam `MockPlaybackSink` por construção; `WindowsAudioPlaybackSink::production()` exposto para uso operacional real;
   8. **Revisão e Documentação do Backend WinMM:** Fixação de buffers WAV pinned em memória (`Arc<Vec<u8>>`), cancelamento atômico no `Drop` via `PlaySoundA(NULL, NULL, 0)` prevenindo use-after-free assíncrono e declaração explícita de término estimado via `is_completion_estimated() -> true`;
   9. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
-  10. **Suíte Adversarial Conclusiva Expandida:** 69 cenários adversariais aprovados (testes 68 e 69 cobrindo rejeição de sobreposição pós-falha de interrupção e silêncio por construção).
+  10. **Integração Operacional de Áudio no Runtime e CLI:** Encadeamento completo da aplicação ao hardware (`main.rs` -> `VoiceConversationCoordinator` -> `AudioPlaybackController::production()`); remoção de fallback falso para mock em hardware ausente (fail-closed estrito com `VoiceError::DeviceUnavailable`); enum `PlaybackEnvironment` e construtores de ambiente; comandos `yuki voice status`, `yuki voice speak --play` e `yuki voice turn`;
+  11. **Suíte Adversarial Conclusiva Expandida:** 70 cenários adversariais aprovados (testes 68, 69 e 70 cobrindo anti-sobreposição, silêncio por construção e integração operacional fail-closed).
 
 A situação atual pode ser resumida como:
 
@@ -48,7 +49,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-570 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 575 TESTES; 69/69 ADVERSARIAIS)
+576 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 581 TESTES; 70/70 ADVERSARIAIS)
 
 ---
 

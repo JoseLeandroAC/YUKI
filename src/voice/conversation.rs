@@ -47,6 +47,102 @@ impl VoiceConversationCoordinator {
         }
     }
 
+    /// Construtor de produção: inicializa o coordenador de voz utilizando o controlador
+    /// de reprodução real do sistema operacional (`AudioPlaybackController::production()`).
+    pub fn production(
+        core: Arc<YukiCore>,
+        router: Arc<GovernedVoiceRouter>,
+        session_manager: Arc<VoiceSessionManager>,
+        wake_detector: Arc<tokio::sync::Mutex<WakeWordDetector>>,
+        persistent_audit: Option<Arc<SqliteAuditStore>>,
+    ) -> Self {
+        Self::new(
+            core,
+            router,
+            session_manager,
+            Arc::new(AudioPlaybackController::production()),
+            wake_detector,
+            persistent_audit,
+        )
+    }
+
+    /// Construtor de conveniência para ambiente de produção padrão utilizando provedores locais soberanos.
+    pub fn production_default(
+        core: Arc<YukiCore>,
+        persistent_audit: Option<Arc<SqliteAuditStore>>,
+    ) -> Self {
+        let config = crate::contracts::voice::VoiceConfiguration::default();
+        let router = Arc::new(GovernedVoiceRouter::default_local(config));
+        let session_manager = Arc::new(VoiceSessionManager::new());
+        let wake_detector = Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default()));
+        Self::production(
+            core,
+            router,
+            session_manager,
+            wake_detector,
+            persistent_audit,
+        )
+    }
+
+    /// Construtor de teste: inicializa o coordenador de voz utilizando o controlador
+    /// mock por construção (`AudioPlaybackController::mock()`), garantindo silêncio absoluto.
+    pub fn for_test(
+        core: Arc<YukiCore>,
+        router: Arc<GovernedVoiceRouter>,
+        session_manager: Arc<VoiceSessionManager>,
+        wake_detector: Arc<tokio::sync::Mutex<WakeWordDetector>>,
+        persistent_audit: Option<Arc<SqliteAuditStore>>,
+    ) -> (Self, Arc<crate::voice::playback::MockPlaybackSink>) {
+        let (playback, mock) = AudioPlaybackController::mock();
+        let coordinator = Self::new(
+            core,
+            router,
+            session_manager,
+            Arc::new(playback),
+            wake_detector,
+            persistent_audit,
+        );
+        (coordinator, mock)
+    }
+
+    /// Construtor para testes ao vivo (opt-in explícito via `YUKI_LIVE_AUDIO_TESTS=1`).
+    pub fn live_test(
+        core: Arc<YukiCore>,
+        router: Arc<GovernedVoiceRouter>,
+        session_manager: Arc<VoiceSessionManager>,
+        wake_detector: Arc<tokio::sync::Mutex<WakeWordDetector>>,
+        persistent_audit: Option<Arc<SqliteAuditStore>>,
+    ) -> Self {
+        Self::new(
+            core,
+            router,
+            session_manager,
+            Arc::new(AudioPlaybackController::live_test()),
+            wake_detector,
+            persistent_audit,
+        )
+    }
+
+    /// Construtor parametrizado pelo ambiente de execução (Produção, Teste, Desabilitado).
+    pub fn for_environment(
+        env: crate::voice::playback::PlaybackEnvironment,
+        core: Arc<YukiCore>,
+        router: Arc<GovernedVoiceRouter>,
+        session_manager: Arc<VoiceSessionManager>,
+        wake_detector: Arc<tokio::sync::Mutex<WakeWordDetector>>,
+        persistent_audit: Option<Arc<SqliteAuditStore>>,
+    ) -> Self {
+        let playback = Arc::new(AudioPlaybackController::for_environment(env));
+        Self::new(
+            core,
+            router,
+            session_manager,
+            playback,
+            wake_detector,
+            persistent_audit,
+        )
+    }
+
     pub fn playback(&self) -> &AudioPlaybackController {
         &self.playback
     }

@@ -1334,3 +1334,33 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — correção final de áudio implementada e aguardando homologação independente."`
 
+---
+
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8.1.1 — Verificação de Integração Operacional de Áudio, Desacoplamento de Mock e Conexão de Runtime
+
+- **Branch**: `feature/marco-8.1.1-homologation-fixes`
+- **Baseline de Entrada**: `c394363`
+- **Contexto**: A auditoria independente do ChatGPT confirmou que o commit `c394363` corrigiu a propagação de falhas em interrupção de áudio, introduziu a `AudioOutputPolicy` e removeu heurísticas de caminho de executável. Entretanto, identificou que `AudioPlaybackController::new()` instanciou exclusivamente mock, enquanto `AudioPlaybackController::production()` continha fallback falso para mock se `waveOutGetNumDevs() == 0` (mascarando a ausência de hardware físico), o `VoiceConversationCoordinator` não expunha construtores de produção e o runtime/CLI (`main.rs`) ainda não possuía conexão operacional de áudio.
+- **Implementações Realizadas**:
+  1. **Remoção de Fallback Mascarado no Backend de Produção:** `AudioPlaybackController::production()` agora vincula estritamente o `WindowsAudioPlaybackSink::production()`. Sem dispositivos físicos, `is_device_available()` retorna `false` e qualquer tentativa de `play()` falha fechada com `VoiceError::DeviceUnavailable`.
+  2. **Introdução de `PlaybackEnvironment` e Construtores no Orquestrador:** Adicionado enum `PlaybackEnvironment` (`Production`, `Test`, `Disabled`) e construtores `production(...)`, `production_default(...)`, `for_test(...)`, `live_test(...)` e `for_environment(...)` no `VoiceConversationCoordinator`.
+  3. **Integração Operacional no CLI (`src/main.rs`):**
+     - `yuki voice status`: reporta disponibilidade física do hardware de reprodução via `AudioPlaybackController::production().is_device_available()`.
+     - `yuki voice speak --play` (`-p`): sintetiza fala e executa reprodução direta no dispositivo de áudio de produção com tratamento fail-closed.
+     - `yuki voice turn`: executa um turno conversacional completo com áudio, captura Push-to-Talk, roteamento governado (`GovernedVoiceRouter::default_local`) e reprodução física.
+  4. **Novos Testes de Integração e Cenário Adversarial:**
+     - 4 testes adicionados em `tests/voice_integration.rs` validando seleção de ambiente, repasse de síntese para playback, propagação de falha e fail-closed sem mascaramento de mock.
+     - Teste adversarial `test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagacao_fechada` adicionado a `tests/marco_8_adversarial.rs`.
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **70 cenários adversariais** (100% aprovados).
+  - **Total de Testes no Workspace:** **576 testes ativos aprovados** (5 testes live opt-in ignorados, totalizando 581 testes; 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — integração operacional de áudio verificada e submetida à homologação independente."`
+
+

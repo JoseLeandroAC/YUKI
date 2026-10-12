@@ -111,15 +111,18 @@ pub enum MissionCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum VoiceCommands {
-    /// Diagnóstico dos motores de STT e TTS locais da Yuki
+    /// Diagnóstico dos motores de STT, TTS e reprodução local da Yuki
     Status,
-    /// Sintetiza uma mensagem usando a voz da Yuki e salva em WAV
+    /// Sintetiza uma mensagem usando a voz da Yuki e salva em WAV (opcionalmente reproduz no alto-falante)
     Speak {
         /// Texto a ser sintetizado pela Yuki
         text: String,
         /// Arquivo de saída WAV (padrão: yuki_speech.wav)
         #[arg(short, long, default_value = "yuki_speech.wav")]
         output: String,
+        /// Reproduz o áudio sintetizado no alto-falante físico do sistema operacional
+        #[arg(short, long, default_value_t = false)]
+        play: bool,
     },
     /// Transcreve áudio usando STT local (do microfone ou de arquivo WAV)
     Listen {
@@ -132,6 +135,15 @@ pub enum VoiceCommands {
         /// Duração da gravação do microfone em segundos (máximo 30s, padrão: 5s)
         #[arg(short, long, default_value_t = 5)]
         seconds: u64,
+    },
+    /// Executa um turno conversacional completo via Push-to-Talk conectado ao VoiceConversationCoordinator
+    Turn {
+        /// Duração máxima da captura do microfone em segundos (máximo 30s, padrão: 5s)
+        #[arg(short, long, default_value_t = 5)]
+        seconds: u64,
+        /// Reproduz fisicamente a resposta de voz no alto-falante
+        #[arg(short, long, default_value_t = false)]
+        play: bool,
     },
 }
 
@@ -519,6 +531,7 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
 async fn handle_voice_command(cmd: VoiceCommands) {
     use yuki::contracts::voice::{AudioInput, SpeechToTextProvider, TextToSpeechProvider};
     use yuki::voice::audio::AudioCodec;
+    use yuki::voice::playback::AudioPlaybackController;
     use yuki::voice::stt::LocalWhisperSttProvider;
     use yuki::voice::tts::{LocalAcousticTtsProvider, LocalPiperTtsProvider, VoiceIdentity};
 
@@ -551,8 +564,19 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 "Identidade Vocal da Yuki:     {} ({}, idioma: {}, tom: {:?})",
                 voice_id.name, voice_id.gender, voice_id.language, voice_id.tone
             );
+
+            let playback_ctrl = AudioPlaybackController::production();
+            let playback_avail = playback_ctrl.is_device_available();
+            println!(
+                "Saída de Áudio (Playback):     {}",
+                if playback_avail {
+                    format!("DISPONÍVEL ({})", playback_ctrl.sink().name())
+                } else {
+                    "NENHUM DISPOSITIVO DETECTADO (waveOut)".to_string()
+                }
+            );
         }
-        VoiceCommands::Speak { text, output } => {
+        VoiceCommands::Speak { text, output, play } => {
             let acoustic = LocalAcousticTtsProvider::default();
             println!("Sintetizando voz da Yuki para o texto: \"{}\"...", text);
             match acoustic.synthesize(&text, None).await {
@@ -566,6 +590,24 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                             audio_out.duration_ms as f64 / 1000.0,
                             audio_out.payload.len()
                         );
+                    }
+
+                    if play {
+                        let playback = AudioPlaybackController::production();
+                        if !playback.is_device_available() {
+                            eprintln!("Aviso: Nenhum dispositivo de áudio físico disponível para reprodução (waveOut).");
+                        } else {
+                            println!("Reproduzindo áudio no dispositivo de saída físico...");
+                            if let Err(e) = playback.play(&audio_out) {
+                                eprintln!("Erro na reprodução física de áudio: {}", e);
+                            } else {
+                                let duration = std::time::Duration::from_millis(
+                                    audio_out.duration_ms.max(100),
+                                );
+                                tokio::time::sleep(duration).await;
+                                println!("Reprodução concluída.");
+                            }
+                        }
                     }
                 }
                 Err(e) => eprintln!("Erro ao sintetizar áudio: {}", e),
@@ -661,6 +703,112 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     println!("Duração: {:.2}s", audio_input.duration_ms as f64 / 1000.0);
                 }
                 Err(e) => eprintln!("Falha na transcrição: {}", e),
+            }
+        }
+        VoiceCommands::Turn { seconds, play } => {
+            use std::sync::Arc;
+            use std::time::Duration;
+            use yuki::voice::capture::{
+                AudioCaptureBackend, MockCaptureBackend, PushToTalkController,
+                WindowsAudioCaptureBackend,
+            };
+            use yuki::voice::conversation::VoiceConversationCoordinator;
+            use yuki::voice::playback::PlaybackEnvironment;
+
+            let duration_sec = seconds.clamp(1, 30);
+            println!(
+                "Iniciando turno conversacional de voz Push-to-Talk ({}s de captura)...",
+                duration_sec
+            );
+
+            let capture_backend: Arc<dyn AudioCaptureBackend> = {
+                #[cfg(windows)]
+                {
+                    let win = WindowsAudioCaptureBackend::new();
+                    if win.is_device_available() {
+                        Arc::new(win)
+                    } else {
+                        println!("Nenhum microfone físico acessível detectado. Utilizando MockCaptureBackend para diagnóstico.");
+                        Arc::new(MockCaptureBackend::new())
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    Arc::new(MockCaptureBackend::new())
+                }
+            };
+
+            let ptt = PushToTalkController::new(capture_backend);
+            if let Err(e) = ptt.press() {
+                eprintln!("Falha ao iniciar captura de microfone: {}", e);
+                return;
+            }
+
+            println!(
+                "Gravando... Fale com a Yuki agora (tempo: {}s)...",
+                duration_sec
+            );
+            tokio::time::sleep(Duration::from_secs(duration_sec)).await;
+
+            let audio_input = match ptt.release() {
+                Ok(input) => {
+                    println!(
+                        "Captura concluída ({} bytes, {}ms).",
+                        input.payload.len(),
+                        input.duration_ms
+                    );
+                    input
+                }
+                Err(e) => {
+                    eprintln!("Falha ao encerrar captura de áudio: {}", e);
+                    return;
+                }
+            };
+
+            // Inicializa modelo para o Core (Mock fallback limpo se não configurado)
+            let model_provider = resolve_model_provider_from_env()
+                .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
+            let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
+
+            let env = if play {
+                PlaybackEnvironment::Production
+            } else {
+                PlaybackEnvironment::Disabled
+            };
+
+            let coordinator = VoiceConversationCoordinator::for_environment(
+                env,
+                core,
+                Arc::new(yuki::voice::router::GovernedVoiceRouter::default_local(
+                    yuki::contracts::voice::VoiceConfiguration::default(),
+                )),
+                Arc::new(yuki::voice::session::VoiceSessionManager::new()),
+                Arc::new(tokio::sync::Mutex::new(
+                    yuki::voice::wakeword::WakeWordDetector::default(),
+                )),
+                None,
+            );
+
+            println!("Processando turno de conversação governado...");
+            match coordinator
+                .process_button_turn("cli-turn", audio_input, false, false)
+                .await
+            {
+                Ok((yuki_res, audio_out)) => {
+                    println!("\nResposta da Yuki:");
+                    println!("\"{}\"", yuki_res.content);
+                    println!(
+                        "Áudio de resposta gerado: {:.2}s ({} bytes).",
+                        audio_out.duration_ms as f64 / 1000.0,
+                        audio_out.payload.len()
+                    );
+                    if play {
+                        let duration =
+                            std::time::Duration::from_millis(audio_out.duration_ms.max(100));
+                        tokio::time::sleep(duration).await;
+                    }
+                }
+                Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
             }
         }
     }

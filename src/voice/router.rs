@@ -177,6 +177,18 @@ impl GovernedVoiceRouter {
         }
     }
 
+    /// Cria uma instância do roteador configurada com os provedores locais soberanos padrão da Yuki.
+    pub fn default_local(config: VoiceConfiguration) -> Self {
+        let local_stt = Arc::new(crate::voice::stt::LocalWhisperSttProvider::default());
+        let local_tts: Arc<dyn TextToSpeechProvider> =
+            if crate::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
+                Arc::new(crate::voice::tts::LocalPiperTtsProvider::default())
+            } else {
+                Arc::new(crate::voice::tts::LocalAcousticTtsProvider::default())
+            };
+        Self::new(local_stt, None, local_tts, None, config)
+    }
+
     pub fn config(&self) -> &VoiceConfiguration {
         &self.config
     }

@@ -45,6 +45,18 @@ pub enum AudioOutputPolicy {
     Silenced,
 }
 
+/// Ambiente operacional para seleção explícita do subsistema de reprodução de áudio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackEnvironment {
+    /// Ambiente operacional de produção: conecta diretamente ao backend do sistema operacional (Windows winmm).
+    /// Se nenhum dispositivo físico for detectado, falha explicitamente com DeviceUnavailable (sem mock silencioso).
+    Production,
+    /// Ambiente de testes determinísticos: utiliza MockPlaybackSink silenciado por construção.
+    Test,
+    /// Reprodução desabilitada: sink silenciado que valida buffers mas nunca emite áudio no hardware.
+    Disabled,
+}
+
 // ---------------------------------------------------------------------------
 // Backend Windows nativo via winmm.dll
 // ---------------------------------------------------------------------------
@@ -421,29 +433,24 @@ impl AudioPlaybackController {
         Self::with_sink(Arc::new(MockPlaybackSink::new()))
     }
 
-    /// Construtor para ambiente de produção: conecta diretamente ao subsistema nativo do sistema operacional.
+    /// Construtor para ambiente operacional de produção: conecta diretamente ao subsistema nativo do sistema operacional.
     ///
-    /// No Windows com hardware de áudio detectado, inicializa com `WindowsAudioPlaybackSink::production()`.
-    /// Se nenhum dispositivo físico for detectado, realiza fallback limpo para `MockPlaybackSink`.
+    /// No Windows, conecta ao `WindowsAudioPlaybackSink::production()`.
+    /// Não realiza fallback silencioso para mock: se nenhum dispositivo de hardware estiver
+    /// presente ou acessível, `is_device_available()` retornará `false` e chamadas a `play()`
+    /// falharão explicitamente com `VoiceError::DeviceUnavailable`, preservando a verdade operacional.
     pub fn production() -> Self {
-        #[cfg(windows)]
-        {
-            let win_sink = WindowsAudioPlaybackSink::production();
-            if win_sink.is_device_available() {
-                Self::with_sink(Arc::new(win_sink))
-            } else {
-                tracing::warn!(
-                    "Nenhum dispositivo de áudio físico detectado. Inicializando MockPlaybackSink como fallback limpo."
-                );
-                Self::with_sink(Arc::new(MockPlaybackSink::new()))
+        Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
+    }
+
+    /// Construtor baseado no ambiente operacional explicitamente configurado.
+    pub fn for_environment(env: PlaybackEnvironment) -> Self {
+        match env {
+            PlaybackEnvironment::Production => Self::production(),
+            PlaybackEnvironment::Test => Self::new(),
+            PlaybackEnvironment::Disabled => {
+                Self::with_sink(Arc::new(WindowsAudioPlaybackSink::silenced()))
             }
-        }
-        #[cfg(not(windows))]
-        {
-            tracing::warn!(
-                "Sistema operacional não-Windows. Inicializando MockPlaybackSink como fallback limpo."
-            );
-            Self::with_sink(Arc::new(MockPlaybackSink::new()))
         }
     }
 
@@ -812,6 +819,43 @@ mod tests {
 
         let for_test_ctrl = AudioPlaybackController::for_test();
         assert_eq!(for_test_ctrl.sink().name(), "MockPlaybackSink");
+    }
+
+    #[test]
+    fn test_playback_controller_for_environment_selection() {
+        // 1. Ambiente Test seleciona MockPlaybackSink
+        let test_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Test);
+        assert_eq!(test_ctrl.sink().name(), "MockPlaybackSink");
+
+        // 2. Ambiente Production seleciona WindowsAudioPlaybackSink diretamente sem mascarar em mock
+        let prod_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Production);
+        assert_eq!(prod_ctrl.sink().name(), "WindowsAudioPlaybackSink (winmm)");
+
+        // 3. AudioPlaybackController::production() também seleciona diretamente WindowsAudioPlaybackSink
+        let direct_prod = AudioPlaybackController::production();
+        assert_eq!(
+            direct_prod.sink().name(),
+            "WindowsAudioPlaybackSink (winmm)"
+        );
+
+        // 4. Se o dispositivo estiver indisponível no ambiente de produção, play() falha explicitamente
+        // sem mascarar o resultado como sucesso em mock
+        direct_prod.set_device_available(false);
+        assert!(!direct_prod.is_device_available());
+        let output = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 50, "test-env");
+        let play_err = direct_prod.play(&output);
+        assert!(play_err.is_err());
+        assert!(matches!(
+            play_err.unwrap_err(),
+            VoiceError::DeviceUnavailable(_)
+        ));
+
+        // 5. Ambiente Disabled utiliza sink silenciado
+        let disabled_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Disabled);
+        assert_eq!(
+            disabled_ctrl.sink().name(),
+            "WindowsAudioPlaybackSink (winmm)"
+        );
     }
 
     #[test]
