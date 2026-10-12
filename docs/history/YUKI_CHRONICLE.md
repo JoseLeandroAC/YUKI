@@ -1104,15 +1104,31 @@ Durante a revisão de fechamento definitivo do Marco 7.2, foram implementadas tr
    - **Concorrência Otimizada:** Leituras rápidas ocorrem via `RwLock<BTreeMap>` em memória; locks de processo exclusivos a nível de SO são adquiridos apenas durante mutações ou recarregamentos de disco, eliminando contenção concorrente desnecessária.
 3. **Reconciliação e Transparência na Métricas de Teste:**
    - Retificação do número total de testes: o valor de "488" mencionado em relatório narrativo prévio resultou de soma manual imprecisa.
-   - A contagem real e verificável em todas as 36 metas de teste do workspace é de **443 testes ativos aprovados + 4 testes ignorados live (`#[ignore]`) = 447 testes no total do projeto**.
-   - A suíte de validação de hardening (`tests/marco_7_2_hardening.rs`) foi expandida de 19 para **26 testes automatizados**.
+   - A contagem real e verificável em todas as metas de teste do workspace evoluiu de 443 para **455 testes ativos aprovados + 4 testes ignorados live (`#[ignore]`) = 459 testes no total do projeto**.
+   - A suíte de validação de hardening (`tests/marco_7_2_hardening.rs`) foi expandida de 26 para **38 testes automatizados** com a inclusão das verificações do Patch Final.
 
-##### 4. Suíte Dedicada e Portões de Qualidade
-- **Suíte Dedicada (`tests/marco_7_2_hardening.rs`):** 26 testes automatizados cobrindo concorrência multiprocesso (cenários A a E), permissões DACL/Unix e caminhos acentuados, migração legada fail-closed, recarregamento transacional sob lock do vault, resiliência a corrupção em disco, orçamentos sub-500 caracteres, truncamento real de personalidade, dedução de overhead de ferramentas e imunidade a injeções adversariais.
+##### 4. Patch Final de Integridade e Encerramento Técnico (P1 e P2)
+Durante a auditoria pós-fechamento do commit `67cb447`, foram solucionadas duas ressalvas técnicas específicas:
+1. **Tratamento Diferenciado de Desaparecimento e Substituição do Vault (P1):**
+   - Criação das variantes tipadas `VaultError::VaultFileDisappeared` e `VaultError::VaultSubstituted`.
+   - Distinção clara e estrita entre:
+     - **Situação A (Criação legítima):** Em `CredentialVault::create_new` ou `open_or_create`, a inexistência do arquivo é a pré-condição esperada para a inicialização limpa com geração do canary e escrita atômica do payload.
+     - **Situação B (Arquivo desaparecido durante mutação em cofre ativo):** Se o arquivo sumir do disco enquanto uma instância ativa tenta persistir mutação (`store`, `replace`, `revoke`, `delete`), o cofre falha fechado com `VaultError::VaultFileDisappeared`. Não recria o arquivo silenciosamente, não persiste o cache em arquivo vazio e não perde a integridade do estado em memória.
+     - **Situação C (Arquivo inacessível):** Se o arquivo existe mas não pode ser lido devido a erro de permissão ou falha transitória de I/O, retorna `VaultError::Io` (não confundindo com inexistência).
+     - **Situação D (Arquivo substituído):** Se o arquivo for substituído por outro cofre com canary divergente, retorna `VaultError::VaultSubstituted` sem tentar descriptografar ou confiar em canários isolados.
+   - Preservação estrita da integridade do cache em memória após falhas de mutação em disco.
+   - Cache miss em `get` e `get_metadata` falha fechado com `VaultError::VaultFileDisappeared` se o arquivo subjacente tiver sido deletado.
+2. **Tratamento Rigoroso de Falhas de Serialização de Ferramentas (P2):**
+   - Eliminação de `unwrap_or(0)` em `YukiCore::process_input_internal`.
+   - Falhas de serialização de capabilities são mapeadas para `YukiError::ExecutionFailed` e propagadas com `?`, abortando o pipeline antes de invocar o provedor de LLM.
+   - Registro de ferramentas vazio (`available_capabilities.is_empty()`) produz overhead exatamente zero (`tool_declarations_chars = 0`), garantindo que a ausência de ferramentas não penalize o orçamento de prompt.
+
+##### 5. Suíte Dedicada e Portões de Qualidade
+- **Suíte Dedicada (`tests/marco_7_2_hardening.rs`):** 38 testes automatizados cobrindo concorrência multiprocesso (cenários A a E), permissões DACL/Unix e caminhos acentuados, migração legada fail-closed, recarregamento transacional sob lock do vault, resiliência a corrupção em disco, desaparecimento e substituição de arquivo de cofre (P1), orçamentos sub-500 caracteres, truncamento real de personalidade, contabilidade estrita de overhead de ferramentas sem fallback silencioso (P2) e imunidade a injeções adversariais.
 - **Portões de Qualidade Locais Aprovados:**
   - `cargo fmt --all -- --check`: 100% aderente ao padrão oficial.
   - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
-  - `cargo test --workspace`: 443 testes aprovados, 4 ignorados, 0 falhas.
+  - `cargo test --workspace`: 455 testes aprovados, 4 ignorados, 0 falhas across all 37 targets.
   - `cargo build --release`: compilação limpa concluída com sucesso.
 - **Baselines Preservados:** `v0.1.0-foundation` e `v0.2.0-mvp1` estritamente mantidos.
 - **Classificação:**

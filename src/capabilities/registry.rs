@@ -19,6 +19,13 @@ pub struct CapabilityRegistry {
 }
 
 impl CapabilityRegistry {
+    /// Cria um registro vazio sem capacidades registradas.
+    pub fn empty() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
     pub fn new() -> Self {
         let mut registry = Self {
             handlers: HashMap::new(),

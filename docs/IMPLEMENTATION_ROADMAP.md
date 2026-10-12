@@ -61,8 +61,8 @@ Yuki Marco 7 (Personal Intelligence Foundation: Vault Hardened, Memory v1, Perso
 Yuki Marco 7.1 (Endurecimento da Personal Intelligence & Diretrizes de Longo Prazo)
 ████████████████████████████████████████  implementado e validado (419+ testes, 12 correções técnicas, ADRs 022 a 025)
 
-Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente — Fechamento Definitivo)
-████████████████████████████████████████  implementado e validado (443 testes ativos aprovados, 4 live opt-in ignorados, totalizando 447 testes; concorrência multiprocesso 5 cenários, permissões DACL/0600 verificadas, orçamento integral de prompt em produção, transacionalidade estrita do vault)
+Yuki Marco 7.2 (Hardening Final, Integridade e Validação Independente — Fechamento Definitivo & Patch Final)
+████████████████████████████████████████  implementado e validado (455 testes ativos aprovados, 4 live opt-in ignorados, totalizando 459 testes; 38/38 testes de hardening no Marco 7.2, concorrência multiprocesso, permissões DACL/0600, orçamento integral de prompt com overhead exato de ferramentas sem unwrap, transacionalidade estrita do vault com tratamento de desaparecimento e substituição de arquivo)
 
 Yuki Marco 8 (Voice v1 & Missions Foundation)
 🟡🟡🟡🟡🟡🟡🟡🟡🟡🟡░░░░░░░░░░░░░░░░░░░░  proposta técnica formalizada (docs/proposals/MARCO_8_VOICE_AND_MISSIONS.md)

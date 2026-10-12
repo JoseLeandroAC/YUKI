@@ -16,25 +16,32 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use yuki::audit::event_store::InMemoryEventStore;
+use yuki::capabilities::registry::{CapabilityHandler, CapabilityRegistry};
 use yuki::context::personal_context::{OperatorProfile, PersonalContext};
 use yuki::context::prompt_budget::{
     IntegralPromptBudgetConfig, PromptBudgetError, PromptBudgetManager, TokenizerModelProfile,
 };
+use yuki::contracts::capability::{CapabilityManifest, RiskClass, SideEffects};
 use yuki::contracts::errors::YukiError;
 use yuki::contracts::events::EventType;
+use yuki::contracts::identifiers::CapabilityId;
 use yuki::contracts::input::UserInput;
 use yuki::contracts::memory::{
     MemoryConfidence, MemoryError, MemoryId, MemoryQuery, MemoryRecord, MemoryRepository,
     MemorySource, MemoryType,
 };
 use yuki::core::yuki_core::YukiCore;
+use yuki::execution::executor::Executor;
 use yuki::models::provider::{ModelProvider, ModelRequest};
+use yuki::security::authorization::SecurityController;
 use yuki::security::credentials::SecretMaterial;
 use yuki::security::vault::crypto::encrypt_secret;
 use yuki::security::vault::store::{
     restrict_file_permissions, CredentialVault, VaultEntry, VaultError, VaultFile,
     VaultProcessLock, VAULT_FORMAT_VERSION,
 };
+use yuki::verification::verifier::Verifier;
 
 // ============================================================================
 // PONTO DE ENTRADA DO PROCESSO FILHO PARA TESTES MULTIPROCESSO
@@ -1356,4 +1363,605 @@ fn test_vault_cross_instance_consistency_and_sync() {
         "{}.lock",
         vault_path.file_name().unwrap().to_str().unwrap()
     )));
+}
+
+// ============================================================================
+// 8. TESTES DE VALIDAÇÃO DO PATCH FINAL — CORREÇÕES P1 (VAULT) E P2 (TOOLS)
+// ============================================================================
+
+struct CustomTestCapability {
+    manifest: CapabilityManifest,
+}
+
+impl CapabilityHandler for CustomTestCapability {
+    fn manifest(&self) -> CapabilityManifest {
+        self.manifest.clone()
+    }
+    fn execute(&self, _input: &serde_json::Value) -> Result<serde_json::Value, YukiError> {
+        Ok(serde_json::json!({"status": "ok"}))
+    }
+}
+
+// --- P1: Testes de Integridade do Vault ---
+
+#[test]
+fn test_vault_p1_01_legitimate_creation_and_open_or_create() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_p1_create_{}.json", nonce));
+
+    // Situação A: Criação inicial legítima com create_new
+    let vault =
+        CredentialVault::create_new(&vault_path, SecretMaterial::new("master-passphrase-p1-123"))
+            .expect("criação inicial de vault legítimo");
+    assert!(vault_path.exists(), "Arquivo deve ser criado fisicamente");
+    assert_eq!(vault.list_metadata().unwrap().len(), 0);
+
+    // open_or_create em caminho já existente abre o cofre
+    let vault_opened = CredentialVault::open_or_create(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-p1-123"),
+    )
+    .expect("abrir cofre existente");
+    assert_eq!(vault_opened.list_metadata().unwrap().len(), 0);
+
+    let _ = fs::remove_file(&vault_path);
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_p1_02_disappeared_file_fails_closed_on_mutations_without_recreating_disk() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_p1_disappeared_{}.json", nonce));
+
+    let vault = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-disappear-123"),
+    )
+    .expect("criar vault inicial");
+
+    vault
+        .store("init_key", "init_sec", "test", None)
+        .expect("armazenar chave inicial");
+
+    // Situação B: O arquivo do Vault desaparece inesperadamente de disco enquanto o cofre está aberto
+    fs::remove_file(&vault_path).expect("remover arquivo de cofre para simular desaparecimento");
+    assert!(!vault_path.exists(), "Arquivo deve estar ausente");
+
+    // 1. Tentativa de store após desaparecimento: deve falhar fechado com VaultFileDisappeared
+    let store_res = vault.store("new_key", "new_sec", "test", None);
+    assert!(
+        matches!(store_res, Err(VaultError::VaultFileDisappeared(_))),
+        "store após desaparecimento deve falhar com VaultFileDisappeared"
+    );
+    assert!(
+        !vault_path.exists(),
+        "store NÃO pode recriar silenciosamente o arquivo ausente em disco"
+    );
+
+    // 2. Tentativa de replace após desaparecimento: deve falhar fechado com VaultFileDisappeared
+    let replace_res = vault.replace("init_key", "updated_sec", None);
+    assert!(
+        matches!(replace_res, Err(VaultError::VaultFileDisappeared(_))),
+        "replace após desaparecimento deve falhar com VaultFileDisappeared"
+    );
+    assert!(
+        !vault_path.exists(),
+        "replace NÃO pode recriar o arquivo em disco"
+    );
+
+    // 3. Tentativa de revoke após desaparecimento: deve falhar fechado com VaultFileDisappeared
+    let revoke_res = vault.revoke("init_key");
+    assert!(
+        matches!(revoke_res, Err(VaultError::VaultFileDisappeared(_))),
+        "revoke após desaparecimento deve falhar com VaultFileDisappeared"
+    );
+    assert!(
+        !vault_path.exists(),
+        "revoke NÃO pode recriar o arquivo em disco"
+    );
+
+    // 4. Tentativa de delete após desaparecimento: deve falhar fechado com VaultFileDisappeared
+    let delete_res = vault.delete("init_key");
+    assert!(
+        matches!(delete_res, Err(VaultError::VaultFileDisappeared(_))),
+        "delete após desaparecimento deve falhar com VaultFileDisappeared"
+    );
+    assert!(
+        !vault_path.exists(),
+        "delete NÃO pode recriar o arquivo em disco"
+    );
+
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_p1_03_disappeared_file_cache_miss_fails_with_disappeared_error() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_p1_cache_miss_{}.json", nonce));
+
+    let vault = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-miss-123"),
+    )
+    .expect("criar vault inicial");
+
+    fs::remove_file(&vault_path).expect("remover arquivo de cofre");
+
+    // Cache miss em get() e get_metadata() quando arquivo desapareceu
+    let get_res = vault.get("chave_inexistente");
+    assert!(
+        matches!(get_res, Err(VaultError::VaultFileDisappeared(_))),
+        "get com cache-miss após desaparecimento deve retornar VaultFileDisappeared"
+    );
+
+    let meta_res = vault.get_metadata("chave_inexistente");
+    assert!(
+        matches!(meta_res, Err(VaultError::VaultFileDisappeared(_))),
+        "get_metadata com cache-miss após desaparecimento deve retornar VaultFileDisappeared"
+    );
+
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_p1_04_inaccessible_file_returns_io_not_disappeared() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_p1_inaccessible_{}.json", nonce));
+
+    let vault = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-inacc-123"),
+    )
+    .expect("criar vault");
+
+    // Situação C: Arquivo inacessível por bloqueio exclusivo de outro processo / permissões
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let exclusive_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&vault_path);
+        if let Ok(_f) = exclusive_file {
+            let res = vault.store("key_locked", "secret", "test", None);
+            assert!(res.is_err(), "Operação em arquivo bloqueado deve falhar");
+            assert!(
+                !matches!(res, Err(VaultError::VaultFileDisappeared(_))),
+                "Arquivo bloqueado não deve ser reportado como VaultFileDisappeared"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&vault_path, fs::Permissions::from_mode(0o000));
+        let res = vault.store("key_locked", "secret", "test", None);
+        assert!(res.is_err());
+        assert!(
+            !matches!(res, Err(VaultError::VaultFileDisappeared(_))),
+            "Permissão negada não deve ser reportada como VaultFileDisappeared"
+        );
+        let _ = fs::set_permissions(&vault_path, fs::Permissions::from_mode(0o600));
+    }
+
+    let _ = fs::remove_file(&vault_path);
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_p1_05_unexpected_vault_substitution_fails_closed() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault1_path = temp_dir.join(format!("yuki_test_p1_subst1_{}.json", nonce));
+    let vault2_path = temp_dir.join(format!("yuki_test_p1_subst2_{}.json", nonce));
+
+    let vault1 = CredentialVault::create_new(
+        &vault1_path,
+        SecretMaterial::new("master-passphrase-subst-123"),
+    )
+    .expect("criar vault1");
+
+    let vault2 = CredentialVault::create_new(
+        &vault2_path,
+        SecretMaterial::new("master-passphrase-subst-123"),
+    )
+    .expect("criar vault2 com mesma senha mas canário/salt independente");
+
+    vault1
+        .store("v1_key", "sec1", "test", None)
+        .expect("armazenar v1");
+    vault2
+        .store("v2_key", "sec2", "test", None)
+        .expect("armazenar v2");
+
+    // Situação D: O arquivo de vault1 é substituído externamente por outro arquivo de cofre válido (vault2)
+    fs::copy(&vault2_path, &vault1_path).expect("copiar vault2 sobre vault1");
+
+    // Tentativa de store no vault1 após substituição deve falhar fechado com VaultSubstituted
+    let store_res = vault1.store("v1_new", "sec_new", "test", None);
+    assert!(
+        matches!(store_res, Err(VaultError::VaultSubstituted(_))),
+        "Substituição de arquivo de cofre deve falhar fechado com VaultSubstituted"
+    );
+
+    let _ = fs::remove_file(&vault1_path);
+    let _ = fs::remove_file(vault1_path.with_file_name(format!(
+        "{}.lock",
+        vault1_path.file_name().unwrap().to_str().unwrap()
+    )));
+    let _ = fs::remove_file(&vault2_path);
+    let _ = fs::remove_file(vault2_path.with_file_name(format!(
+        "{}.lock",
+        vault2_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+#[test]
+fn test_vault_p1_06_memory_state_integrity_preserved_after_mutation_failure() {
+    let temp_dir = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let vault_path = temp_dir.join(format!("yuki_test_p1_mem_int_{}.json", nonce));
+
+    let vault = CredentialVault::create_new(
+        &vault_path,
+        SecretMaterial::new("master-passphrase-mem-123"),
+    )
+    .expect("criar vault");
+
+    vault
+        .store("original_key", "original_secret", "prov", None)
+        .expect("armazenar original");
+
+    // Simula falha física em disco (arquivo desaparece)
+    fs::remove_file(&vault_path).expect("remover arquivo");
+
+    // Tentativa de store falha
+    let fail_res = vault.store("fail_key", "fail_sec", "prov", None);
+    assert!(fail_res.is_err());
+
+    // Requisito 10: Integridade do estado em memória após falha
+    // A chave original armazenada antes da falha permanece intacta e acessível na memória
+    let get_res = vault.get("original_key");
+    assert!(
+        get_res.is_ok(),
+        "Estado em memória deve preservar as entradas existentes"
+    );
+    assert_eq!(
+        get_res.unwrap().expose_secret(),
+        "original_secret",
+        "Segredo em memória deve ser decifrável e intacto"
+    );
+
+    let meta_list = vault.list_metadata().unwrap();
+    assert_eq!(meta_list.len(), 1);
+    assert_eq!(meta_list[0].alias, "original_key");
+
+    let _ = fs::remove_file(vault_path.with_file_name(format!(
+        "{}.lock",
+        vault_path.file_name().unwrap().to_str().unwrap()
+    )));
+}
+
+// --- P2: Testes de Sobrecarga de Declarações de Ferramentas ---
+
+#[tokio::test]
+async fn test_tool_overhead_p2_01_zero_tools_registered_has_zero_overhead() {
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let core = YukiCore::with_components(
+        inspecting_provider.clone(),
+        Arc::new(CapabilityRegistry::empty()),
+        Arc::new(SecurityController::new()),
+        Arc::new(Executor::new()),
+        Arc::new(Verifier::new()),
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let input = UserInput::new("Turno sem ferramentas");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(res.is_ok(), "Execução sem ferramentas deve ter sucesso");
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(delivered.len(), 1);
+    assert!(
+        delivered[0].available_capabilities.is_empty(),
+        "Nenhuma ferramenta deve ser projetada"
+    );
+
+    let corr_id = yuki::contracts::identifiers::CorrelationId::from_request(&input.request_id);
+    let events = core.event_store.get_events(&corr_id);
+    let applied_event = events
+        .iter()
+        .find(|e| e.event_type == EventType::PersonalityApplied)
+        .expect("PersonalityApplied audit event");
+
+    let tool_chars = applied_event
+        .payload
+        .get("prompt_budget_audit")
+        .and_then(|a| a.get("tool_declarations_chars"))
+        .and_then(|v| v.as_u64())
+        .expect("tool_declarations_chars");
+    assert_eq!(
+        tool_chars, 0,
+        "Sem ferramentas registradas, overhead deve ser exatamente 0"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_overhead_p2_02_single_and_multiple_tools_exact_character_accounting() {
+    // 1 ferramenta:
+    let mut single_reg = CapabilityRegistry::empty();
+    single_reg.register(Box::new(yuki::capabilities::echo::EchoCapability::new()));
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let core = YukiCore::with_components(
+        inspecting_provider.clone(),
+        Arc::new(single_reg),
+        Arc::new(SecurityController::new()),
+        Arc::new(Executor::new()),
+        Arc::new(Verifier::new()),
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let input = UserInput::new("Turno com 1 ferramenta");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(res.is_ok());
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(delivered[0].available_capabilities.len(), 1);
+    assert_eq!(delivered[0].available_capabilities[0].name, "system.echo");
+
+    let corr_id = yuki::contracts::identifiers::CorrelationId::from_request(&input.request_id);
+    let events = core.event_store.get_events(&corr_id);
+    let applied_event = events
+        .iter()
+        .find(|e| e.event_type == EventType::PersonalityApplied)
+        .expect("PersonalityApplied");
+    let tool_chars = applied_event
+        .payload
+        .get("prompt_budget_audit")
+        .and_then(|a| a.get("tool_declarations_chars"))
+        .and_then(|v| v.as_u64())
+        .expect("tool_declarations_chars");
+    assert!(
+        tool_chars > 0,
+        "Uma ferramenta registrada deve gerar custo de caracteres > 0"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_overhead_p2_03_complex_parameter_schema_accounting() {
+    let complex_schema = serde_json::json!({
+        "type": "object",
+        "required": ["query", "filters"],
+        "properties": {
+            "query": { "type": "string", "description": "Consulta de busca estruturada" },
+            "filters": {
+                "type": "object",
+                "properties": {
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "categories": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["docs", "code", "chat"] }
+                    }
+                }
+            }
+        }
+    });
+
+    let manifest = CapabilityManifest {
+        id: CapabilityId::new("custom.complex_search"),
+        version: "1.0.0".to_string(),
+        description: "Capacidade com esquema JSON complexo e aninhado".to_string(),
+        input_schema: complex_schema.clone(),
+        output_schema: serde_json::json!({ "type": "object" }),
+        required_permissions: vec![],
+        risk_class: RiskClass::Low,
+        side_effects: SideEffects::None,
+        network_required: false,
+        filesystem_required: false,
+        secrets_required: false,
+    };
+
+    let mut reg = CapabilityRegistry::empty();
+    reg.register(Box::new(CustomTestCapability { manifest }));
+
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let core = YukiCore::with_components(
+        inspecting_provider.clone(),
+        Arc::new(reg),
+        Arc::new(SecurityController::new()),
+        Arc::new(Executor::new()),
+        Arc::new(Verifier::new()),
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let input = UserInput::new("Teste schema complexo");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(res.is_ok());
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        delivered[0].available_capabilities[0].parameters_schema, complex_schema,
+        "O schema complexo deve ser entregue intacto ao provedor"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_overhead_p2_04_unicode_content_character_counting() {
+    let unicode_desc =
+        "❄️ Yuki 雪 - Pesquisa Acentuada: áéíóú, ênclise e kanji: 日本語".to_string();
+    let manifest = CapabilityManifest {
+        id: CapabilityId::new("custom.unicode_yuki"),
+        version: "1.0.0".to_string(),
+        description: unicode_desc.clone(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "termo": { "type": "string", "description": "Termo de busca em português ou japonês (日本語)" }
+            }
+        }),
+        output_schema: serde_json::json!({ "type": "object" }),
+        required_permissions: vec![],
+        risk_class: RiskClass::Low,
+        side_effects: SideEffects::None,
+        network_required: false,
+        filesystem_required: false,
+        secrets_required: false,
+    };
+
+    let mut reg = CapabilityRegistry::empty();
+    reg.register(Box::new(CustomTestCapability { manifest }));
+
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let core = YukiCore::with_components(
+        inspecting_provider.clone(),
+        Arc::new(reg),
+        Arc::new(SecurityController::new()),
+        Arc::new(Executor::new()),
+        Arc::new(Verifier::new()),
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let input = UserInput::new("Teste Unicode em ferramentas");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(res.is_ok());
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        delivered[0].available_capabilities[0].description, unicode_desc,
+        "Conteúdo Unicode deve ser preservado fielmente"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_overhead_p2_05_insufficient_budget_fails_closed_before_provider() {
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    // Orçamento minúsculo: 50 tokens max, 20 reservados = 30 tokens disponíveis (30 * 3.5 * 0.9 = 94 chars)
+    let budget_config = IntegralPromptBudgetConfig {
+        max_model_context_tokens: 50,
+        reserved_response_tokens: 20,
+        tokenizer_profile: TokenizerModelProfile::ConservativeMultilingual,
+        ..Default::default()
+    };
+
+    // YukiCore::new() possui o conjunto completo de ferramentas padrão que excede amplamente 94 chars
+    let core = YukiCore::new()
+        .with_model_provider(inspecting_provider.clone())
+        .with_prompt_budget(budget_config);
+
+    let input = UserInput::new("Turno que excede orçamento pelas ferramentas");
+    let res = core.process_input_async(input).await;
+    assert!(
+        res.is_err(),
+        "Sobrecarga de ferramentas que estoura o orçamento deve falhar fechado"
+    );
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        delivered.len(),
+        0,
+        "O provedor NUNCA pode ser chamado quando houver estouro de orçamento"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_overhead_p2_06_verified_model_request_delivery() {
+    let inspecting_provider = Arc::new(InspectingModelProvider::new());
+    let mut reg = CapabilityRegistry::empty();
+    reg.register(Box::new(yuki::capabilities::echo::EchoCapability::new()));
+    reg.register(Box::new(yuki::capabilities::time::TimeCapability::new()));
+
+    let core = YukiCore::with_components(
+        inspecting_provider.clone(),
+        Arc::new(reg),
+        Arc::new(SecurityController::new()),
+        Arc::new(Executor::new()),
+        Arc::new(Verifier::new()),
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let input = UserInput::new("Verificação de entrega de ModelRequest");
+    let res = core.process_input_async(input.clone()).await;
+    assert!(res.is_ok());
+
+    let delivered = inspecting_provider
+        .delivered_requests
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(delivered.len(), 1);
+    let req = &delivered[0];
+
+    // Validação integral do ModelRequest entregue
+    assert_eq!(req.purpose, "user_turn");
+    assert!(req.system_instruction.is_some());
+    assert!(req
+        .system_instruction
+        .as_ref()
+        .unwrap()
+        .contains("DIRETRIZ CONSTITUCIONAL DE DADOS E MEMÓRIA"));
+    assert_eq!(req.available_capabilities.len(), 2);
+    assert!(req
+        .available_capabilities
+        .iter()
+        .any(|c| c.name == "system.echo"));
+    assert!(req
+        .available_capabilities
+        .iter()
+        .any(|c| c.name == "system.time"));
 }

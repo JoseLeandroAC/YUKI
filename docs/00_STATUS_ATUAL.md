@@ -26,8 +26,8 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
   5. Propagação estrita de falhas reais de armazenamento de memória (`MemoryError::Storage`) no `YukiCore` com emissão de `MemoryRetrievalFailed` e `YukiError::ExecutionFailed` sem fallback silencioso;
   6. Orçamento integral de prompt (`PromptBudgetManager`) estruturado em 6 tiers ontológicos, integrado diretamente no caminho de produção de `YukiCore::process_input_internal`, protegendo inviolavelmente as Instruções Essenciais de Sistema (Tier 1), descontando delimitadores e avisos de truncamento sem mascaramento por `saturating_sub`, falhando fechado com erros tipados (`UserTurnExceedsBudget`, `EssentialInstructionsExceedBudget`) e registrando auditoria em `PersonalityApplied`;
   7. Defesa ativa contra injeção e quebra de delimitadores em memórias (`sanitize_untrusted_memory_content`), com neutralização insensível a maiúsculas/minúsculas e tolerante a espaços para tags de autoridade (`<system>`, `<developer>`, `<<<SYSTEM>>>`), tokens de controle (`[INST]`, `<|im_start|>`) e delimitadores de envelope (`</operator_personal_context>`);
-  8. Orçamento Integral de Prompt Refinado: Remoção de piso artificial de 500 chars em `effective_input_char_limit` (limite estrito fail-closed para janelas restritas); truncamento real de Tier 2 Personality quando exceder o orçamento restante (preservando o núcleo de identidade prioritariamente e registrando em `truncated_tiers` exclusivamente quando houver redução efetiva); contabilização antecipada de overhead e esquemas de declaração de ferramentas (`tool_declarations_chars`);
-  9. Consistência Transacional Estrita do Vault: Recarregamento e validação completa sob lock (`reload_disk_file_under_lock`) em todas as operações de mutação (`store`, `replace`, `revoke`, `delete`) e leitura de fallback, falhando fechado caso o arquivo em disco esteja corrompido ou adulterado, garantindo que nenhum estado inválido de disco seja mascarado ou sobrescrito por dados em memória.
+  8. Orçamento Integral de Prompt Refinado: Remoção de piso artificial de 500 chars em `effective_input_char_limit` (limite estrito fail-closed para janelas restritas); truncamento real de Tier 2 Personality quando exceder o orçamento restante (preservando o núcleo de identidade prioritariamente e registrando em `truncated_tiers` exclusivamente quando houver redução efetiva); contabilização antecipada de overhead e esquemas de declaração de ferramentas (`tool_declarations_chars`), com propagação fail-closed de erros de serialização sem mascaramento `unwrap_or(0)`;
+  9. Consistência Transacional Estrita do Vault: Distinção explícita entre criação legítima inicial, desaparecimento inesperado de arquivo em instância ativa (`VaultError::VaultFileDisappeared`), arquivo inacessível (`VaultError::Io`) e substituição não autorizada (`VaultError::VaultSubstituted`), com recarregamento sob lock exclusivo sem recriação automática e sem sobrescrita do disco por estado em memória.
 
 A situação atual pode ser resumida como:
 
@@ -45,7 +45,7 @@ IMPLEMENTADOS, HARDENED E VERIFICADOS
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-443 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 447 TESTES)
+455 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 459 TESTES)
 
 
 ---
@@ -758,12 +758,15 @@ O Marco 7.2 implementou e validou o endurecimento estrito de 7 áreas críticas 
    Aplica estimativa conservadora (1 token ≈ 3.5 caracteres) com margem de segurança de 10% e sem piso artificial arbitrário (efetivo exato fail-closed para janelas restritas).
 7. **Defesa Ativa contra Injeção de Delimitadores (`src/context/personal_context.rs`):** Sanitização ativa via `sanitize_untrusted_memory_content` que neutraliza tags de escape (`</operator_personal_context>`) e tokens de autoridade (`<system>`, `<developer>`, `[INST]`, etc.) em textos de memória de dados não confiáveis (`Data != Instruction`).
 8. **Consistência Transacional Estrita do Vault (`src/security/vault/store.rs`):** Método `reload_disk_file_under_lock` implementado de forma estritamente fail-closed para todas as mutações (`store`, `replace`, `revoke`, `delete`) e leituras, impedindo que corrupção em disco seja mascarada ou sobrescrita por estado retido em memória.
+9. **Tratamento de Desaparecimento e Substituição do Vault & Rigor de Ferramentas (Patch Final P1 e P2):**
+   - **P1 (Desaparecimento/Substituição do Vault):** Diferenciação estrita entre Situação A (criação legítima via `create_new`/`open_or_create`), Situação B (arquivo desaparecido em cofre ativo -> `VaultError::VaultFileDisappeared`, fail-closed sem recriação silenciosa de disco), Situação C (arquivo inacessível -> `VaultError::Io`), e Situação D (arquivo substituído por cofre estranho -> `VaultError::VaultSubstituted`). Preservação da integridade do cache em memória e fail-closed em cache-miss.
+   - **P2 (Orçamento de Ferramentas sem Fallback Silencioso):** Eliminação de `unwrap_or(0)` no `YukiCore`, propagando falhas de serialização como `YukiError::ExecutionFailed` antes de invocar o provedor, mantendo overhead zero quando o registro estiver vazio.
 
-Resultados verificados do Marco 7.2 (Fechamento Definitivo):
-- `tests/marco_7_2_hardening.rs`: 26/26 testes aprovados (incluindo testes de orçamento sub-500, truncamento efetivo de personalidade, overhead de ferramentas e integridade de disco do vault);
+Resultados verificados do Marco 7.2 (Fechamento Definitivo & Patch Final):
+- `tests/marco_7_2_hardening.rs`: 38/38 testes aprovados (incluindo testes de orçamento sub-500, truncamento efetivo de personalidade, overhead de ferramentas e integridade de disco do vault, além de 12 novos testes para os cenários P1 e P2);
 - `tests/marco_7_1_validation.rs`: 10/10 testes aprovados com asserção estrita de `ProcessLockBusy`;
 - `tests/vault_security.rs`: 11/11 testes aprovados (incluindo concorrência intra-processo e inter-processo);
-- Suíte geral de testes no workspace: 443 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 447 testes; 0 falhas). Nota de reconciliação: a contagem anterior de 488 decorreu de soma imprecisa em narrativa prévia; a contagem física real de testes no repositório é de 443 ativos + 4 live opt-in ignorados = 447 testes totais;
+- Suíte geral de testes no workspace: 455 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 459 testes; 0 falhas across all targets);
 - `cargo fmt --all -- --check`: aprovado sem desvios de formatação;
 - `cargo clippy --workspace --all-targets -- -D warnings`: aprovado com zero advertências;
 - `cargo build --release`: aprovado com sucesso.

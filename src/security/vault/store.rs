@@ -68,6 +68,12 @@ pub enum VaultError {
 
     #[error("Cofre legado sem canário e sem credenciais verificáveis: '{0}'. Inicialização explícita necessária")]
     UnverifiableLegacyVault(String),
+
+    #[error("Arquivo do cofre desapareceu inesperadamente: '{0}'")]
+    VaultFileDisappeared(String),
+
+    #[error("Arquivo do cofre em disco foi substituído por cofre não autenticado ou de outra instância: '{0}'")]
+    VaultSubstituted(String),
 }
 
 /// Registro persistido contendo metadados claros e segredo cifrado.
@@ -283,9 +289,9 @@ pub struct VaultProcessLock {
 }
 
 impl VaultProcessLock {
-    /// Adquire lock exclusivo para o cofre com timeout padrão de 10 segundos.
+    /// Adquire lock exclusivo para o cofre com timeout padrão de 30 segundos.
     pub fn acquire(vault_path: &Path) -> Result<Self, VaultError> {
-        Self::acquire_with_timeout(vault_path, std::time::Duration::from_millis(10_000))
+        Self::acquire_with_timeout(vault_path, std::time::Duration::from_millis(30_000))
     }
 
     /// Adquire lock exclusivo para o cofre com timeout configurável.
@@ -600,16 +606,31 @@ impl CredentialVault {
 
     /// Recarrega o estado do arquivo em disco sob lock de processo com validação estrita.
     ///
-    /// Se o arquivo não existir, retorna Ok(None).
-    /// Se o arquivo existir mas estiver corrompido, adulterado, com symlinks inválidos,
-    /// tamanho excessivo, versão incompatível ou canário não autenticável, falha fechado imediatamente.
-    fn reload_disk_file_under_lock(&self) -> Result<Option<VaultFile>, VaultError> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-
-        let symlink_meta = fs::symlink_metadata(&self.path)
-            .map_err(|e| VaultError::Io(format!("Falha ao ler metadados do vault: {}", e)))?;
+    /// Distingue explicitamente os seguintes cenários de integridade:
+    /// - Situação B (Desaparecimento inesperado): Se o arquivo do cofre não existir após a
+    ///   instância ter sido aberta, falha fechado com `VaultError::VaultFileDisappeared`.
+    ///   Não recria automaticamente o arquivo e não persiste o cache em memória como substituto.
+    /// - Situação C (Arquivo inacessível): Falhas de metadados, permissões ou I/O não são
+    ///   confundidas com inexistência e retornam `VaultError::Io`.
+    /// - Situação D (Substituição de arquivo/canário): Se o cofre foi substituído por outro cofre
+    ///   válido mas cujo canário de verificação ou identidade não corresponde à instância ativa,
+    ///   falha fechado com `VaultError::VaultSubstituted`.
+    fn reload_disk_file_under_lock(&self) -> Result<VaultFile, VaultError> {
+        let symlink_meta = match fs::symlink_metadata(&self.path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(VaultError::VaultFileDisappeared(
+                    self.path.display().to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(VaultError::Io(format!(
+                    "Falha ao inspecionar metadados do arquivo do cofre em '{}': {}",
+                    self.path.display(),
+                    e
+                )));
+            }
+        };
 
         if symlink_meta.file_type().is_symlink() {
             return Err(VaultError::InsecurePath(
@@ -631,24 +652,52 @@ impl CredentialVault {
             return Err(VaultError::UnsupportedVersion(disk_file.version));
         }
 
-        // Validação da senha/canário
-        if let Some(ref canary_blob) = disk_file.verification {
-            match decrypt_secret(self.passphrase.expose_secret(), canary_blob) {
-                Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {}
-                _ => return Err(VaultError::InvalidPassphrase),
+        // Validação da identidade e autenticação antecipada (Situação D - Substituição/Canário)
+        let expected_verification = self
+            .verification
+            .read()
+            .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?
+            .clone();
+
+        match (expected_verification, &disk_file.verification) {
+            (Some(ref expected), Some(ref disk_canary)) => {
+                if expected != disk_canary {
+                    return Err(VaultError::VaultSubstituted(format!(
+                        "Canário de verificação do cofre em '{}' não corresponde à instância ativa (substituição detectada)",
+                        self.path.display()
+                    )));
+                }
+                // Se expected == disk_canary, a identidade e validade criptográfica da chave
+                // já foram verificadas na inicialização desta instância. Não há necessidade
+                // de recomputar PBKDF2 (100.000 iterações) sob lock exclusivo de SO.
             }
-        } else if !disk_file.entries.is_empty() {
-            let (_, first_entry) = disk_file.entries.iter().next().unwrap();
-            if decrypt_secret(self.passphrase.expose_secret(), &first_entry.encrypted).is_err() {
-                return Err(VaultError::InvalidPassphrase);
+            (Some(_), None) => {
+                return Err(VaultError::VaultSubstituted(format!(
+                    "Arquivo em disco em '{}' não possui canário de verificação esperado pela instância ativa",
+                    self.path.display()
+                )));
             }
-        } else {
-            return Err(VaultError::UnverifiableLegacyVault(
-                self.path.display().to_string(),
-            ));
+            (None, Some(ref disk_canary)) => {
+                match decrypt_secret(self.passphrase.expose_secret(), disk_canary) {
+                    Ok(decrypted) if decrypted.expose_secret() == VAULT_CANARY_PLAINTEXT => {}
+                    _ => return Err(VaultError::InvalidPassphrase),
+                }
+            }
+            (None, None) => {
+                if disk_file.entries.is_empty() {
+                    return Err(VaultError::UnverifiableLegacyVault(
+                        self.path.display().to_string(),
+                    ));
+                }
+                let (_, first_entry) = disk_file.entries.iter().next().unwrap();
+                if decrypt_secret(self.passphrase.expose_secret(), &first_entry.encrypted).is_err()
+                {
+                    return Err(VaultError::InvalidPassphrase);
+                }
+            }
         }
 
-        Ok(Some(disk_file))
+        Ok(disk_file)
     }
 
     /// Sincroniza o guard de entradas com o estado em disco de forma transacional e fail-closed.
@@ -656,15 +705,14 @@ impl CredentialVault {
         &self,
         entries_guard: &mut BTreeMap<String, VaultEntry>,
     ) -> Result<(), VaultError> {
-        if let Some(disk_file) = self.reload_disk_file_under_lock()? {
-            *entries_guard = disk_file.entries;
-            if disk_file.verification.is_some() {
-                let mut ver_guard = self
-                    .verification
-                    .write()
-                    .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?;
-                *ver_guard = disk_file.verification;
-            }
+        let disk_file = self.reload_disk_file_under_lock()?;
+        *entries_guard = disk_file.entries;
+        if disk_file.verification.is_some() {
+            let mut ver_guard = self
+                .verification
+                .write()
+                .map_err(|_| VaultError::Io("Lock de verificação envenenado".to_string()))?;
+            *ver_guard = disk_file.verification;
         }
         Ok(())
     }
@@ -802,20 +850,16 @@ impl CredentialVault {
             Some(e) => e.clone(),
             None => {
                 drop(entries);
-                if self.path.exists() {
-                    let _proc_lock = VaultProcessLock::acquire(&self.path)?;
-                    let mut write_guard = self
-                        .entries
-                        .write()
-                        .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
-                    self.sync_entries_under_lock(&mut write_guard)?;
-                    write_guard
-                        .get(alias)
-                        .cloned()
-                        .ok_or_else(|| VaultError::NotFound(alias.to_string()))?
-                } else {
-                    return Err(VaultError::NotFound(alias.to_string()));
-                }
+                let _proc_lock = VaultProcessLock::acquire(&self.path)?;
+                let mut write_guard = self
+                    .entries
+                    .write()
+                    .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+                self.sync_entries_under_lock(&mut write_guard)?;
+                write_guard
+                    .get(alias)
+                    .cloned()
+                    .ok_or_else(|| VaultError::NotFound(alias.to_string()))?
             }
         };
 
@@ -842,20 +886,16 @@ impl CredentialVault {
             Some(e) => Ok(e.metadata.clone()),
             None => {
                 drop(entries);
-                if self.path.exists() {
-                    let _proc_lock = VaultProcessLock::acquire(&self.path)?;
-                    let mut write_guard = self
-                        .entries
-                        .write()
-                        .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
-                    self.sync_entries_under_lock(&mut write_guard)?;
-                    write_guard
-                        .get(alias)
-                        .map(|e| e.metadata.clone())
-                        .ok_or_else(|| VaultError::NotFound(alias.to_string()))
-                } else {
-                    Err(VaultError::NotFound(alias.to_string()))
-                }
+                let _proc_lock = VaultProcessLock::acquire(&self.path)?;
+                let mut write_guard = self
+                    .entries
+                    .write()
+                    .map_err(|_| VaultError::Io("Lock de escrita envenenado".to_string()))?;
+                self.sync_entries_under_lock(&mut write_guard)?;
+                write_guard
+                    .get(alias)
+                    .map(|e| e.metadata.clone())
+                    .ok_or_else(|| VaultError::NotFound(alias.to_string()))
             }
         }
     }

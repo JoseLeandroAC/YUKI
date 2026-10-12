@@ -403,9 +403,18 @@ impl YukiCore {
             })
             .collect();
 
-        let tool_declarations_chars = serde_json::to_string(&available_capabilities)
-            .map(|s| s.chars().count())
-            .unwrap_or(0);
+        let tool_declarations_chars = if available_capabilities.is_empty() {
+            0
+        } else {
+            serde_json::to_string(&available_capabilities)
+                .map(|s| s.chars().count())
+                .map_err(|e| {
+                    YukiError::ExecutionFailed(format!(
+                        "Falha ao serializar declarações de ferramentas para contabilidade de orçamento: {}",
+                        e
+                    ))
+                })?
+        };
 
         // Montagem governada através do PromptBudgetManager integral
         let assembled = self
