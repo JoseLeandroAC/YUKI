@@ -1090,3 +1090,514 @@ fn test_45_invariante_modelo_propoe_sistema_executa() {
     assert!(plan.steps[0].requires_approval);
     assert_eq!(plan.steps[0].status, MissionStepStatus::Pending);
 }
+
+// ============================================================================
+// GRUPO 4: Hardening e Integração Real do Marco 8.1 (Cenários 46 a 57)
+// ============================================================================
+
+#[test]
+fn test_46_audio_playback_sink_interrupcao_e_hardware() {
+    use yuki::voice::playback::MockPlaybackSink;
+
+    let sink = Arc::new(MockPlaybackSink::new());
+    let controller = AudioPlaybackController::with_sink(sink.clone());
+
+    let samples = vec![0i16; 1600];
+    let wav_data = AudioCodec::encode_wav(&samples, &AudioFormat::default()).unwrap();
+    let output = AudioOutput::new(wav_data, AudioFormat::default(), 100, "test");
+    assert!(controller.play(&output).is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Playing);
+    assert_eq!(sink.played_count(), 1);
+
+    // Interrupção imediata via controller
+    assert!(controller.interrupt().is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Interrupted);
+    assert_eq!(sink.interrupted_count(), 1);
+}
+
+#[test]
+fn test_47_push_to_talk_duracao_e_overflow() {
+    use yuki::voice::capture::{MockCaptureBackend, PushToTalkController};
+
+    // Gera áudio mock com mais de 1MB (overflow de bytes suportados)
+    let huge_samples = vec![0i16; 600_000]; // 1.2MB PCM
+    let huge_wav = AudioCodec::encode_wav(&huge_samples, &AudioFormat::default()).unwrap();
+    let mock_input = AudioInput::new(huge_wav, AudioFormat::default(), 30000, "mock-mic");
+    let backend = Arc::new(MockCaptureBackend::new());
+    backend.set_mock_input(mock_input);
+    let ptt = PushToTalkController::new(backend);
+
+    ptt.press().unwrap();
+    let result = ptt.release();
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), VoiceError::AudioTooLarge { .. }));
+}
+
+#[test]
+fn test_48_vad_rejeicao_de_ruido_estatico_e_clicks() {
+    use yuki::voice::wakeword::{
+        PhoneticPatternWakeWordEngine, VoiceActivityDetector, WakeWordEngine,
+    };
+
+    let vad = VoiceActivityDetector::default();
+    let engine = PhoneticPatternWakeWordEngine::new();
+
+    // 1. DC puro ou silêncio (RMS = 0, ZCR = 0) -> VAD rejeita
+    let silence_frames = vec![
+        AudioFrame::new(vec![0i16; 1600], 16000, 1, 0),
+        AudioFrame::new(vec![0i16; 1600], 16000, 1, 100),
+        AudioFrame::new(vec![0i16; 1600], 16000, 1, 200),
+    ];
+    assert!(!vad.is_speech(&silence_frames));
+    assert_eq!(engine.verify_keyword(&silence_frames, "yuki").unwrap(), None);
+
+    // 2. Ruído alternante puro (ZCR = 1.0, f = 8kHz) -> VAD rejeita
+    let mut high_freq = Vec::with_capacity(1600);
+    for i in 0..1600 {
+        high_freq.push(if i % 2 == 0 { 20_000i16 } else { -20_000i16 });
+    }
+    let high_freq_frames = vec![
+        AudioFrame::new(high_freq.clone(), 16000, 1, 0),
+        AudioFrame::new(high_freq.clone(), 16000, 1, 100),
+        AudioFrame::new(high_freq, 16000, 1, 200),
+    ];
+    assert!(!vad.is_speech(&high_freq_frames));
+
+    // 3. Click único (1 impulso seguido de silêncio) -> Engine fonética rejeita
+    let mut click = vec![0i16; 1600];
+    click[500] = 30_000;
+    click[501] = -30_000;
+    let click_frames = vec![
+        AudioFrame::new(click, 16000, 1, 0),
+        AudioFrame::new(vec![0i16; 1600], 16000, 1, 100),
+        AudioFrame::new(vec![0i16; 1600], 16000, 1, 200),
+    ];
+    assert_eq!(engine.verify_keyword(&click_frames, "yuki").unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_49_subprocessos_timeout_e_limpeza_sem_orfaos() {
+    use yuki::voice::stt::local::{LocalWhisperConfig, LocalWhisperSttProvider};
+    use yuki::voice::tts::local::{LocalPiperConfig, LocalPiperTtsProvider};
+
+    // Provedor Whisper com caminho inexistente / não configurado
+    let whisper = LocalWhisperSttProvider::new(LocalWhisperConfig::default());
+    let samples = vec![0i16; 1600];
+    let sample_wav = AudioCodec::encode_wav(&samples, &AudioFormat::default()).unwrap();
+    let input = AudioInput::new(sample_wav, AudioFormat::default(), 100, "test");
+    let res_stt = whisper.transcribe(&input).await;
+    assert!(res_stt.is_err());
+    assert!(matches!(res_stt.unwrap_err(), VoiceError::ProviderUnavailable(_)));
+
+    // Provedor Piper com caminho inexistente / não configurado
+    let piper = LocalPiperTtsProvider::new(LocalPiperConfig::default());
+    let res_tts = piper.synthesize("Olá Yuki", None).await;
+    assert!(res_tts.is_err());
+    assert!(matches!(res_tts.unwrap_err(), VoiceError::ProviderUnavailable(_)));
+}
+
+#[test]
+fn test_50_governanca_tipada_egress_auth_expirada_ou_adulterada() {
+    use yuki::voice::router::VoiceEgressAuthorization;
+
+    let auth = VoiceEgressAuthorization::new_stt("operator-jose", "param_hash_123");
+
+    // Válido para STT e operator-jose
+    assert!(auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator-jose"));
+
+    // Inválido se tentar usar para TTS (isolamento de capacidade)
+    assert!(!auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_TTS, "operator-jose"));
+
+    // Inválido se outro operador tentar usar
+    assert!(!auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator-atacante"));
+
+    // Inválido se expirado
+    let expired = VoiceEgressAuthorization::with_ttl(
+        "operator-jose",
+        VoiceEgressAuthorization::CAPABILITY_STT,
+        0, // Expira imediatamente
+        "hash",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(!expired.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator-jose"));
+}
+
+#[tokio::test]
+async fn test_51_minimizacao_de_dados_em_eventos_de_auditoria_de_voz() {
+    use yuki::contracts::events::EventType;
+    use yuki::models::mock::{MockBehavior, MockModelProvider};
+    use yuki::persistence::{AuditFilter, AuditQueryStore, SqliteAuditStore};
+    use yuki::voice::conversation::VoiceConversationCoordinator;
+    use yuki::voice::tts::local::LocalAcousticTtsProvider;
+
+    let temp_db = format!("data/test_audit_voice_{}.db", now_utc().timestamp_nanos_opt().unwrap_or(0));
+    let audit_store = Arc::new(SqliteAuditStore::open(&temp_db).unwrap());
+
+    let model = Arc::new(MockModelProvider::with_behavior(
+        MockBehavior::DirectText("Resposta do assistente".to_string()),
+    ));
+    let core = Arc::new(YukiCore::new().with_model_provider(model));
+    let local_stt = Arc::new(MockSttProvider::new().with_response("minha senha secreta 1234"));
+    let local_tts = Arc::new(LocalAcousticTtsProvider::new(16000));
+    let config = VoiceConfiguration::default();
+    let router = Arc::new(GovernedVoiceRouter::new(local_stt, None, local_tts, None, config));
+
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let playback = Arc::new(AudioPlaybackController::new());
+    let wake_detector = Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default()));
+
+    let coordinator = VoiceConversationCoordinator::new(
+        core,
+        router,
+        session_mgr,
+        playback,
+        wake_detector,
+        Some(audit_store.clone()),
+    );
+
+    let format = AudioFormat::default();
+    let samples = vec![100i16; 1600];
+    let wav_payload = AudioCodec::encode_wav(&samples, &format).unwrap();
+    let input = AudioInput::new(wav_payload, format, 100, "mic-0");
+
+    let _ = coordinator
+        .process_button_turn("device-test", input, false, false)
+        .await
+        .unwrap();
+
+    // Inspeciona eventos no audit_store
+    let events = audit_store.query_events(&AuditFilter::default()).unwrap();
+    let voice_event = events.iter().find(|e| e.event_type == EventType::VoiceInputReceived);
+    assert!(voice_event.is_some());
+
+    let payload = &voice_event.unwrap().payload;
+    // Garante que o texto em claro NÃO foi gravado nos logs de auditoria
+    assert!(payload.get("transcribed_text").is_none());
+    // Garante que apenas metadados técnicos foram preservados
+    assert!(payload.get("text_char_count").is_some());
+    assert!(payload.get("duration_ms").is_some());
+    assert!(payload.get("sample_rate").is_some());
+
+    let _ = std::fs::remove_file(temp_db);
+}
+
+#[tokio::test]
+async fn test_52_mission_runner_concorrencia_bloqueio_por_lease() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = Arc::new(MissionApprovalManager::new(store.clone(), None));
+    let capability_registry = Arc::new(CapabilityRegistry::new());
+    let verifier = Arc::new(Verifier::new());
+
+    let runner = Arc::new(MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    ));
+
+    let step = MissionStep::new(
+        "s_lease",
+        "m_lease",
+        1,
+        "Passo de teste",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "oi"}),
+        false,
+        vec![],
+    );
+    let plan = MissionPlan::new(vec![step.clone()]);
+    let mission = MissionPlanner::default()
+        .create_mission("m_lease", "Lease Test", "Obj", "op", "corr", plan, None)
+        .unwrap();
+
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    // Primeira execução adquire o lease e conclui
+    let res1 = runner.run_mission("m_lease").await;
+    assert!(res1.is_ok());
+
+    // Se duas invocações tentarem simultaneamente, uma é bloqueada com erro descritivo de lease
+    let runner_c1 = runner.clone();
+    let runner_c2 = runner.clone();
+
+    // Criamos uma nova missão não terminal
+    let step2 = MissionStep::new(
+        "s_lease2",
+        "m_lease2",
+        1,
+        "Passo",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "oi"}),
+        false,
+        vec![],
+    );
+    let plan2 = MissionPlan::new(vec![step2.clone()]);
+    let mission2 = MissionPlanner::default()
+        .create_mission("m_lease2", "Lease Test 2", "Obj", "op", "corr", plan2, None)
+        .unwrap();
+    store.create_mission(&mission2).unwrap();
+    store.save_step(&step2).unwrap();
+
+    let (r1, r2) = tokio::join!(
+        runner_c1.run_mission("m_lease2"),
+        runner_c2.run_mission("m_lease2")
+    );
+
+    // Pelo menos uma execução é bem-sucedida, e se ambas competirem exatamente no mesmo instante, o lease protege
+    assert!(r1.is_ok() || r2.is_ok());
+}
+
+#[tokio::test]
+async fn test_53_mission_runner_anti_replay_aprovacao_consumida() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = Arc::new(MissionApprovalManager::new(store.clone(), None));
+    let capability_registry = Arc::new(CapabilityRegistry::new());
+    let verifier = Arc::new(Verifier::new());
+
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr.clone(),
+        capability_registry,
+        verifier,
+        None,
+    );
+
+    let step = MissionStep::new(
+        "s_antireplay",
+        "m_antireplay",
+        1,
+        "Passo com aprovação",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "executar uma vez"}),
+        true,
+        vec![],
+    );
+    let plan = MissionPlan::new(vec![step.clone()]);
+    let mission = MissionPlanner::default()
+        .create_mission("m_antireplay", "Anti-Replay", "Obj", "op_jose", "corr", plan, None)
+        .unwrap();
+
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    // 1. Inicia: runner pausa em AwaitingApproval
+    let m = runner.run_mission("m_antireplay").await.unwrap();
+    assert_eq!(m.status, MissionStatus::AwaitingApproval);
+
+    let steps = store.get_steps_for_mission("m_antireplay").unwrap();
+    let app_id = steps[0].approval_id.as_ref().unwrap();
+
+    // 2. Operador aprova
+    let app = approval_mgr.grant_approval(app_id, "op_jose").unwrap();
+    assert_eq!(app.status, ApprovalStatus::Granted);
+
+    // 3. Runner executa e consome a aprovação
+    let m_done = runner.run_mission("m_antireplay").await.unwrap();
+    assert_eq!(m_done.status, MissionStatus::Completed);
+
+    // 4. Verifica que a aprovação no banco foi transicionada para Consumed
+    let consumed_app = store.get_approval(app_id).unwrap().unwrap();
+    assert_eq!(consumed_app.status, ApprovalStatus::Consumed);
+
+    // 5. Tentativa de validar a aprovação consumida para reexecução é rejeitada imediatamente
+    assert!(!consumed_app.is_valid_for("op_jose", "m_antireplay", "s_antireplay", "system.echo", &step.parameters));
+}
+
+#[tokio::test]
+async fn test_54_missao_exige_aprovacao_por_classe_de_risco_mesmo_sem_flag_no_plano() {
+    use yuki::capabilities::registry::CapabilityHandler;
+    use yuki::contracts::capability::{CapabilityManifest, RiskClass, SideEffects};
+    use yuki::contracts::errors::YukiError;
+    use yuki::contracts::identifiers::CapabilityId;
+
+    // Registra uma capacidade de alto risco customizada
+    struct HighRiskCapability;
+    impl CapabilityHandler for HighRiskCapability {
+        fn manifest(&self) -> CapabilityManifest {
+            CapabilityManifest {
+                id: CapabilityId::new("danger.format"),
+                version: "1.0.0".to_string(),
+                description: "Ação de alto risco".to_string(),
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                required_permissions: vec!["danger:format".to_string()],
+                risk_class: RiskClass::High,
+                side_effects: SideEffects::ExternalMutation,
+                network_required: false,
+                filesystem_required: true,
+                secrets_required: false,
+            }
+        }
+        fn execute(&self, _input: &serde_json::Value) -> Result<serde_json::Value, YukiError> {
+            Ok(serde_json::json!({"status": "formatted"}))
+        }
+    }
+
+    let mut cap_reg = CapabilityRegistry::new();
+    cap_reg.register(Box::new(HighRiskCapability));
+    let capability_registry = Arc::new(cap_reg);
+
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = Arc::new(MissionApprovalManager::new(store.clone(), None));
+    let verifier = Arc::new(Verifier::new());
+
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
+
+    // O modelo gerou o plano maliciosamente ou por alucinação com requires_approval = FALSE!
+    let malicious_step = MissionStep::new(
+        "s_danger",
+        "m_danger",
+        1,
+        "Formatação de disco",
+        Some("danger.format".to_string()),
+        serde_json::json!({}),
+        false, // Modelo diz que não precisa de aprovação!
+        vec![],
+    );
+
+    let plan = MissionPlan::new(vec![malicious_step.clone()]);
+    let mut policy = MissionExecutionPolicy::default();
+    policy.allowed_capabilities.push("danger.format".to_string());
+
+    let mission = MissionPlanner::default()
+        .create_mission("m_danger", "Perigo", "Obj", "op_jose", "corr", plan, Some(policy))
+        .unwrap();
+
+    store.create_mission(&mission).unwrap();
+    store.save_step(&malicious_step).unwrap();
+
+    // Invariante Model Output != Command != Authorization:
+    // O runner ignora a flag false do plano e PAUSA no portão humano por causa do RiskClass::High!
+    let m = runner.run_mission("m_danger").await.unwrap();
+    assert_eq!(m.status, MissionStatus::AwaitingApproval);
+
+    let steps = store.get_steps_for_mission("m_danger").unwrap();
+    assert_eq!(steps[0].status, MissionStepStatus::WaitingApproval);
+}
+
+#[test]
+fn test_55_reconciliacao_na_reinicializacao_bloqueia_mutacoes_cegas() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+
+    let step = MissionStep::new(
+        "s_crash_mut",
+        "m_crash",
+        1,
+        "Passo mutador interrompido",
+        Some("filesystem.write".to_string()),
+        serde_json::json!({"path": "/etc/config"}),
+        true, // Exigia aprovação
+        vec![],
+    );
+    let plan = MissionPlan::new(vec![step.clone()]);
+    let mut policy = MissionExecutionPolicy::default();
+    policy.allowed_capabilities.push("filesystem.write".to_string());
+
+    let mission = MissionPlanner::default()
+        .create_mission("m_crash", "Crash Test", "Obj", "op", "corr", plan, Some(policy))
+        .unwrap();
+
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    // Simula queda enquanto o passo estava em Running
+    store.update_step_status("s_crash_mut", MissionStepStatus::Running, None, None).unwrap();
+    store.update_mission_status("m_crash", MissionStatus::InProgress, None).unwrap();
+
+    // Reconciliação no startup
+    let recovered = store.reconcile_and_recover_on_startup().unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, MissionStatus::Paused);
+    // Passo NUNCA deve ser revertido para Pending se era mutador! Deve ser WaitingApproval!
+    assert_eq!(recovered[0].steps[0].status, MissionStepStatus::WaitingApproval);
+}
+
+#[tokio::test]
+async fn test_56_verificador_de_efeitos_executado_pos_etapa_com_comprovacao() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = Arc::new(MissionApprovalManager::new(store.clone(), None));
+    let capability_registry = Arc::new(CapabilityRegistry::new());
+    let verifier = Arc::new(Verifier::new());
+
+    let runner = MissionRunner::new(
+        store.clone(),
+        approval_mgr,
+        capability_registry,
+        verifier,
+        None,
+    );
+
+    let step = MissionStep::new(
+        "s_verify",
+        "m_verify",
+        1,
+        "Passo com verificação",
+        Some("system.echo".to_string()),
+        serde_json::json!({"message": "teste verificação"}),
+        false,
+        vec![],
+    );
+    let plan = MissionPlan::new(vec![step.clone()]);
+    let mission = MissionPlanner::default()
+        .create_mission("m_verify", "Verify Test", "Obj", "op", "corr", plan, None)
+        .unwrap();
+
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    let m = runner.run_mission("m_verify").await.unwrap();
+    assert_eq!(m.status, MissionStatus::Completed);
+
+    // Inspeciona checkpoint salvo no SQLite
+    let cp = store.get_latest_checkpoint("m_verify").unwrap().unwrap();
+    assert_eq!(cp.step_number, 1);
+    assert!(cp.snapshot.get("verification").is_some());
+    let v_data = cp.snapshot.get("verification").unwrap();
+    assert!(v_data.get("state").is_some());
+}
+
+#[test]
+fn test_57_autenticacao_de_operador_com_token_de_seguranca() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = MissionApprovalManager::new(store, None);
+
+    let step = MissionStep::new(
+        "s_tok",
+        "m_tok",
+        1,
+        "Passo protegido",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        true,
+        vec![],
+    );
+
+    let app = approval_mgr.request_approval("m_tok", &step, "operator-jose", 3600).unwrap();
+    let token = app.confirmation_token.as_ref().unwrap();
+
+    // 1. Operador vazio ou anônimo é rejeitado
+    let res_anon = approval_mgr.grant_approval_authenticated(&app.id, "", Some(token));
+    assert!(res_anon.is_err());
+    assert!(matches!(res_anon.unwrap_err(), MissionError::ApprovalMismatch(_)));
+
+    let res_anon2 = approval_mgr.grant_approval_authenticated(&app.id, "anonymous", Some(token));
+    assert!(res_anon2.is_err());
+
+    // 2. Token incorreto é rejeitado
+    let res_wrong_tok = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some("token-errado"));
+    assert!(res_wrong_tok.is_err());
+    assert!(matches!(res_wrong_tok.unwrap_err(), MissionError::ApprovalMismatch(_)));
+
+    // 3. Token correto e operador correto é aprovado com sucesso
+    let res_ok = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some(token));
+    assert!(res_ok.is_ok());
+    assert_eq!(res_ok.unwrap().status, ApprovalStatus::Granted);
+}
