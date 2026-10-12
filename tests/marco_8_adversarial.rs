@@ -1130,7 +1130,10 @@ fn test_47_push_to_talk_duracao_e_overflow() {
     ptt.press().unwrap();
     let result = ptt.release();
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), VoiceError::AudioTooLarge { .. }));
+    assert!(matches!(
+        result.unwrap_err(),
+        VoiceError::AudioTooLarge { .. }
+    ));
 }
 
 #[test]
@@ -1149,7 +1152,10 @@ fn test_48_vad_rejeicao_de_ruido_estatico_e_clicks() {
         AudioFrame::new(vec![0i16; 1600], 16000, 1, 200),
     ];
     assert!(!vad.is_speech(&silence_frames));
-    assert_eq!(engine.verify_keyword(&silence_frames, "yuki").unwrap(), None);
+    assert_eq!(
+        engine.verify_keyword(&silence_frames, "yuki").unwrap(),
+        None
+    );
 
     // 2. Ruído alternante puro (ZCR = 1.0, f = 8kHz) -> VAD rejeita
     let mut high_freq = Vec::with_capacity(1600);
@@ -1187,13 +1193,19 @@ async fn test_49_subprocessos_timeout_e_limpeza_sem_orfaos() {
     let input = AudioInput::new(sample_wav, AudioFormat::default(), 100, "test");
     let res_stt = whisper.transcribe(&input).await;
     assert!(res_stt.is_err());
-    assert!(matches!(res_stt.unwrap_err(), VoiceError::ProviderUnavailable(_)));
+    assert!(matches!(
+        res_stt.unwrap_err(),
+        VoiceError::ProviderUnavailable(_)
+    ));
 
     // Provedor Piper com caminho inexistente / não configurado
     let piper = LocalPiperTtsProvider::new(LocalPiperConfig::default());
     let res_tts = piper.synthesize("Olá Yuki", None).await;
     assert!(res_tts.is_err());
-    assert!(matches!(res_tts.unwrap_err(), VoiceError::ProviderUnavailable(_)));
+    assert!(matches!(
+        res_tts.unwrap_err(),
+        VoiceError::ProviderUnavailable(_)
+    ));
 }
 
 #[test]
@@ -1209,7 +1221,10 @@ fn test_50_governanca_tipada_egress_auth_expirada_ou_adulterada() {
     assert!(!auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_TTS, "operator-jose"));
 
     // Inválido se outro operador tentar usar
-    assert!(!auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator-atacante"));
+    assert!(!auth.is_valid_for(
+        VoiceEgressAuthorization::CAPABILITY_STT,
+        "operator-atacante"
+    ));
 
     // Inválido se expirado
     let expired = VoiceEgressAuthorization::with_ttl(
@@ -1230,17 +1245,22 @@ async fn test_51_minimizacao_de_dados_em_eventos_de_auditoria_de_voz() {
     use yuki::voice::conversation::VoiceConversationCoordinator;
     use yuki::voice::tts::local::LocalAcousticTtsProvider;
 
-    let temp_db = format!("data/test_audit_voice_{}.db", now_utc().timestamp_nanos_opt().unwrap_or(0));
+    let temp_db = format!(
+        "data/test_audit_voice_{}.db",
+        now_utc().timestamp_nanos_opt().unwrap_or(0)
+    );
     let audit_store = Arc::new(SqliteAuditStore::open(&temp_db).unwrap());
 
-    let model = Arc::new(MockModelProvider::with_behavior(
-        MockBehavior::DirectText("Resposta do assistente".to_string()),
-    ));
+    let model = Arc::new(MockModelProvider::with_behavior(MockBehavior::DirectText(
+        "Resposta do assistente".to_string(),
+    )));
     let core = Arc::new(YukiCore::new().with_model_provider(model));
     let local_stt = Arc::new(MockSttProvider::new().with_response("minha senha secreta 1234"));
     let local_tts = Arc::new(LocalAcousticTtsProvider::new(16000));
     let config = VoiceConfiguration::default();
-    let router = Arc::new(GovernedVoiceRouter::new(local_stt, None, local_tts, None, config));
+    let router = Arc::new(GovernedVoiceRouter::new(
+        local_stt, None, local_tts, None, config,
+    ));
 
     let session_mgr = Arc::new(VoiceSessionManager::new());
     let playback = Arc::new(AudioPlaybackController::new());
@@ -1267,7 +1287,9 @@ async fn test_51_minimizacao_de_dados_em_eventos_de_auditoria_de_voz() {
 
     // Inspeciona eventos no audit_store
     let events = audit_store.query_events(&AuditFilter::default()).unwrap();
-    let voice_event = events.iter().find(|e| e.event_type == EventType::VoiceInputReceived);
+    let voice_event = events
+        .iter()
+        .find(|e| e.event_type == EventType::VoiceInputReceived);
     assert!(voice_event.is_some());
 
     let payload = &voice_event.unwrap().payload;
@@ -1376,7 +1398,15 @@ async fn test_53_mission_runner_anti_replay_aprovacao_consumida() {
     );
     let plan = MissionPlan::new(vec![step.clone()]);
     let mission = MissionPlanner::default()
-        .create_mission("m_antireplay", "Anti-Replay", "Obj", "op_jose", "corr", plan, None)
+        .create_mission(
+            "m_antireplay",
+            "Anti-Replay",
+            "Obj",
+            "op_jose",
+            "corr",
+            plan,
+            None,
+        )
         .unwrap();
 
     store.create_mission(&mission).unwrap();
@@ -1402,7 +1432,13 @@ async fn test_53_mission_runner_anti_replay_aprovacao_consumida() {
     assert_eq!(consumed_app.status, ApprovalStatus::Consumed);
 
     // 5. Tentativa de validar a aprovação consumida para reexecução é rejeitada imediatamente
-    assert!(!consumed_app.is_valid_for("op_jose", "m_antireplay", "s_antireplay", "system.echo", &step.parameters));
+    assert!(!consumed_app.is_valid_for(
+        "op_jose",
+        "m_antireplay",
+        "s_antireplay",
+        "system.echo",
+        &step.parameters
+    ));
 }
 
 #[tokio::test]
@@ -1465,10 +1501,20 @@ async fn test_54_missao_exige_aprovacao_por_classe_de_risco_mesmo_sem_flag_no_pl
 
     let plan = MissionPlan::new(vec![malicious_step.clone()]);
     let mut policy = MissionExecutionPolicy::default();
-    policy.allowed_capabilities.push("danger.format".to_string());
+    policy
+        .allowed_capabilities
+        .push("danger.format".to_string());
 
     let mission = MissionPlanner::default()
-        .create_mission("m_danger", "Perigo", "Obj", "op_jose", "corr", plan, Some(policy))
+        .create_mission(
+            "m_danger",
+            "Perigo",
+            "Obj",
+            "op_jose",
+            "corr",
+            plan,
+            Some(policy),
+        )
         .unwrap();
 
     store.create_mission(&mission).unwrap();
@@ -1499,25 +1545,42 @@ fn test_55_reconciliacao_na_reinicializacao_bloqueia_mutacoes_cegas() {
     );
     let plan = MissionPlan::new(vec![step.clone()]);
     let mut policy = MissionExecutionPolicy::default();
-    policy.allowed_capabilities.push("filesystem.write".to_string());
+    policy
+        .allowed_capabilities
+        .push("filesystem.write".to_string());
 
     let mission = MissionPlanner::default()
-        .create_mission("m_crash", "Crash Test", "Obj", "op", "corr", plan, Some(policy))
+        .create_mission(
+            "m_crash",
+            "Crash Test",
+            "Obj",
+            "op",
+            "corr",
+            plan,
+            Some(policy),
+        )
         .unwrap();
 
     store.create_mission(&mission).unwrap();
     store.save_step(&step).unwrap();
 
     // Simula queda enquanto o passo estava em Running
-    store.update_step_status("s_crash_mut", MissionStepStatus::Running, None, None).unwrap();
-    store.update_mission_status("m_crash", MissionStatus::InProgress, None).unwrap();
+    store
+        .update_step_status("s_crash_mut", MissionStepStatus::Running, None, None)
+        .unwrap();
+    store
+        .update_mission_status("m_crash", MissionStatus::InProgress, None)
+        .unwrap();
 
     // Reconciliação no startup
     let recovered = store.reconcile_and_recover_on_startup().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].status, MissionStatus::Paused);
     // Passo NUNCA deve ser revertido para Pending se era mutador! Deve ser WaitingApproval!
-    assert_eq!(recovered[0].steps[0].status, MissionStepStatus::WaitingApproval);
+    assert_eq!(
+        recovered[0].steps[0].status,
+        MissionStepStatus::WaitingApproval
+    );
 }
 
 #[tokio::test]
@@ -1580,21 +1643,30 @@ fn test_57_autenticacao_de_operador_com_token_de_seguranca() {
         vec![],
     );
 
-    let app = approval_mgr.request_approval("m_tok", &step, "operator-jose", 3600).unwrap();
+    let app = approval_mgr
+        .request_approval("m_tok", &step, "operator-jose", 3600)
+        .unwrap();
     let token = app.confirmation_token.as_ref().unwrap();
 
     // 1. Operador vazio ou anônimo é rejeitado
     let res_anon = approval_mgr.grant_approval_authenticated(&app.id, "", Some(token));
     assert!(res_anon.is_err());
-    assert!(matches!(res_anon.unwrap_err(), MissionError::ApprovalMismatch(_)));
+    assert!(matches!(
+        res_anon.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
 
     let res_anon2 = approval_mgr.grant_approval_authenticated(&app.id, "anonymous", Some(token));
     assert!(res_anon2.is_err());
 
     // 2. Token incorreto é rejeitado
-    let res_wrong_tok = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some("token-errado"));
+    let res_wrong_tok =
+        approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some("token-errado"));
     assert!(res_wrong_tok.is_err());
-    assert!(matches!(res_wrong_tok.unwrap_err(), MissionError::ApprovalMismatch(_)));
+    assert!(matches!(
+        res_wrong_tok.unwrap_err(),
+        MissionError::ApprovalMismatch(_)
+    ));
 
     // 3. Token correto e operador correto é aprovado com sucesso
     let res_ok = approval_mgr.grant_approval_authenticated(&app.id, "operator-jose", Some(token));

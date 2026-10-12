@@ -100,7 +100,8 @@ impl IntoVoiceEgressAuth for bool {
                 operator_id: operator_id.to_string(),
                 capability: capability.to_string(),
                 issued_at: now_utc(),
-                expires_at: now_utc() + chrono::Duration::seconds(VoiceEgressAuthorization::DEFAULT_TTL_SECS),
+                expires_at: now_utc()
+                    + chrono::Duration::seconds(VoiceEgressAuthorization::DEFAULT_TTL_SECS),
                 parameter_hash: "legacy-bool-consent".to_string(),
             })
         } else {
@@ -213,7 +214,9 @@ impl GovernedVoiceRouter {
 
         let egress_auth = auth.into_auth(VoiceEgressAuthorization::CAPABILITY_STT, "operator");
         match egress_auth {
-            Some(ref a) if a.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, &a.operator_id) => {
+            Some(ref a)
+                if a.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, &a.operator_id) =>
+            {
                 // Autorização verificada e válida
             }
             Some(_) => {
@@ -269,7 +272,9 @@ impl GovernedVoiceRouter {
 
         let egress_auth = auth.into_auth(VoiceEgressAuthorization::CAPABILITY_TTS, "operator");
         match egress_auth {
-            Some(ref a) if a.is_valid_for(VoiceEgressAuthorization::CAPABILITY_TTS, &a.operator_id) => {
+            Some(ref a)
+                if a.is_valid_for(VoiceEgressAuthorization::CAPABILITY_TTS, &a.operator_id) =>
+            {
                 // Autorização verificada e válida
             }
             Some(_) => {
@@ -319,6 +324,8 @@ mod tests {
             -10, // expirada há 10 segundos
             "hash123",
         );
-        assert!(!expired_auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator_jose"));
+        assert!(
+            !expired_auth.is_valid_for(VoiceEgressAuthorization::CAPABILITY_STT, "operator_jose")
+        );
     }
 }

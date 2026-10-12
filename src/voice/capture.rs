@@ -29,6 +29,7 @@ pub trait AudioCaptureBackend: Send + Sync + std::fmt::Debug {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+#[allow(clippy::upper_case_acronyms)]
 mod winmm {
     use std::os::raw::{c_char, c_void};
     pub type UINT = u32;
@@ -162,12 +163,10 @@ impl AudioCaptureBackend for WindowsAudioCaptureBackend {
                 ));
             }
 
-            let alias = self
-                .alias
-                .lock()
-                .unwrap()
-                .take()
-                .ok_or_else(|| VoiceError::CaptureFailed("Alias MCI não encontrado".to_string()))?;
+            let alias =
+                self.alias.lock().unwrap().take().ok_or_else(|| {
+                    VoiceError::CaptureFailed("Alias MCI não encontrado".to_string())
+                })?;
             let temp_path = self.temp_path.lock().unwrap().take().ok_or_else(|| {
                 VoiceError::CaptureFailed("Caminho temporário de gravação ausente".to_string())
             })?;
@@ -193,7 +192,8 @@ impl AudioCaptureBackend for WindowsAudioCaptureBackend {
 
             let (format, samples) = AudioCodec::decode_wav(&wav_bytes)?;
             let duration_ms = if format.sample_rate > 0 && format.channels > 0 {
-                ((samples.len() as u64) * 1000) / (format.sample_rate as u64 * format.channels as u64)
+                ((samples.len() as u64) * 1000)
+                    / (format.sample_rate as u64 * format.channels as u64)
             } else {
                 0
             };
@@ -522,10 +522,7 @@ mod tests {
         assert_eq!(audio.duration_ms, 1000);
 
         // Release sem press rejeitado
-        assert!(matches!(
-            ptt.release(),
-            Err(VoiceError::SessionConflict(_))
-        ));
+        assert!(matches!(ptt.release(), Err(VoiceError::SessionConflict(_))));
     }
 
     #[test]
@@ -536,12 +533,8 @@ mod tests {
             .with_limits(Duration::from_secs(30), 100);
 
         // Configura payload mock com 500 bytes (> 100)
-        let large_input = AudioInput::new(
-            vec![0u8; 500],
-            AudioFormat::default(),
-            100,
-            "mock-large",
-        );
+        let large_input =
+            AudioInput::new(vec![0u8; 500], AudioFormat::default(), 100, "mock-large");
         mock_backend.set_mock_input(large_input);
 
         ptt.press().unwrap();

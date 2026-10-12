@@ -1,4 +1,6 @@
-use crate::contracts::voice::{AudioFormat, AudioFrame, AudioInput, SpeechToTextProvider, VoiceError};
+use crate::contracts::voice::{
+    AudioFormat, AudioFrame, AudioInput, SpeechToTextProvider, VoiceError,
+};
 use crate::voice::audio::AudioCodec;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,10 +102,7 @@ impl VoiceActivityDetector {
 
         // 3. Rejeição de ruído contínuo estacionário (variância quase nula)
         if rms_list.len() >= 3 {
-            let variance: f32 = rms_list
-                .iter()
-                .map(|&r| (r - avg_rms).powi(2))
-                .sum::<f32>()
+            let variance: f32 = rms_list.iter().map(|&r| (r - avg_rms).powi(2)).sum::<f32>()
                 / (rms_list.len() as f32);
             let std_dev = variance.sqrt();
             // Ruído estacionário sintético tem desvio padrão ínfimo
@@ -203,7 +202,8 @@ impl WakeWordEngine for PhoneticPatternWakeWordEngine {
 
         // Avaliação de ZCR por sílaba (/ju/ mais baixo que /ki/)
         let zcr_half1: f32 = zcr_profile[..mid].iter().sum::<f32>() / (mid as f32);
-        let zcr_half2: f32 = zcr_profile[mid..].iter().sum::<f32>() / ((zcr_profile.len() - mid) as f32);
+        let zcr_half2: f32 =
+            zcr_profile[mid..].iter().sum::<f32>() / ((zcr_profile.len() - mid) as f32);
 
         // Sílaba 2 (/ki/) deve ter presença de frequência maior ou comparável com /k/ plosivo
         let balance = 1.0 - ((avg1 - avg2).abs() / (avg1 + avg2));
@@ -238,7 +238,11 @@ pub struct SttWakeWordEngine {
 
 impl std::fmt::Debug for SttWakeWordEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SttWakeWordEngine({})", self.stt_provider.metadata().provider_name)
+        write!(
+            f,
+            "SttWakeWordEngine({})",
+            self.stt_provider.metadata().provider_name
+        )
     }
 }
 
@@ -281,9 +285,7 @@ impl WakeWordEngine for SttWakeWordEngine {
         let stt = self.stt_provider.clone();
 
         let transcript_res = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                stt.transcribe(&audio_input).await
-            })
+            tokio::runtime::Handle::current().block_on(async { stt.transcribe(&audio_input).await })
         });
 
         match transcript_res {
@@ -519,7 +521,10 @@ mod tests {
         let frame = AudioFrame::new(speech_samples, 16000, 1, 100);
 
         // Sem confiança forçada, não detecta
-        assert_eq!(detector.process_frame(&frame).unwrap(), WakeWordDetection::None);
+        assert_eq!(
+            detector.process_frame(&frame).unwrap(),
+            WakeWordDetection::None
+        );
         assert_eq!(mock_engine.calls_count(), 1);
 
         // Com confiança forçada alta (0.9), deve detectar

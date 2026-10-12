@@ -763,7 +763,7 @@ impl SqliteMissionStore {
                         // O passo estava no meio da execução quando houve crash/reboot
                         // Se exigia aprovação ou possuía capacidade com potencial mutação externa,
                         // NUNCA reinicia automaticamente em Pending! Requer portão humano.
-                        let is_mutating = step.capability_id.as_deref().map_or(false, |c| {
+                        let is_mutating = step.capability_id.as_deref().is_some_and(|c| {
                             c.contains("write")
                                 || c.contains("mutate")
                                 || c.contains("delete")

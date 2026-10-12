@@ -32,6 +32,7 @@ pub enum PlaybackStatus {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+#[allow(clippy::upper_case_acronyms)]
 mod winmm {
     use std::os::raw::{c_char, c_void};
     pub type BOOL = i32;
@@ -74,6 +75,7 @@ impl WindowsAudioPlaybackSink {
     }
 
     /// Prepara um buffer de áudio WAV válido a partir do payload fornecido.
+    #[allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
     fn prepare_wav_bytes(&self, output: &AudioOutput) -> Result<Vec<u8>, VoiceError> {
         if output.payload.starts_with(b"RIFF") && output.payload.len() >= 44 {
             // Já é um contêiner WAV válido

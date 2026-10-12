@@ -204,7 +204,8 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
 
             // 4. Cria arquivo temporário atômico para o áudio com alta entropia
             let temp_dir = std::env::temp_dir();
-            let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
+            let temp_wav_path =
+                temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
 
             std::fs::write(&temp_wav_path, &normalized_wav)
                 .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
@@ -286,9 +287,7 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
                 )));
             }
 
-            let text = String::from_utf8_lossy(&stdout_bytes)
-                .trim()
-                .to_string();
+            let text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
             Ok(text)
         })
     }

@@ -422,7 +422,11 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
             approval_id,
             operator,
             token,
-        } => match approval_mgr.grant_approval_authenticated(&approval_id, &operator, token.as_deref()) {
+        } => match approval_mgr.grant_approval_authenticated(
+            &approval_id,
+            &operator,
+            token.as_deref(),
+        ) {
             Ok(app) => {
                 println!("Aprovação concedida com sucesso!");
                 println!("ID: {}", app.id);
@@ -583,7 +587,8 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         return;
                     }
                 };
-                let duration_ms = (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
+                let duration_ms =
+                    (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
                 AudioInput::new(data, format, duration_ms, path)
             } else {
                 use std::sync::Arc;

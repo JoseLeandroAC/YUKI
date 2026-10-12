@@ -332,10 +332,7 @@ impl MissionRunner {
             let exec_res = match handler.execute(&step.parameters) {
                 Ok(val) => val,
                 Err(e) => {
-                    let err_msg = format!(
-                        "Falha na execução da capacidade '{}': {}",
-                        cap_name, e
-                    );
+                    let err_msg = format!("Falha na execução da capacidade '{}': {}", cap_name, e);
                     let _ = self.store.update_step_status(
                         &step.id,
                         MissionStepStatus::Failed,
