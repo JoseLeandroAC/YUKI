@@ -1482,6 +1482,38 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Preparação do Laboratório Vocal, integração Whisper.cpp + Piper TTS e unificação WASAPI concluídas com 100% dos testes e portões aprovados."`
 
+---
+
+## 2026-10-12 — Marco 8.1.1: Auditoria e Aperfeiçoamento do STT Local Multilíngue Whisper
+
+- **Contexto e Missão**:
+  - Com a infraestrutura do Laboratório Vocal montada e o motor Whisper.cpp operacional, a auditoria independente identificou pontos de aprimoramento essenciais no reconhecimento de fala: omissão da variável de ambiente `YUKI_WHISPER_LANGUAGE`, ausência de seleção de idioma na CLI, falta de suporte ao modo `auto`, descarte de metadados diagnósticos do `stderr` do Whisper, risco de amplificação de ruído estático Bluetooth antes da detecção de silêncio e necessidade de clarificação da discrepância de duração física das capturas de 10s.
+- **Implementação Conclusiva**:
+  1. **Precedência Soberana de Idioma (`src/voice/stt/local.rs` e `src/main.rs`):**
+     - Leitura de `YUKI_WHISPER_LANGUAGE` no `LocalWhisperConfig::default()`.
+     - Flags `--language` / `-l` expostas em `yuki voice listen` e `yuki voice turn`.
+     - Precedência estrita: Flag CLI > Variável de Ambiente > Padrão Inicial (`"pt"`).
+     - Normalização e validação de códigos de idioma (`pt-BR`, `pt_br` -> `pt`, `en-US` -> `en`, `auto` -> `auto`, etc.).
+  2. **Parsing Diagnóstico e Metadados do Whisper (`parse_whisper_stderr`):**
+     - Extração do idioma detectado automaticamente e da probabilidade/confiança (`whisper_full_with_state: auto-detected language: <lang> (p = <prob>)`).
+     - Extração dos tempos computacionais de inferência (`load time`, `encode time`, `total time`).
+     - Struct `LocalTranscriptionResult` retornando metadados completos com exibição amigável na CLI.
+  3. **Ordenação de Silêncio e Blindagem contra Ruído Bluetooth:**
+     - A verificação de silêncio acústico `is_silent_pcm` foi reposicionada para atuar **estritamente antes** da normalização de amplitude.
+     - Previne que ruídos térmicos residuais de microfones Bluetooth (comuns em perfis HFP/SCO) sejam amplificados artificialmente para 28.000, eliminando alucinações de transcrição em silêncio.
+  4. **Diagnóstico Físico da Duração de Gravação:**
+     - Documentada a fundamentação física da contagem exata de amostras PCM entregues: as capturas solicitadas de 10 segundos resultam em ~8.7s a 8.95s de amostras válidas devido à latência de inicialização COM/WASAPI e ao handshake de rádio SCO/HFP do Bluetooth, sem perda de amostras no meio da fala.
+  5. **Resiliência Computacional de CPU:**
+     - Elevação do timeout padrão para 60 segundos com suporte à variável `YUKI_WHISPER_TIMEOUT_SECS`, prevenindo cancelamentos espúrios em inferência pura de CPU em computadores sem GPU dedicada.
+  6. **Testes Automatizados:**
+     - 4 novos testes em `tests/voice_stt_tts.rs` (configuração e env, normalização/validação, parsing de stderr do Whisper e resiliência de silêncio pré-normalização), totalizando 16 testes passando.
+     - 71 testes da suíte adversarial `tests/marco_8_adversarial.rs` 100% aprovados.
+- **Relatório Oficial de Auditoria:**
+  - `docs/audits/MARCO_8_1_1_STT_MULTILINGUAL_AUDIT.md`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Auditoria e aperfeiçoamento do STT local multilíngue Whisper concluídos com sucesso e 100% dos portões de qualidade aprovados."`
+
+
 
 
 

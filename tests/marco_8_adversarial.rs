@@ -1201,7 +1201,11 @@ async fn test_49_subprocessos_timeout_e_limpeza_sem_orfaos() {
     use yuki::voice::tts::local::{LocalPiperConfig, LocalPiperTtsProvider};
 
     // Provedor Whisper com caminho inexistente / não configurado
-    let whisper = LocalWhisperSttProvider::new(LocalWhisperConfig::default());
+    let whisper = LocalWhisperSttProvider::new(LocalWhisperConfig {
+        binary_path: None,
+        model_path: None,
+        ..Default::default()
+    });
     let samples = vec![0i16; 1600];
     let sample_wav = AudioCodec::encode_wav(&samples, &AudioFormat::default()).unwrap();
     let input = AudioInput::new(sample_wav, AudioFormat::default(), 100, "test");
@@ -1213,7 +1217,11 @@ async fn test_49_subprocessos_timeout_e_limpeza_sem_orfaos() {
     ));
 
     // Provedor Piper com caminho inexistente / não configurado
-    let piper = LocalPiperTtsProvider::new(LocalPiperConfig::default());
+    let piper = LocalPiperTtsProvider::new(LocalPiperConfig {
+        binary_path: None,
+        model_path: None,
+        ..Default::default()
+    });
     let res_tts = piper.synthesize("Olá Yuki", None).await;
     assert!(res_tts.is_err());
     assert!(matches!(

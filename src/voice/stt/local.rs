@@ -19,6 +19,20 @@ pub struct LocalWhisperConfig {
     pub max_bytes: usize,
 }
 
+impl LocalWhisperConfig {
+    /// Permite configurar explicitamente o idioma alvo para a transcrição ('pt', 'en', 'es', 'ja', 'auto', etc.).
+    pub fn with_language(mut self, lang: impl Into<String>) -> Self {
+        self.language = normalize_language_code(&lang.into());
+        self
+    }
+
+    /// Permite customizar o tempo limite máximo para a inferência do modelo.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
 impl Default for LocalWhisperConfig {
     fn default() -> Self {
         let binary_path = std::env::var_os("YUKI_WHISPER_BIN")
@@ -30,11 +44,24 @@ impl Default for LocalWhisperConfig {
             .map(PathBuf::from)
             .or_else(find_local_whisper_model);
 
+        // Suporte soberano a seleção de idioma via variável de ambiente YUKI_WHISPER_LANGUAGE.
+        // Se não configurada, preserva o português brasileiro ('pt') como padrão inicial.
+        let language = std::env::var("YUKI_WHISPER_LANGUAGE")
+            .map(|l| normalize_language_code(&l))
+            .unwrap_or_else(|_| "pt".to_string());
+
+        // Timeout padrão de 60s para garantir resiliência em inferência de CPU com modelos médios/pequenos.
+        // Pode ser customizado via YUKI_WHISPER_TIMEOUT_SECS.
+        let timeout_secs = std::env::var("YUKI_WHISPER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+
         Self {
             binary_path,
             model_path,
-            language: "pt".to_string(),
-            timeout: Duration::from_secs(30),
+            language,
+            timeout: Duration::from_secs(timeout_secs),
             max_duration_ms: 30_000,
             max_bytes: 5 * 1024 * 1024,
         }
@@ -151,6 +178,129 @@ pub fn sanitize_whisper_transcript(raw: &str) -> String {
     cleaned.trim().to_string()
 }
 
+/// Normaliza códigos de idioma para o formato canônico esperado pelo Whisper.
+/// Trata dialetos e códigos regionais (ex: 'pt-BR' -> 'pt', 'en-US' -> 'en') e maiúsculas.
+pub fn normalize_language_code(lang: &str) -> String {
+    let trimmed = lang.trim().to_lowercase();
+    if trimmed.is_empty() || trimmed == "auto" {
+        return "auto".to_string();
+    }
+    // Trata códigos regionais separados por hífen ou sublinhado
+    if let Some((prefix, _)) = trimmed.split_once('-').or_else(|| trimmed.split_once('_')) {
+        if !prefix.is_empty() {
+            return prefix.to_string();
+        }
+    }
+    trimmed
+}
+
+/// Verifica se um código de idioma informado é reconhecido pelo Whisper ou corresponde a 'auto'.
+pub fn is_supported_language(lang: &str) -> bool {
+    let norm = normalize_language_code(lang);
+    if norm == "auto" {
+        return true;
+    }
+    const KNOWN_LANGUAGES: &[&str] = &[
+        "pt", "en", "es", "ja", "fr", "de", "it", "zh", "ru", "ko", "ar", "hi", "tr", "pl", "nl",
+        "sv", "uk", "vi", "he", "el", "da", "fi", "cs", "id", "ro", "hu", "no", "th", "ca",
+    ];
+    KNOWN_LANGUAGES.contains(&norm.as_str())
+        || (norm.len() == 2 && norm.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// Metadados diagnósticos extraídos dos registros (stderr) do processo Whisper.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WhisperDetectionMetadata {
+    /// Idioma detectado automaticamente pelo Whisper (se executado com `-l auto`).
+    pub detected_language: Option<String>,
+    /// Confiança estimada na detecção de idioma (0.0 a 1.0).
+    pub probability: Option<f32>,
+    /// Tempo de carregamento do modelo em milissegundos.
+    pub load_time_ms: Option<f32>,
+    /// Tempo do encoder em milissegundos.
+    pub encode_time_ms: Option<f32>,
+    /// Tempo total de processamento em milissegundos reportado pelo whisper.cpp.
+    pub total_time_ms: Option<f32>,
+}
+
+/// Extrai idioma detectado, probabilidade e métricas de tempo do stderr do whisper.cpp.
+pub fn parse_whisper_stderr(stderr: &str) -> WhisperDetectionMetadata {
+    let mut meta = WhisperDetectionMetadata::default();
+
+    for line in stderr.lines() {
+        let line_trim = line.trim();
+
+        // Linha típica de detecção: "whisper_full_with_state: auto-detected language: pt (p = 0.998412)"
+        // ou variações: "auto-detected language: en (p = 0.606967)"
+        if let Some(pos) = line_trim.find("auto-detected language:") {
+            let rest = line_trim[pos + "auto-detected language:".len()..].trim();
+            if let Some(space_or_paren) = rest.find(|c: char| c.is_whitespace() || c == '(') {
+                let code = rest[..space_or_paren].trim();
+                if !code.is_empty() {
+                    meta.detected_language = Some(code.to_string());
+                }
+            } else if !rest.is_empty() {
+                meta.detected_language = Some(rest.to_string());
+            }
+
+            if let Some(p_pos) = rest.find("p =") {
+                let p_str = rest[p_pos + 3..].trim_start();
+                let end = p_str
+                    .find(|c: char| c == ')' || c.is_whitespace())
+                    .unwrap_or(p_str.len());
+                if let Ok(prob) = p_str[..end].parse::<f32>() {
+                    meta.probability = Some(prob);
+                }
+            }
+        } else if line_trim.contains("whisper_print_timings:     load time =") {
+            if let Some(idx) = line_trim.find('=') {
+                let s = line_trim[idx + 1..].trim();
+                let val_str = s.split_whitespace().next().unwrap_or("");
+                if let Ok(v) = val_str.parse::<f32>() {
+                    meta.load_time_ms = Some(v);
+                }
+            }
+        } else if line_trim.contains("whisper_print_timings:   encode time =") {
+            if let Some(idx) = line_trim.find('=') {
+                let s = line_trim[idx + 1..].trim();
+                let val_str = s.split_whitespace().next().unwrap_or("");
+                if let Ok(v) = val_str.parse::<f32>() {
+                    meta.encode_time_ms = Some(v);
+                }
+            }
+        } else if line_trim.contains("whisper_print_timings:    total time =") {
+            if let Some(idx) = line_trim.find('=') {
+                let s = line_trim[idx + 1..].trim();
+                let val_str = s.split_whitespace().next().unwrap_or("");
+                if let Ok(v) = val_str.parse::<f32>() {
+                    meta.total_time_ms = Some(v);
+                }
+            }
+        }
+    }
+
+    meta
+}
+
+/// Resultado detalhado e tipado de uma transcrição local com Whisper.
+#[derive(Debug, Clone)]
+pub struct LocalTranscriptionResult {
+    /// Texto transcrito e sanitizado.
+    pub text: String,
+    /// Idioma solicitado/configurado para a transcrição (ex: "pt", "en", "auto").
+    pub language_requested: String,
+    /// Idioma detectado pelo Whisper quando executado em modo 'auto'.
+    pub detected_language: Option<String>,
+    /// Nível de confiança ou probabilidade do idioma detectado (0.0 a 1.0).
+    pub probability: Option<f32>,
+    /// Duração total decorrida medida pelo processo da Yuki.
+    pub elapsed: Duration,
+    /// Tempo de inferência computacional reportado pelo Whisper (se disponível).
+    pub whisper_total_time_ms: Option<f32>,
+    /// Caminho do modelo Whisper utilizado.
+    pub model_path: PathBuf,
+}
+
 fn which_whisper() -> Option<PathBuf> {
     // Procura por executáveis conhecidos whisper.cpp / whisper
     let candidates = [
@@ -234,6 +384,203 @@ impl LocalWhisperSttProvider {
             .unwrap_or(false);
         bin_ok && model_ok
     }
+
+    /// Retorna referência imutável à configuração ativa do Whisper.
+    pub fn config(&self) -> &LocalWhisperConfig {
+        &self.config
+    }
+
+    /// Permite alterar dinamicamente o idioma da transcrição neste provedor.
+    pub fn set_language(&mut self, language: impl Into<String>) {
+        self.config.language = normalize_language_code(&language.into());
+    }
+
+    /// Executa o reconhecimento local de fala retornando metadados diagnósticos estruturados
+    /// (incluindo idioma solicitado, idioma detectado pelo Whisper, confiança e tempos de inferência).
+    pub async fn transcribe_with_metadata(
+        &self,
+        audio: &AudioInput,
+    ) -> Result<LocalTranscriptionResult, VoiceError> {
+        let start_instant = std::time::Instant::now();
+
+        // 1. Valida restrições de memória e duração
+        if audio.payload.len() > self.config.max_bytes {
+            return Err(VoiceError::AudioTooLarge {
+                bytes: audio.payload.len(),
+                max_bytes: self.config.max_bytes,
+            });
+        }
+
+        if audio.duration_ms > self.config.max_duration_ms {
+            return Err(VoiceError::AudioTooLong {
+                duration_ms: audio.duration_ms,
+                max_ms: self.config.max_duration_ms,
+            });
+        }
+
+        // 2. Decodifica o áudio WAV
+        let (format, samples) = AudioCodec::decode_wav(&audio.payload)?;
+        if format.sample_rate != 16000 {
+            return Err(VoiceError::InvalidAudioFormat(format!(
+                "Taxa de amostragem incompatível: {}Hz (esperado 16000Hz)",
+                format.sample_rate
+            )));
+        }
+
+        // 3. Garante que os recursos locais estão configurados antes do processamento
+        let bin_path = self.config.binary_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Executável whisper local não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+
+        let model_path = self.config.model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Arquivo de modelo whisper não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+
+        // 4. Converte para mono
+        let mut mono_samples = AudioCodec::to_mono(&samples, format.channels);
+
+        // 5. Curto-circuito econômico: verifica silêncio acústico ANTES da normalização.
+        // Se verificado após a normalização, o piso de ruído seria artificialmente amplificado,
+        // mascarando o silêncio e gerando alucinações acústicas no modelo.
+        if is_silent_pcm(&mono_samples) {
+            tracing::debug!(
+                "Áudio identificado como silêncio acústico; transcrição concluída vazia."
+            );
+            return Ok(LocalTranscriptionResult {
+                text: String::new(),
+                language_requested: self.config.language.clone(),
+                detected_language: None,
+                probability: None,
+                elapsed: start_instant.elapsed(),
+                whisper_total_time_ms: None,
+                model_path: model_path.clone(),
+            });
+        }
+
+        // 6. Normaliza amplitude com margem de segurança contra saturação (clipping)
+        AudioCodec::normalize_amplitude(&mut mono_samples, 28000);
+
+        // Re-codifica áudio WAV normalizado para entrega ao processo do whisper
+        let norm_format = crate::contracts::voice::AudioFormat {
+            sample_rate: 16000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        let normalized_wav = AudioCodec::encode_wav(&mono_samples, &norm_format)?;
+
+        // 7. Cria arquivo temporário atômico para o áudio com alta entropia
+        let temp_dir = std::env::temp_dir();
+        let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
+
+        std::fs::write(&temp_wav_path, &normalized_wav)
+            .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
+
+        // Limpa o arquivo temporário ao final da execução (Drop garantido)
+        struct TempCleaner(PathBuf);
+        impl Drop for TempCleaner {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleaner = TempCleaner(temp_wav_path.clone());
+
+        // 8. Executa processo Whisper de forma assíncrona com controle de timeout e término garantido
+        let timeout_duration = self.config.timeout;
+        let mut child = tokio::process::Command::new(bin_path)
+            .arg("-m")
+            .arg(model_path)
+            .arg("-f")
+            .arg(&temp_wav_path)
+            .arg("-l")
+            .arg(&self.config.language)
+            .arg("--no-timestamps")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                VoiceError::TranscriptionFailed(format!("Falha ao iniciar processo whisper: {}", e))
+            })?;
+
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            VoiceError::TranscriptionFailed("Stdout do processo não capturado".to_string())
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            VoiceError::TranscriptionFailed("Stderr do processo não capturado".to_string())
+        })?;
+
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+
+        let status_res = tokio::time::timeout(timeout_duration, async {
+            use tokio::io::AsyncReadExt;
+            let read_out = stdout.read_to_end(&mut stdout_bytes);
+            let read_err = stderr.read_to_end(&mut stderr_bytes);
+            let wait_child = child.wait();
+            let (_, _, status) = tokio::try_join!(read_out, read_err, wait_child)?;
+            Ok::<std::process::ExitStatus, std::io::Error>(status)
+        })
+        .await;
+
+        let status = match status_res {
+            Ok(Ok(st)) => st,
+            Ok(Err(e)) => {
+                return Err(VoiceError::TranscriptionFailed(format!(
+                    "Erro ao aguardar processo whisper: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                // Previne processos órfãos: encerra imediatamente o processo filho
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(VoiceError::Timeout(format!(
+                    "Reconhecimento de fala excedeu o limite de {:?}",
+                    timeout_duration
+                )));
+            }
+        };
+
+        let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+        if !status.success() {
+            return Err(VoiceError::TranscriptionFailed(format!(
+                "Processo whisper finalizou com erro (código {:?}): {}",
+                status.code(),
+                stderr_str.trim()
+            )));
+        }
+
+        let elapsed = start_instant.elapsed();
+        let raw_text = String::from_utf8_lossy(&stdout_bytes);
+        let sanitized = sanitize_whisper_transcript(&raw_text);
+
+        // Extrai metadados diagnósticos da saída stderr (detecção de idioma e timings)
+        let detection_meta = parse_whisper_stderr(&stderr_str);
+
+        tracing::info!(
+            "Transcrição local Whisper concluída em {:?}: \"{}\" (solicitado: {}, detectado: {:?})",
+            elapsed,
+            sanitized,
+            self.config.language,
+            detection_meta.detected_language
+        );
+
+        Ok(LocalTranscriptionResult {
+            text: sanitized,
+            language_requested: self.config.language.clone(),
+            detected_language: detection_meta.detected_language,
+            probability: detection_meta.probability,
+            elapsed,
+            whisper_total_time_ms: detection_meta.total_time_ms,
+            model_path: model_path.clone(),
+        })
+    }
 }
 
 impl Default for LocalWhisperSttProvider {
@@ -268,162 +615,8 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
         audio: &'a AudioInput,
     ) -> Pin<Box<dyn Future<Output = Result<String, VoiceError>> + Send + 'a>> {
         Box::pin(async move {
-            // 1. Valida restrições de memória e duração
-            if audio.payload.len() > self.config.max_bytes {
-                return Err(VoiceError::AudioTooLarge {
-                    bytes: audio.payload.len(),
-                    max_bytes: self.config.max_bytes,
-                });
-            }
-
-            if audio.duration_ms > self.config.max_duration_ms {
-                return Err(VoiceError::AudioTooLong {
-                    duration_ms: audio.duration_ms,
-                    max_ms: self.config.max_duration_ms,
-                });
-            }
-
-            // 2. Decodifica e normaliza o áudio
-            let (format, samples) = AudioCodec::decode_wav(&audio.payload)?;
-            if format.sample_rate != 16000 {
-                return Err(VoiceError::InvalidAudioFormat(format!(
-                    "Taxa de amostragem incompatível: {}Hz (esperado 16000Hz)",
-                    format.sample_rate
-                )));
-            }
-
-            // 3. Garante que os recursos locais estão configurados antes do processamento
-            let bin_path = self.config.binary_path.as_ref().ok_or_else(|| {
-                VoiceError::ProviderUnavailable(format!(
-                    "Executável whisper local não configurado. {}",
-                    Self::installation_instructions()
-                ))
-            })?;
-
-            let model_path = self.config.model_path.as_ref().ok_or_else(|| {
-                VoiceError::ProviderUnavailable(format!(
-                    "Arquivo de modelo whisper não configurado. {}",
-                    Self::installation_instructions()
-                ))
-            })?;
-
-            // 4. Garante mono e normaliza amplitude
-            let mut mono_samples = AudioCodec::to_mono(&samples, format.channels);
-            AudioCodec::normalize_amplitude(&mut mono_samples, 28000);
-
-            // 5. Curto-circuito econômico: se o áudio for silêncio, evita chamada externa ao processo
-            if is_silent_pcm(&mono_samples) {
-                tracing::debug!(
-                    "Áudio identificado como silêncio acústico; transcrição concluída vazia."
-                );
-                return Ok(String::new());
-            }
-
-            // 6. Inicia medição de latência
-            let start_instant = std::time::Instant::now();
-
-            // Re-codifica áudio WAV normalizado para entrega ao processo do whisper
-            let norm_format = crate::contracts::voice::AudioFormat {
-                sample_rate: 16000,
-                channels: 1,
-                bits_per_sample: 16,
-            };
-            let normalized_wav = AudioCodec::encode_wav(&mono_samples, &norm_format)?;
-
-            // 7. Cria arquivo temporário atômico para o áudio com alta entropia
-            let temp_dir = std::env::temp_dir();
-            let temp_wav_path =
-                temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
-
-            std::fs::write(&temp_wav_path, &normalized_wav)
-                .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
-
-            // Limpa o arquivo temporário ao final da execução (Drop garantido)
-            struct TempCleaner(PathBuf);
-            impl Drop for TempCleaner {
-                fn drop(&mut self) {
-                    let _ = std::fs::remove_file(&self.0);
-                }
-            }
-            let _cleaner = TempCleaner(temp_wav_path.clone());
-
-            // 8. Executa processo Whisper de forma assíncrona com controle de timeout e término garantido
-            let timeout_duration = self.config.timeout;
-            let mut child = tokio::process::Command::new(bin_path)
-                .arg("-m")
-                .arg(model_path)
-                .arg("-f")
-                .arg(&temp_wav_path)
-                .arg("-l")
-                .arg(&self.config.language)
-                .arg("--no-timestamps")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    VoiceError::TranscriptionFailed(format!(
-                        "Falha ao iniciar processo whisper: {}",
-                        e
-                    ))
-                })?;
-
-            let mut stdout = child.stdout.take().ok_or_else(|| {
-                VoiceError::TranscriptionFailed("Stdout do processo não capturado".to_string())
-            })?;
-            let mut stderr = child.stderr.take().ok_or_else(|| {
-                VoiceError::TranscriptionFailed("Stderr do processo não capturado".to_string())
-            })?;
-
-            let mut stdout_bytes = Vec::new();
-            let mut stderr_bytes = Vec::new();
-
-            let status_res = tokio::time::timeout(timeout_duration, async {
-                use tokio::io::AsyncReadExt;
-                let read_out = stdout.read_to_end(&mut stdout_bytes);
-                let read_err = stderr.read_to_end(&mut stderr_bytes);
-                let wait_child = child.wait();
-                let (_, _, status) = tokio::try_join!(read_out, read_err, wait_child)?;
-                Ok::<std::process::ExitStatus, std::io::Error>(status)
-            })
-            .await;
-
-            let status = match status_res {
-                Ok(Ok(st)) => st,
-                Ok(Err(e)) => {
-                    return Err(VoiceError::TranscriptionFailed(format!(
-                        "Erro ao aguardar processo whisper: {}",
-                        e
-                    )));
-                }
-                Err(_) => {
-                    // Previne processos órfãos: encerra imediatamente o processo filho
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(VoiceError::Timeout(format!(
-                        "Reconhecimento de fala excedeu o limite de {:?}",
-                        timeout_duration
-                    )));
-                }
-            };
-
-            if !status.success() {
-                let err_msg = String::from_utf8_lossy(&stderr_bytes);
-                return Err(VoiceError::TranscriptionFailed(format!(
-                    "Processo whisper finalizou com erro (código {:?}): {}",
-                    status.code(),
-                    err_msg.trim()
-                )));
-            }
-
-            let elapsed = start_instant.elapsed();
-            let raw_text = String::from_utf8_lossy(&stdout_bytes);
-            let sanitized = sanitize_whisper_transcript(&raw_text);
-            tracing::info!(
-                "Transcrição local Whisper concluída em {:?}: \"{}\"",
-                elapsed,
-                sanitized
-            );
-            Ok(sanitized)
+            let res = self.transcribe_with_metadata(audio).await?;
+            Ok(res.text)
         })
     }
 }

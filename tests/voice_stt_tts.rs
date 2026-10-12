@@ -364,3 +364,146 @@ fn test_voice_lab_evaluations_persistence_and_summary() {
     let _ = std::fs::remove_file(&temp_eval_path);
     std::env::remove_var("YUKI_VOICE_EVALS_FILE");
 }
+
+#[test]
+fn test_stt_language_configuration_and_env() {
+    use yuki::voice::stt::LocalWhisperConfig;
+
+    // 1. Sem variável de ambiente definida, default deve ser "pt"
+    std::env::remove_var("YUKI_WHISPER_LANGUAGE");
+    let cfg_default = LocalWhisperConfig::default();
+    assert_eq!(cfg_default.language, "pt");
+
+    // 2. Com YUKI_WHISPER_LANGUAGE="en", default deve ler "en"
+    std::env::set_var("YUKI_WHISPER_LANGUAGE", "en");
+    let cfg_en = LocalWhisperConfig::default();
+    assert_eq!(cfg_en.language, "en");
+
+    // 3. Com YUKI_WHISPER_LANGUAGE="auto", default deve ler "auto"
+    std::env::set_var("YUKI_WHISPER_LANGUAGE", "auto");
+    let cfg_auto = LocalWhisperConfig::default();
+    assert_eq!(cfg_auto.language, "auto");
+
+    // 4. with_language deve sobrescrever e normalizar
+    let cfg_custom = cfg_default.with_language("pt-BR");
+    assert_eq!(cfg_custom.language, "pt");
+
+    let cfg_ja = cfg_custom.with_language("ja");
+    assert_eq!(cfg_ja.language, "ja");
+
+    // Limpeza
+    std::env::remove_var("YUKI_WHISPER_LANGUAGE");
+}
+
+#[test]
+fn test_stt_language_normalization_and_validation() {
+    use yuki::voice::stt::{is_supported_language, normalize_language_code};
+
+    // Normalização canônica
+    assert_eq!(normalize_language_code("pt"), "pt");
+    assert_eq!(normalize_language_code("pt-BR"), "pt");
+    assert_eq!(normalize_language_code("pt_br"), "pt");
+    assert_eq!(normalize_language_code("en"), "en");
+    assert_eq!(normalize_language_code("en-US"), "en");
+    assert_eq!(normalize_language_code("EN_GB"), "en");
+    assert_eq!(normalize_language_code("es"), "es");
+    assert_eq!(normalize_language_code("es-ES"), "es");
+    assert_eq!(normalize_language_code("ja"), "ja");
+    assert_eq!(normalize_language_code("ja-JP"), "ja");
+    assert_eq!(normalize_language_code("auto"), "auto");
+    assert_eq!(normalize_language_code("AUTO"), "auto");
+    assert_eq!(normalize_language_code(""), "auto");
+
+    // Validação de idiomas conhecidos
+    assert!(is_supported_language("pt"));
+    assert!(is_supported_language("pt-BR"));
+    assert!(is_supported_language("en"));
+    assert!(is_supported_language("es"));
+    assert!(is_supported_language("ja"));
+    assert!(is_supported_language("fr"));
+    assert!(is_supported_language("de"));
+    assert!(is_supported_language("it"));
+    assert!(is_supported_language("auto"));
+    assert!(!is_supported_language("invalido_longo_123"));
+}
+
+#[test]
+fn test_stt_parse_whisper_stderr_detection_and_timings() {
+    use yuki::voice::stt::parse_whisper_stderr;
+
+    // 1. Simulação de saída real do whisper.cpp com detecção de idioma 'pt' e confiança 99.8%
+    let stderr_sample = r#"
+system_info: n_threads = 4 / 8 | AVX2 = 1 | OPENMP = 1
+main: processing 'audio.wav' (88480 samples, 5.5 sec), 4 threads, lang = auto, timestamps = 0 ...
+whisper_full_with_state: auto-detected language: pt (p = 0.998412)
+whisper_print_timings:     load time =  3085.32 ms
+whisper_print_timings:     fallbacks =   0 p /   0 h
+whisper_print_timings:      mel time =    36.30 ms
+whisper_print_timings:   sample time =    99.32 ms /    30 runs
+whisper_print_timings:   encode time = 21604.45 ms /     2 runs
+whisper_print_timings:   decode time =   297.57 ms /     3 runs
+whisper_print_timings:    total time = 26121.40 ms
+"#;
+
+    let meta = parse_whisper_stderr(stderr_sample);
+    assert_eq!(meta.detected_language.as_deref(), Some("pt"));
+    assert!((meta.probability.unwrap() - 0.998412).abs() < 1e-4);
+    assert_eq!(meta.load_time_ms, Some(3085.32));
+    assert_eq!(meta.encode_time_ms, Some(21604.45));
+    assert_eq!(meta.total_time_ms, Some(26_121.4));
+
+    // 2. Simulação com idioma 'ja' detectado
+    let stderr_ja = "whisper_full_with_state: auto-detected language: ja (p = 0.884100)\nwhisper_print_timings:    total time = 15400.00 ms";
+    let meta_ja = parse_whisper_stderr(stderr_ja);
+    assert_eq!(meta_ja.detected_language.as_deref(), Some("ja"));
+    assert!((meta_ja.probability.unwrap() - 0.8841).abs() < 1e-4);
+    assert_eq!(meta_ja.total_time_ms, Some(15400.0));
+
+    // 3. Simulação sem auto-detect (idioma fixo especificado pelo usuário)
+    let stderr_fixed = "main: processing 'audio.wav', lang = pt\nwhisper_print_timings:    total time = 5000.00 ms";
+    let meta_fixed = parse_whisper_stderr(stderr_fixed);
+    assert_eq!(meta_fixed.detected_language, None);
+    assert_eq!(meta_fixed.probability, None);
+    assert_eq!(meta_fixed.total_time_ms, Some(5000.00));
+}
+
+#[tokio::test]
+async fn test_stt_silence_checked_before_normalization_resilience() {
+    use yuki::contracts::voice::{AudioFormat, AudioInput};
+    use yuki::voice::audio::AudioCodec;
+    use yuki::voice::stt::{is_silent_pcm, LocalWhisperConfig, LocalWhisperSttProvider};
+
+    // Gera um sinal de silêncio com ruído térmico mínimo (não nulo)
+    let ambient_noise: Vec<i16> = (0..16000)
+        .map(|i| if i % 2 == 0 { 15 } else { -15 })
+        .collect();
+
+    // A função is_silent_pcm deve considerar silêncio
+    assert!(is_silent_pcm(&ambient_noise));
+
+    // Se normalizássemos antes, a amplitude iria para 28000:
+    let mut modified = ambient_noise.clone();
+    AudioCodec::normalize_amplitude(&mut modified, 28000);
+    assert_eq!(modified.iter().map(|s| s.abs()).max(), Some(28000));
+    // E então deixaria de ser considerado silêncio!
+    assert!(!is_silent_pcm(&modified));
+
+    // Mas no provedor Whisper, o teste de silêncio ocorre ANTES da normalização.
+    // Assim, mesmo sem binários configurados, áudio silencioso retorna transcrição vazia sem erro:
+    let format = AudioFormat::default();
+    let wav_bytes = AudioCodec::encode_wav(&ambient_noise, &format).expect("encode ok");
+    let silent_input = AudioInput::new(wav_bytes, format, 1000, "ambient-mic");
+
+    // Com caminhos configurados, o curto-circuito de silêncio acústico deve
+    // retornar imediatamente Ok(vazio) sem tentar executar o binário externo (que falharia):
+    let provider = LocalWhisperSttProvider::new(LocalWhisperConfig {
+        binary_path: Some(std::path::PathBuf::from("dummy_whisper_bin_does_not_exist")),
+        model_path: Some(std::path::PathBuf::from("dummy_model_bin_does_not_exist")),
+        ..Default::default()
+    });
+
+    let res = provider.transcribe_with_metadata(&silent_input).await;
+    assert!(res.is_ok());
+    let output = res.unwrap();
+    assert_eq!(output.text, "");
+}

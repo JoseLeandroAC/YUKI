@@ -147,6 +147,9 @@ pub enum VoiceCommands {
         /// Identificador ou nome do dispositivo de microfone para captura (opcional)
         #[arg(long)]
         input_device: Option<String>,
+        /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
+        #[arg(short, long)]
+        language: Option<String>,
     },
     /// Executa um turno conversacional completo via Push-to-Talk conectado ao VoiceConversationCoordinator
     Turn {
@@ -162,6 +165,9 @@ pub enum VoiceCommands {
         /// Reproduz fisicamente a resposta de voz no alto-falante
         #[arg(short, long, default_value_t = false)]
         play: bool,
+        /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
+        #[arg(short, long)]
+        language: Option<String>,
     },
     /// Lista os modelos de voz suportados (catálogo oficial pt-BR e modelos locais detectados)
     Voices,
@@ -617,7 +623,7 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
 }
 
 async fn handle_voice_command(cmd: VoiceCommands) {
-    use yuki::contracts::voice::{AudioInput, SpeechToTextProvider, TextToSpeechProvider};
+    use yuki::contracts::voice::{AudioInput, TextToSpeechProvider};
     use yuki::voice::audio::AudioCodec;
     use yuki::voice::devices::{
         find_device, get_default_device, list_audio_devices, AudioDeviceFlow,
@@ -816,7 +822,17 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             mic,
             seconds,
             input_device,
+            language,
         } => {
+            use yuki::voice::stt::{
+                normalize_language_code, LocalWhisperConfig, LocalWhisperSttProvider,
+            };
+
+            // 1. Resolução de idioma soberana: CLI flag (--language) > env (YUKI_WHISPER_LANGUAGE) > "pt"
+            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+            let effective_lang = normalize_language_code(raw_lang);
+
             let audio_input = if let (Some(path), false) = (file, mic) {
                 let data = match std::fs::read(&path) {
                     Ok(d) => d,
@@ -934,16 +950,38 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
             };
 
-            let stt = LocalWhisperSttProvider::default();
+            let config = LocalWhisperConfig::default().with_language(effective_lang);
+            let stt = LocalWhisperSttProvider::new(config);
             println!(
-                "Transcrevendo áudio via STT local (fonte: {})...",
-                audio_input.source
+                "Transcrevendo áudio via STT local Whisper (fonte: {}, idioma solicitado: '{}')...",
+                audio_input.source,
+                stt.config().language
             );
-            match stt.transcribe(&audio_input).await {
-                Ok(transcript) => {
-                    println!("Transcrição obtida:");
-                    println!("\"{}\"", transcript);
-                    println!("Duração: {:.2}s", audio_input.duration_ms as f64 / 1000.0);
+
+            match stt.transcribe_with_metadata(&audio_input).await {
+                Ok(result) => {
+                    println!("\n=== Resultado da Transcrição Local Whisper ===");
+                    println!("Transcrição obtida: \"{}\"", result.text);
+                    println!("Modelo utilizado:   {}", result.model_path.display());
+                    println!("Idioma solicitado:  {}", result.language_requested);
+                    if let Some(detected) = result.detected_language {
+                        let prob_str = result
+                            .probability
+                            .map(|p| format!(" (confiança: {:.1}%)", p * 100.0))
+                            .unwrap_or_default();
+                        println!("Idioma detectado:   {}{}", detected, prob_str);
+                    } else if result.language_requested == "auto" {
+                        println!("Idioma detectado:   não identificado pelo log do Whisper");
+                    }
+                    println!(
+                        "Duração do áudio:   {:.2}s ({} ms)",
+                        audio_input.duration_ms as f64 / 1000.0,
+                        audio_input.duration_ms
+                    );
+                    println!("Latência total:     {:.2}s", result.elapsed.as_secs_f64());
+                    if let Some(inference_ms) = result.whisper_total_time_ms {
+                        println!("Tempo inferência:   {:.2}s", inference_ms / 1000.0);
+                    }
                 }
                 Err(e) => eprintln!("Falha na transcrição: {}", e),
             }
@@ -953,6 +991,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             input_device,
             output_device,
             play,
+            language,
         } => {
             use std::sync::Arc;
             use std::time::Duration;
@@ -1095,11 +1134,31 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 ))
             };
 
+            // Resolução do idioma de STT para o roteador governado de conversação
+            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+            let effective_lang = yuki::voice::stt::normalize_language_code(raw_lang);
+            let whisper_cfg =
+                yuki::voice::stt::LocalWhisperConfig::default().with_language(effective_lang);
+            let local_stt = Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
+            let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
+                if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
+                    Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
+                } else {
+                    Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
+                };
+
+            let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
+                local_stt,
+                None,
+                local_tts,
+                None,
+                yuki::contracts::voice::VoiceConfiguration::default(),
+            ));
+
             let coordinator = VoiceConversationCoordinator::new(
                 core,
-                Arc::new(yuki::voice::router::GovernedVoiceRouter::default_local(
-                    yuki::contracts::voice::VoiceConfiguration::default(),
-                )),
+                router,
                 Arc::new(yuki::voice::session::VoiceSessionManager::new()),
                 playback_controller,
                 Arc::new(tokio::sync::Mutex::new(
