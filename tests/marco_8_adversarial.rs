@@ -2539,3 +2539,71 @@ async fn test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagaca
     ));
     assert_eq!(test_coord.playback().status(), PlaybackStatus::Failed);
 }
+
+#[tokio::test]
+async fn test_71_selecao_de_dispositivos_wasapi_fail_closed_sem_mascaramento_mock() {
+    use yuki::contracts::voice::{AudioFormat, AudioOutput, VoiceError};
+    use yuki::voice::capture::{AudioCaptureBackend, WindowsAudioCaptureBackend};
+    use yuki::voice::devices::{
+        find_device, list_audio_devices, AudioDeviceFlow, AudioDeviceState,
+    };
+    use yuki::voice::playback::{AudioPlaybackController, PlaybackStatus};
+
+    // 1. Invariante: Enumeração de dispositivos e validação de estados operacionais
+    let devices = list_audio_devices(false);
+    assert!(devices.is_ok());
+
+    // 2. Invariante: find_device com endpoint inexistente falha fechado com DeviceUnavailable
+    let missing_input = find_device("NON_EXISTENT_DEVICE_99999", AudioDeviceFlow::Input);
+    assert!(missing_input.is_err());
+    assert!(matches!(
+        missing_input.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+
+    let missing_output = find_device("NON_EXISTENT_DEVICE_88888", AudioDeviceFlow::Output);
+    assert!(missing_output.is_err());
+    assert!(matches!(
+        missing_output.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+
+    // 3. Invariante: Captura Windows WASAPI direcionada a endpoint inexistente falha fechada sem cair em mock
+    let capture_target = WindowsAudioCaptureBackend::with_device(Some(
+        "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}".to_string(),
+    ));
+    assert!(!capture_target.is_device_available());
+    let start_res = capture_target.start_capture();
+    assert!(start_res.is_err());
+    assert!(matches!(
+        start_res.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+
+    // 4. Invariante: Reprodução Windows WASAPI direcionada a endpoint inexistente falha fechada
+    let playback_ctrl = AudioPlaybackController::production_with_device(Some(
+        "{0.0.0.00000000}.{00000000-0000-0000-0000-000000000000}".to_string(),
+    ));
+    assert_eq!(
+        playback_ctrl.sink().name(),
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
+    );
+    assert!(!playback_ctrl.is_device_available());
+
+    let dummy_audio = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 50, "adv-sink");
+    let play_res = playback_ctrl.play(&dummy_audio);
+    assert!(play_res.is_err());
+    assert!(matches!(
+        play_res.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+    assert_eq!(playback_ctrl.status(), PlaybackStatus::Failed);
+
+    // 5. Invariante: Modelagem e identificação de estados de dispositivos
+    assert_eq!(AudioDeviceFlow::Input.label(), "Entrada (Microfone)");
+    assert_eq!(AudioDeviceFlow::Output.label(), "Saída (Alto-falante/Fone)");
+    assert_eq!(AudioDeviceState::Active.label(), "Ativo");
+    assert_eq!(AudioDeviceState::Unplugged.label(), "Desconectado");
+    assert!(AudioDeviceState::Active.is_active());
+    assert!(!AudioDeviceState::Unplugged.is_active());
+}

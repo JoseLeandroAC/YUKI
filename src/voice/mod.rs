@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod capture;
 pub mod conversation;
+pub mod devices;
 pub mod playback;
 pub mod router;
 pub mod session;
@@ -11,6 +12,7 @@ pub mod wakeword;
 pub use audio::*;
 pub use capture::*;
 pub use conversation::*;
+pub use devices::*;
 pub use playback::*;
 pub use router::*;
 pub use session::*;

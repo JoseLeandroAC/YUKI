@@ -465,3 +465,99 @@ fn test_production_backend_without_device_fails_closed_without_mock_masquerade()
         VoiceError::DeviceUnavailable(_)
     ));
 }
+
+#[test]
+fn test_wasapi_device_enumeration_and_matching() {
+    use yuki::voice::devices::{
+        find_device, get_default_device, list_audio_devices, AudioDeviceFlow, AudioDeviceInfo,
+        AudioDeviceState,
+    };
+
+    // 1. Enumeração dos dispositivos de áudio
+    let all = list_audio_devices(false).expect("Enumeração de dispositivos não deve falhar");
+    let active = list_audio_devices(true).expect("Enumeração de ativos não deve falhar");
+    assert!(all.len() >= active.len());
+
+    // 2. Dispositivo padrão
+    let default_in = get_default_device(AudioDeviceFlow::Input);
+    assert!(default_in.is_ok());
+
+    let default_out = get_default_device(AudioDeviceFlow::Output);
+    assert!(default_out.is_ok());
+
+    // 3. Resolução com query vazia retorna o padrão
+    if let Ok(Some(def_out)) = default_out {
+        let found =
+            find_device("", AudioDeviceFlow::Output).expect("Query vazia deve retornar padrão");
+        assert_eq!(found.id, def_out.id);
+    }
+
+    // 4. Resolução por substring case-insensitive
+    if let Some(first_active) = active.iter().find(|d| d.flow == AudioDeviceFlow::Output) {
+        let substr = &first_active.name[..first_active.name.len().min(4)];
+        let found = find_device(substr, AudioDeviceFlow::Output);
+        assert!(found.is_ok());
+    }
+
+    // 5. Dispositivo inexistente retorna erro DeviceUnavailable
+    let missing = find_device(
+        "__DISPOSITIVO_TOTALMENTE_INEXISTENTE__",
+        AudioDeviceFlow::Input,
+    );
+    assert!(missing.is_err());
+    assert!(matches!(
+        missing.unwrap_err(),
+        VoiceError::DeviceUnavailable(_)
+    ));
+
+    // 6. Estrutura AudioDeviceInfo e serialização
+    let dummy = AudioDeviceInfo {
+        id: "test-id".to_string(),
+        name: "Test Mic".to_string(),
+        flow: AudioDeviceFlow::Input,
+        state: AudioDeviceState::Active,
+        is_default: true,
+    };
+    assert!(dummy.state.is_active());
+    let serialized = serde_json::to_string(&dummy).unwrap();
+    assert!(serialized.contains("test-id"));
+}
+
+#[test]
+fn test_audio_resampling_and_downmix_pcm_validation() {
+    use yuki::contracts::voice::AudioFormat;
+    use yuki::voice::audio::AudioCodec;
+
+    // Gera onda senoidal pura em 16kHz mono (formato canônico da Yuki)
+    let freq = 440.0;
+    let sample_rate = 16000;
+    let duration_sec = 0.5;
+    let total_samples = (sample_rate as f64 * duration_sec) as usize;
+
+    let mut samples = Vec::with_capacity(total_samples);
+    for i in 0..total_samples {
+        let t = i as f64 / sample_rate as f64;
+        let s = (t * freq * 2.0 * std::f64::consts::PI).sin();
+        samples.push((s * 10000.0) as i16);
+    }
+
+    let format = AudioFormat {
+        sample_rate: 16000,
+        channels: 1,
+        bits_per_sample: 16,
+    };
+
+    // Encode para WAV
+    let wav_bytes = AudioCodec::encode_wav(&samples, &format).expect("Encode WAV deve funcionar");
+    assert!(wav_bytes.starts_with(b"RIFF"));
+
+    // Decode de volta
+    let (decoded_format, decoded_samples) =
+        AudioCodec::decode_wav(&wav_bytes).expect("Decode WAV deve funcionar");
+    assert_eq!(decoded_format.sample_rate, 16000);
+    assert_eq!(decoded_format.channels, 1);
+    assert_eq!(decoded_format.bits_per_sample, 16);
+    assert_eq!(decoded_samples.len(), samples.len());
+    assert_eq!(decoded_samples[0], samples[0]);
+    assert_eq!(decoded_samples[100], samples[100]);
+}

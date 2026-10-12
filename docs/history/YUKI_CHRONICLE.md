@@ -1363,4 +1363,45 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — integração operacional de áudio verificada e submetida à homologação independente."`
 
+---
+
+## 2026-10-12 — Marco 8.1.1: Migração para WASAPI Core Audio, Seleção Estável de Dispositivos e Suporte a Headset Bluetooth (Redmi Buds 6 Play)
+
+- **Contexto e Diagnóstico Operacional**:
+  - Durante os testes de homologação na compilação Release (`cargo run --release -- voice turn --seconds 5`), a captura de microfone falhou repetidamente com o erro `Falha na API MCI do Windows (código 322): comando 'record yuki_rec_...'` (`MCIERR_WAVE_INPUTSUNSUITABLE`).
+  - O erro ocorria devido a incompatibilidades de alinhamento e formato na API multimídia de 16-bits do WinMM/MCI, combinadas com a incapacidade da pilha legada de gerenciar ou rotear endpoints modernos do Windows Core Audio e headsets Bluetooth (como o Redmi Buds 6 Play).
+- **Implementação Conclusiva**:
+  1. **Migração Integral para WASAPI Core Audio Nativo em Rust (`src/voice/capture.rs` e `src/voice/playback.rs`):**
+     - Substituição do mecanismo MCI por chamadas COM nativas sem dependências externas (`IMMDeviceEnumerator`, `IMMDevice`, `IAudioClient`, `IAudioCaptureClient` e `IAudioRenderClient`).
+     - Captura direta em memória em modo streaming, eliminando criação de arquivos temporários no sistema de arquivos.
+     - Conversão automática e reamostragem em memória de fluxos IEEE 32-bit Float e multicanal para o padrão canônico da Yuki: **16000Hz, 1 canal (mono), 16-bit PCM**.
+  2. **Enumeração e Seleção de Dispositivos com Resolução Estável (`src/voice/devices.rs`):**
+     - Descoberta de todos os endpoints do sistema operacional com estados de hardware (`Active`, `Disabled`, `NotPresent`, `Unplugged`).
+     - Resolução resiliente por ID exato, nome exato ou substring case-insensitive, priorizando dispositivos ativos.
+     - Fail-closed estrito: falha explicativa quando o dispositivo está ausente ou desligado, eliminando qualquer fallback silencioso para Mock.
+  3. **Suporte e Mapeamento de Headset Bluetooth (Redmi Buds 6 Play):**
+     - Mapeamento e documentação da comutação automática entre perfis Bluetooth A2DP (estéreo unidirecional de alta fidelidade) e HFP (Hands-Free mono bidirecional).
+     - Roteamento dedicado via `--input-device` e `--output-device` garantindo estabilidade na conversação bidirecional por voz.
+  4. **Expansão da Interface de Linha de Comando (`src/main.rs`):**
+     - `yuki voice devices [--all]`: lista os endpoints de entrada e saída com indicação de padrão e status.
+     - `yuki voice listen --input-device <query>`: captura direcionada com diagnóstico de formato e hardware.
+     - `yuki voice speak --output-device <query> --play`: reprodução direcionada em qualquer endpoint ativo.
+     - `yuki voice turn --input-device <query> --output-device <query> --play`: turno conversacional completo Push-to-Talk via headset Bluetooth ou microfone padrão.
+  5. **Testes Adversariais e de Integração:**
+     - Teste adversarial 71 (`test_71_selecao_de_dispositivos_wasapi_fail_closed_sem_mascaramento_mock`) adicionado em `tests/marco_8_adversarial.rs`.
+     - Testes de integração de enumeração, resolução e reamostragem adicionados em `tests/voice_integration.rs`.
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **71 cenários adversariais** (100% aprovados).
+  - **Total de Testes no Workspace:** **579 testes ativos aprovados** (5 testes live opt-in ignorados, totalizando 584 testes; 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Relatório Oficial de Auditoria:**
+  - `docs/audits/MARCO_8_1_1_WINDOWS_CAPTURE_BLUETOOTH.md` gerado com diagnósticos detalhados e guia de teste físico para o operador.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — migração para WASAPI Core Audio, seleção estável de microfone/fones e suporte a headset Bluetooth (Redmi Buds 6 Play) concluídos."`
+
+
 

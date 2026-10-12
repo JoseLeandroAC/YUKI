@@ -281,6 +281,570 @@ impl AudioPlaybackSink for WindowsAudioPlaybackSink {
 }
 
 // ---------------------------------------------------------------------------
+// Sink de Reprodução Windows WASAPI Core Audio com Seleção de Dispositivo
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+mod wasapi_render_ffi {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct GUID {
+        pub data1: u32,
+        pub data2: u16,
+        pub data3: u16,
+        pub data4: [u8; 8],
+    }
+
+    pub type HRESULT = i32;
+
+    pub const CLSID_MM_DEVICE_ENUMERATOR: GUID = GUID {
+        data1: 0xBCDE0395,
+        data2: 0xE52F,
+        data3: 0x467C,
+        data4: [0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E],
+    };
+
+    pub const IID_IMM_DEVICE_ENUMERATOR: GUID = GUID {
+        data1: 0xA95664D2,
+        data2: 0x9614,
+        data3: 0x4F35,
+        data4: [0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6],
+    };
+
+    pub const IID_IAUDIO_CLIENT: GUID = GUID {
+        data1: 0x1CB9AD4C,
+        data2: 0xDBFA,
+        data3: 0x4C32,
+        data4: [0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2],
+    };
+
+    pub const IID_IAUDIO_RENDER_CLIENT: GUID = GUID {
+        data1: 0xF294ACFC,
+        data2: 0x3146,
+        data3: 0x4483,
+        data4: [0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2],
+    };
+
+    pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID {
+        data1: 0x00000003,
+        data2: 0x0000,
+        data3: 0x0010,
+        data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
+    };
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct WAVEFORMATEX {
+        pub wFormatTag: u16,
+        pub nChannels: u16,
+        pub nSamplesPerSec: u32,
+        pub nAvgBytesPerSec: u32,
+        pub nBlockAlign: u16,
+        pub wBitsPerSample: u16,
+        pub cbSize: u16,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct WAVEFORMATEXTENSIBLE {
+        pub format: WAVEFORMATEX,
+        pub samples: u16,
+        pub dw_channel_mask: u32,
+        pub sub_format: GUID,
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        pub fn CoInitializeEx(pv_reserved: *mut c_void, dw_co_init: u32) -> HRESULT;
+        pub fn CoUninitialize();
+        pub fn CoCreateInstance(
+            rclsid: *const GUID,
+            p_unk_outer: *mut c_void,
+            dw_cls_context: u32,
+            riid: *const GUID,
+            ppv: *mut *mut c_void,
+        ) -> HRESULT;
+        pub fn CoTaskMemFree(pv: *mut c_void);
+    }
+
+    #[repr(C)]
+    pub struct IMMDeviceEnumeratorVtbl {
+        pub QueryInterface:
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+        pub AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Release: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub EnumAudioEndpoints:
+            unsafe extern "system" fn(*mut c_void, i32, u32, *mut *mut c_void) -> HRESULT,
+        pub GetDefaultAudioEndpoint:
+            unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT,
+        pub GetDevice:
+            unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> HRESULT,
+    }
+
+    #[repr(C)]
+    pub struct IMMDeviceVtbl {
+        pub QueryInterface:
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+        pub AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Release: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Activate: unsafe extern "system" fn(
+            *mut c_void,
+            *const GUID,
+            u32,
+            *mut c_void,
+            *mut *mut c_void,
+        ) -> HRESULT,
+        pub OpenPropertyStore:
+            unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT,
+        pub GetId: unsafe extern "system" fn(*mut c_void, *mut *mut u16) -> HRESULT,
+        pub GetState: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+    }
+
+    #[repr(C)]
+    pub struct IAudioClientVtbl {
+        pub QueryInterface:
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+        pub AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Release: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Initialize: unsafe extern "system" fn(
+            *mut c_void,
+            i32,
+            u32,
+            i64,
+            i64,
+            *const WAVEFORMATEX,
+            *const GUID,
+        ) -> HRESULT,
+        pub GetBufferSize: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+        pub GetStreamLatency: unsafe extern "system" fn(*mut c_void, *mut i64) -> HRESULT,
+        pub GetCurrentPadding: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT,
+        pub IsFormatSupported: unsafe extern "system" fn(
+            *mut c_void,
+            i32,
+            *const WAVEFORMATEX,
+            *mut *mut WAVEFORMATEX,
+        ) -> HRESULT,
+        pub GetMixFormat: unsafe extern "system" fn(*mut c_void, *mut *mut WAVEFORMATEX) -> HRESULT,
+        pub GetDevicePeriod: unsafe extern "system" fn(*mut c_void, *mut i64, *mut i64) -> HRESULT,
+        pub Start: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+        pub Stop: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+        pub Reset: unsafe extern "system" fn(*mut c_void) -> HRESULT,
+        pub SetEventHandle: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+        pub GetService:
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    }
+
+    #[repr(C)]
+    pub struct IAudioRenderClientVtbl {
+        pub QueryInterface:
+            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+        pub AddRef: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub Release: unsafe extern "system" fn(*mut c_void) -> u32,
+        pub GetBuffer: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u8) -> HRESULT,
+        pub ReleaseBuffer: unsafe extern "system" fn(*mut c_void, u32, u32) -> HRESULT,
+    }
+}
+
+/// Sink de áudio nativo para Windows baseado na API oficial WASAPI Core Audio com suporte a seleção de endpoint.
+#[derive(Debug)]
+pub struct WasapiAudioPlaybackSink {
+    device_id: Option<String>,
+    policy: AudioOutputPolicy,
+    is_playing: Arc<AtomicBool>,
+    current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+}
+
+impl Default for WasapiAudioPlaybackSink {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl WasapiAudioPlaybackSink {
+    pub fn new(device_id: Option<String>) -> Self {
+        Self::with_policy(device_id, AudioOutputPolicy::OptInTest)
+    }
+
+    pub fn production(device_id: Option<String>) -> Self {
+        Self::with_policy(device_id, AudioOutputPolicy::Production)
+    }
+
+    pub fn opt_in_test(device_id: Option<String>) -> Self {
+        Self::with_policy(device_id, AudioOutputPolicy::OptInTest)
+    }
+
+    pub fn silenced() -> Self {
+        Self::with_policy(None, AudioOutputPolicy::Silenced)
+    }
+
+    pub fn with_policy(device_id: Option<String>, policy: AudioOutputPolicy) -> Self {
+        Self {
+            device_id,
+            policy,
+            is_playing: Arc::new(AtomicBool::new(false)),
+            current_wav_buffer: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn device_id(&self) -> Option<&str> {
+        self.device_id.as_deref()
+    }
+
+    fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
+        if in_rate == out_rate || samples.is_empty() {
+            return samples.to_vec();
+        }
+        let ratio = in_rate as f64 / out_rate as f64;
+        let out_len = ((samples.len() as f64) / ratio).round() as usize;
+        let mut out = Vec::with_capacity(out_len);
+
+        for i in 0..out_len {
+            let in_pos = i as f64 * ratio;
+            let idx = in_pos.floor() as usize;
+            let frac = in_pos - (idx as f64);
+
+            let s0 = samples.get(idx).copied().unwrap_or(0) as f64;
+            let s1 = samples.get(idx + 1).copied().unwrap_or(s0 as i16) as f64;
+
+            let interpolated = (1.0 - frac) * s0 + frac * s1;
+            out.push(interpolated.clamp(-32768.0, 32767.0) as i16);
+        }
+        out
+    }
+}
+
+impl AudioPlaybackSink for WasapiAudioPlaybackSink {
+    fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
+        #[cfg(windows)]
+        {
+            use std::time::Duration;
+            use wasapi_render_ffi::*;
+
+            let should_emit_physical = match self.policy {
+                AudioOutputPolicy::Production => true,
+                AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
+                AudioOutputPolicy::Silenced => false,
+            };
+
+            if !should_emit_physical {
+                let wav_bytes = Arc::new(output.payload.clone());
+                *self.current_wav_buffer.lock().unwrap() = Some(wav_bytes);
+                return Ok(());
+            }
+
+            if !self.is_device_available() {
+                return Err(VoiceError::DeviceUnavailable(
+                    "Nenhum dispositivo de reprodução de áudio ativo detectado (WASAPI)"
+                        .to_string(),
+                ));
+            }
+
+            let (format, samples) =
+                if output.payload.starts_with(b"RIFF") && output.payload.len() >= 44 {
+                    AudioCodec::decode_wav(&output.payload)?
+                } else {
+                    #[allow(clippy::chunks_exact_to_as_chunks)]
+                    let s: Vec<i16> = output
+                        .payload
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    (output.format.clone(), s)
+                };
+
+            unsafe {
+                let hr = CoInitializeEx(std::ptr::null_mut(), 0);
+                if hr != 0 && hr != 1 {
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao inicializar COM para reprodução WASAPI (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let mut p_enum: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr = CoCreateInstance(
+                    &CLSID_MM_DEVICE_ENUMERATOR,
+                    std::ptr::null_mut(),
+                    1 | 2 | 4 | 16,
+                    &IID_IMM_DEVICE_ENUMERATOR,
+                    &mut p_enum,
+                );
+                if hr != 0 || p_enum.is_null() {
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao instanciar MMDeviceEnumerator para playback (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let enum_vtbl = *(p_enum as *mut *const IMMDeviceEnumeratorVtbl);
+                let mut p_dev: *mut std::ffi::c_void = std::ptr::null_mut();
+
+                if let Some(ref dev_id) = self.device_id {
+                    let wide_id: Vec<u16> =
+                        dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                    let hr = ((*enum_vtbl).GetDevice)(p_enum, wide_id.as_ptr(), &mut p_dev);
+                    if hr != 0 || p_dev.is_null() {
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        return Err(VoiceError::DeviceUnavailable(format!(
+                            "Dispositivo de saída especificado '{}' não encontrado (0x{:08X})",
+                            dev_id, hr
+                        )));
+                    }
+                } else {
+                    let hr = ((*enum_vtbl).GetDefaultAudioEndpoint)(
+                        p_enum, 0, /* eRender */
+                        0, /* eConsole */
+                        &mut p_dev,
+                    );
+                    if hr != 0 || p_dev.is_null() {
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        return Err(VoiceError::DeviceUnavailable(format!(
+                            "Nenhum endpoint padrão de renderização disponível no Windows (0x{:08X})",
+                            hr
+                        )));
+                    }
+                }
+
+                let dev_vtbl = *(p_dev as *mut *const IMMDeviceVtbl);
+                let mut dev_state = 0u32;
+                ((*dev_vtbl).GetState)(p_dev, &mut dev_state);
+                if dev_state != 1 {
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::DeviceUnavailable(format!(
+                        "O dispositivo de saída selecionado não está ativo (estado: {})",
+                        dev_state
+                    )));
+                }
+
+                let mut p_client: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr = ((*dev_vtbl).Activate)(
+                    p_dev,
+                    &IID_IAUDIO_CLIENT,
+                    1 | 2 | 4 | 16,
+                    std::ptr::null_mut(),
+                    &mut p_client,
+                );
+                if hr != 0 || p_client.is_null() {
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao ativar IAudioClient no dispositivo de saída (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let client_vtbl = *(p_client as *mut *const IAudioClientVtbl);
+                let mut p_format: *mut WAVEFORMATEX = std::ptr::null_mut();
+                let hr = ((*client_vtbl).GetMixFormat)(p_client, &mut p_format);
+                if hr != 0 || p_format.is_null() {
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao obter formato de mixagem do dispositivo de saída (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let fmt_copy = *p_format;
+                let is_extensible = fmt_copy.wFormatTag == 0xFFFE;
+                let is_float = if is_extensible && fmt_copy.cbSize >= 22 {
+                    let ext = *(p_format as *const WAVEFORMATEXTENSIBLE);
+                    ext.sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                } else {
+                    fmt_copy.wFormatTag == 3
+                };
+
+                let resampled_samples =
+                    Self::resample_linear(&samples, format.sample_rate, fmt_copy.nSamplesPerSec);
+                let target_channels = fmt_copy.nChannels as usize;
+
+                let mut converted_bytes: Vec<u8> = Vec::new();
+                if is_float && fmt_copy.wBitsPerSample == 32 {
+                    for &s in &resampled_samples {
+                        let f = (s as f32) / 32767.0f32;
+                        let bytes = f.to_le_bytes();
+                        for _ in 0..target_channels {
+                            converted_bytes.extend_from_slice(&bytes);
+                        }
+                    }
+                } else if fmt_copy.wBitsPerSample == 16 {
+                    for &s in &resampled_samples {
+                        let bytes = s.to_le_bytes();
+                        for _ in 0..target_channels {
+                            converted_bytes.extend_from_slice(&bytes);
+                        }
+                    }
+                } else {
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Formato do dispositivo de saída não suportado: {} bits por amostra",
+                        fmt_copy.wBitsPerSample
+                    )));
+                }
+
+                let hr = ((*client_vtbl).Initialize)(
+                    p_client,
+                    0,
+                    0,
+                    5_000_000,
+                    0,
+                    p_format,
+                    std::ptr::null(),
+                );
+                if hr != 0 {
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao inicializar IAudioClient para reprodução (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let mut buffer_size_frames = 0u32;
+                ((*client_vtbl).GetBufferSize)(p_client, &mut buffer_size_frames);
+
+                let mut p_render: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr =
+                    ((*client_vtbl).GetService)(p_client, &IID_IAUDIO_RENDER_CLIENT, &mut p_render);
+                if hr != 0 || p_render.is_null() {
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao obter IAudioRenderClient (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                let render_vtbl = *(p_render as *mut *const IAudioRenderClientVtbl);
+                self.is_playing.store(true, Ordering::SeqCst);
+
+                let block_align = fmt_copy.nBlockAlign as usize;
+                let total_frames = converted_bytes.len() / block_align;
+                let mut frames_written = 0usize;
+
+                let hr = ((*client_vtbl).Start)(p_client);
+                if hr != 0 {
+                    self.is_playing.store(false, Ordering::SeqCst);
+                    ((*render_vtbl).Release)(p_render);
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    return Err(VoiceError::PlaybackFailed(format!(
+                        "Falha ao iniciar IAudioClient para reprodução (0x{:08X})",
+                        hr
+                    )));
+                }
+
+                while frames_written < total_frames && self.is_playing.load(Ordering::SeqCst) {
+                    let mut padding = 0u32;
+                    let _ = ((*client_vtbl).GetCurrentPadding)(p_client, &mut padding);
+                    let available = (buffer_size_frames.saturating_sub(padding)) as usize;
+                    let to_write = (total_frames - frames_written).min(available);
+
+                    if to_write > 0 {
+                        let mut p_data: *mut u8 = std::ptr::null_mut();
+                        let hr = ((*render_vtbl).GetBuffer)(p_render, to_write as u32, &mut p_data);
+                        if hr == 0 && !p_data.is_null() {
+                            let start_byte = frames_written * block_align;
+                            let end_byte = start_byte + (to_write * block_align);
+                            let slice = &converted_bytes[start_byte..end_byte];
+                            std::ptr::copy_nonoverlapping(slice.as_ptr(), p_data, slice.len());
+                            let _ = ((*render_vtbl).ReleaseBuffer)(p_render, to_write as u32, 0);
+                            frames_written += to_write;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+
+                while self.is_playing.load(Ordering::SeqCst) {
+                    let mut padding = 0u32;
+                    let _ = ((*client_vtbl).GetCurrentPadding)(p_client, &mut padding);
+                    if padding == 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+
+                let _ = ((*client_vtbl).Stop)(p_client);
+                self.is_playing.store(false, Ordering::SeqCst);
+
+                ((*render_vtbl).Release)(p_render);
+                CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                ((*client_vtbl).Release)(p_client);
+                ((*dev_vtbl).Release)(p_dev);
+                ((*enum_vtbl).Release)(p_enum);
+                CoUninitialize();
+
+                Ok(())
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = output;
+            Err(VoiceError::PlaybackFailed(
+                "WasapiAudioPlaybackSink é suportado apenas no Windows".to_string(),
+            ))
+        }
+    }
+
+    fn interrupt(&self) -> Result<(), VoiceError> {
+        self.is_playing.store(false, Ordering::SeqCst);
+        let mut buf_lock = self.current_wav_buffer.lock().unwrap();
+        *buf_lock = None;
+        Ok(())
+    }
+
+    fn is_device_available(&self) -> bool {
+        #[cfg(windows)]
+        {
+            use crate::voice::devices::{list_audio_devices, AudioDeviceFlow};
+            if let Ok(devs) = list_audio_devices(true) {
+                if let Some(ref target_id) = self.device_id {
+                    devs.iter().any(|d| {
+                        d.flow == AudioDeviceFlow::Output && d.id.eq_ignore_ascii_case(target_id)
+                    })
+                } else {
+                    devs.iter().any(|d| d.flow == AudioDeviceFlow::Output)
+                }
+            } else {
+                false
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    fn name(&self) -> &str {
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sink Mock Observável para Testes e CI Headless
 // ---------------------------------------------------------------------------
 
@@ -441,6 +1005,19 @@ impl AudioPlaybackController {
     /// falharão explicitamente com `VoiceError::DeviceUnavailable`, preservando a verdade operacional.
     pub fn production() -> Self {
         Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
+    }
+
+    /// Construtor para ambiente operacional de produção com seleção opcional de dispositivo.
+    ///
+    /// Se um identificador de dispositivo for fornecido, utiliza o backend WASAPI Core Audio direcionado
+    /// para o endpoint correspondente (ex: headset Bluetooth, USB DAC ou Realtek). Se omitido,
+    /// utiliza o dispositivo padrão do sistema.
+    pub fn production_with_device(device_id: Option<String>) -> Self {
+        if let Some(id) = device_id {
+            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(Some(id))))
+        } else {
+            Self::production()
+        }
     }
 
     /// Construtor baseado no ambiente operacional explicitamente configurado.
