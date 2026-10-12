@@ -174,3 +174,39 @@ Para homologar fisicamente com o fone de ouvido Bluetooth:
    ```powershell
    .\target\release\yuki.exe voice turn --input-device "Redmi Buds" --output-device "Redmi Buds" --seconds 5 --play
    ```
+
+---
+
+### 7. Correção Pontual do Playback WASAPI de 32 Bits (Redmi Buds 6 Play)
+
+Durante a homologação em hardware real, a captura de áudio e a síntese TTS funcionaram com sucesso, gerando `yuki_speech.wav` (~5,53s). Porém, a reprodução física direcionada para o Redmi Buds 6 Play falhou com o erro:
+
+```text
+Formato do dispositivo de saída não suportado: 32 bits por amostra
+```
+
+#### 7.1. Causa Raiz Identificada
+1. **Desalinhamento da Estrutura FFI (`WAVEFORMATEXTENSIBLE`):**
+   No Windows C ABI (`ksmedia.h`), `WAVEFORMATEX` possui 18 bytes e alinhamento de 2 bytes. Em Rust, declarar `WAVEFORMATEX` como `#[repr(C)]` sem `packed(2)` atribuía alinhamento 4 (devido a campos `u32`), inserindo 2 bytes de padding no final (20 bytes). Consequentemente, em `WAVEFORMATEXTENSIBLE`, o campo `sub_format` (GUID) era deslocado em 4 bytes (offset 28 em vez de 24). A comparação `ext.sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` sempre falhava, mesmo quando o dispositivo reportava float.
+2. **Subformato PCM não suportado em 32 bits:**
+   O sink assumia erroneamente que todo formato de 32 bits seria IEEE Float e não tratava `KSDATAFORMAT_SUBTYPE_PCM` em contêineres de 32 bits (`Pcm32Int` e 24-bits em contêiner de 32 bits).
+3. **Ausência de Registro Estruturado de Formato:**
+   A falha fechava sem exibir os parâmetros completos retornados por `GetMixFormat`.
+
+#### 7.2. Implementação da Solução
+1. **Módulo `wasapi_format` com Layout FFI Estrito:**
+   - `WAVEFORMATEX` (18 bytes) e `WAVEFORMATEXTENSIBLE` (40 bytes) declarados com `#[repr(C, packed(2))]`, garantindo paridade binária com o Windows C ABI.
+   - Subformatos GUID canônicos: `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` (`0x00000003`) e `KSDATAFORMAT_SUBTYPE_PCM` (`0x00000001`).
+   - Leitura de ponteiros raw desacoplada via `std::ptr::read_unaligned` e função segura `from_raw_ptr`.
+2. **Classificação e Conversão Exata de Formatos:**
+   - Enum `WasapiSampleClassification`: `IeeeFloat32`, `Pcm32Int { valid_bits }`, `Pcm24Packed`, `Pcm16`.
+   - Conversão de `i16` para float normalizado `[-1.0, 1.0]` e para PCM inteiro MSB-justificado (`(s as i32) << 16` para 32-bit e 24-in-32; `(s as i32) << 8` para 24-bit empacotado).
+3. **Registro Estruturado de Formato:**
+   - `ParsedWaveFormat::summary()` registra explicitamente: `wFormatTag`, `wBitsPerSample`, `nChannels`, `nSamplesPerSec`, `nBlockAlign`, `cbSize`, `SubFormat`, `wValidBitsPerSample` e `dwChannelMask`.
+4. **Testes Unitários e de Regressão:**
+   - Validação de layout e offsets (`test_wasapi_waveformat_layout_and_offsets`);
+   - Classificação abrangente de formatos (`test_wasapi_classify_sample_format`);
+   - Conversão de amostras em todos os formatos (`test_wasapi_convert_samples_all_formats`);
+   - Teste de regressão para o Redmi Buds 6 Play (`test_wasapi_regression_32bit_output_device_error`);
+   - Teste de integração end-to-end com áudio de fala sintetizado (`test_wasapi_32bit_bluetooth_headset_mix_format_integration`).
+

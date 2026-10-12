@@ -561,3 +561,86 @@ fn test_audio_resampling_and_downmix_pcm_validation() {
     assert_eq!(decoded_samples[0], samples[0]);
     assert_eq!(decoded_samples[100], samples[100]);
 }
+
+#[test]
+fn test_wasapi_32bit_bluetooth_headset_mix_format_integration() {
+    use yuki::contracts::voice::{AudioFormat, AudioOutput};
+    use yuki::voice::audio::AudioCodec;
+    use yuki::voice::playback::wasapi_format::{
+        classify_sample_format, convert_samples_to_wasapi, ParsedWaveFormat,
+        WasapiSampleClassification, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, KSDATAFORMAT_SUBTYPE_PCM,
+        WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    };
+
+    // 1. Gera áudio canônico da Yuki (16kHz mono) simulando a síntese de voz (TTS)
+    let samples: Vec<i16> = (0..16000)
+        .map(|i| ((i as f32 * 0.1).sin() * 5000.0) as i16)
+        .collect();
+    let format = AudioFormat {
+        sample_rate: 16000,
+        channels: 1,
+        bits_per_sample: 16,
+    };
+    let wav_data = AudioCodec::encode_wav(&samples, &format).unwrap();
+    let output = AudioOutput::new(wav_data, format, 1000, "test-yuki-speech");
+
+    let (decoded_format, decoded_samples) =
+        AudioCodec::decode_wav(&output.payload).expect("Deve decodificar wav");
+    assert_eq!(decoded_format.sample_rate, 16000);
+
+    // 2. Simula o formato de mixagem retornado pelo Redmi Buds 6 Play em modo shared: 48kHz, 2 canais, 32 bits float
+    let float_format_raw = WAVEFORMATEXTENSIBLE {
+        format: WAVEFORMATEX {
+            wFormatTag: 0xFFFE,
+            nChannels: 2,
+            nSamplesPerSec: 48000,
+            nAvgBytesPerSec: 48000 * 8,
+            nBlockAlign: 8,
+            wBitsPerSample: 32,
+            cbSize: 22,
+        },
+        samples: 32,
+        dw_channel_mask: 0x00000003,
+        sub_format: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+    };
+
+    let parsed_float =
+        unsafe { ParsedWaveFormat::from_raw_ptr(&float_format_raw.format as *const _) }
+            .expect("Deve decodificar formato float");
+    let class_float = classify_sample_format(&parsed_float).expect("Float deve classificar");
+    assert_eq!(class_float, WasapiSampleClassification::IeeeFloat32);
+
+    let bytes_float = convert_samples_to_wasapi(&decoded_samples, 2, class_float);
+    assert_eq!(bytes_float.len(), decoded_samples.len() * 2 * 4);
+
+    // 3. Simula o formato de mixagem em modo shared com 32 bits PCM inteiro (24 bits válidos)
+    let pcm_format_raw = WAVEFORMATEXTENSIBLE {
+        format: WAVEFORMATEX {
+            wFormatTag: 0xFFFE,
+            nChannels: 2,
+            nSamplesPerSec: 48000,
+            nAvgBytesPerSec: 48000 * 8,
+            nBlockAlign: 8,
+            wBitsPerSample: 32,
+            cbSize: 22,
+        },
+        samples: 24,
+        dw_channel_mask: 0x00000003,
+        sub_format: KSDATAFORMAT_SUBTYPE_PCM,
+    };
+
+    let parsed_pcm = unsafe { ParsedWaveFormat::from_raw_ptr(&pcm_format_raw.format as *const _) }
+        .expect("Deve decodificar formato PCM");
+    let class_pcm = classify_sample_format(&parsed_pcm).expect("PCM 32-bit deve classificar");
+    assert_eq!(
+        class_pcm,
+        WasapiSampleClassification::Pcm32Int { valid_bits: 24 }
+    );
+
+    let bytes_pcm = convert_samples_to_wasapi(&decoded_samples, 2, class_pcm);
+    assert_eq!(bytes_pcm.len(), decoded_samples.len() * 2 * 4);
+
+    // Amostras convertidas devem respeitar MSB alignment
+    let first_sample_pcm = i32::from_le_bytes(bytes_pcm[0..4].try_into().unwrap());
+    assert_eq!(first_sample_pcm, (decoded_samples[0] as i32) << 16);
+}

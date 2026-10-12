@@ -284,19 +284,311 @@ impl AudioPlaybackSink for WindowsAudioPlaybackSink {
 // Sink de Reprodução Windows WASAPI Core Audio com Seleção de Dispositivo
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
+// ---------------------------------------------------------------------------
+// Modelo e Classificação de Formato WASAPI (Cross-Platform para Testes)
+// ---------------------------------------------------------------------------
+
 #[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
-mod wasapi_render_ffi {
-    use std::ffi::c_void;
+pub mod wasapi_format {
+    use crate::contracts::voice::VoiceError;
 
     #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct GUID {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+    pub struct WasapiGuid {
         pub data1: u32,
         pub data2: u16,
         pub data3: u16,
         pub data4: [u8; 8],
     }
+
+    pub const KSDATAFORMAT_SUBTYPE_PCM: WasapiGuid = WasapiGuid {
+        data1: 0x00000001,
+        data2: 0x0000,
+        data3: 0x0010,
+        data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
+    };
+
+    pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: WasapiGuid = WasapiGuid {
+        data1: 0x00000003,
+        data2: 0x0000,
+        data3: 0x0010,
+        data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
+    };
+
+    pub fn is_ks_guid(guid: &WasapiGuid) -> bool {
+        guid.data2 == 0x0000
+            && guid.data3 == 0x0010
+            && guid.data4 == [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]
+    }
+
+    #[repr(C, packed(2))]
+    #[derive(Clone, Copy, Default)]
+    pub struct WAVEFORMATEX {
+        pub wFormatTag: u16,
+        pub nChannels: u16,
+        pub nSamplesPerSec: u32,
+        pub nAvgBytesPerSec: u32,
+        pub nBlockAlign: u16,
+        pub wBitsPerSample: u16,
+        pub cbSize: u16,
+    }
+
+    #[repr(C, packed(2))]
+    #[derive(Clone, Copy, Default)]
+    pub struct WAVEFORMATEXTENSIBLE {
+        pub format: WAVEFORMATEX,
+        pub samples: u16,
+        pub dw_channel_mask: u32,
+        pub sub_format: WasapiGuid,
+    }
+
+    /// Informações descritivas completas de um formato de áudio WASAPI para registro e diagnóstico.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ParsedWaveFormat {
+        pub tag: u16,
+        pub channels: u16,
+        pub sample_rate: u32,
+        pub avg_bytes_per_sec: u32,
+        pub block_align: u16,
+        pub bits_per_sample: u16,
+        pub cb_size: u16,
+        pub valid_bits_per_sample: Option<u16>,
+        pub channel_mask: Option<u32>,
+        pub sub_format_data1: Option<u32>,
+        pub is_ks_sub_format: bool,
+    }
+
+    impl ParsedWaveFormat {
+        pub fn summary(&self) -> String {
+            let ext_info = if self.tag == 0xFFFE {
+                let sub_name = match self.sub_format_data1 {
+                    Some(1) if self.is_ks_sub_format => "KSDATAFORMAT_SUBTYPE_PCM (0x01)",
+                    Some(3) if self.is_ks_sub_format => "KSDATAFORMAT_SUBTYPE_IEEE_FLOAT (0x03)",
+                    Some(_) => "Outro GUID",
+                    None => "Nenhum",
+                };
+                format!(
+                    " | Extensible: SubFormat={}, SubFormatData1={:?}, is_ks={}, wValidBitsPerSample={:?}, dwChannelMask=0x{:08X?}",
+                    sub_name,
+                    self.sub_format_data1,
+                    self.is_ks_sub_format,
+                    self.valid_bits_per_sample,
+                    self.channel_mask
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "wFormatTag=0x{:04X}, wBitsPerSample={}, nChannels={}, nSamplesPerSec={}Hz, nBlockAlign={}, cbSize={}{}",
+                self.tag,
+                self.bits_per_sample,
+                self.channels,
+                self.sample_rate,
+                self.block_align,
+                self.cb_size,
+                ext_info
+            )
+        }
+
+        /// Interpreta os bytes do formato retornado pela API WASAPI nativa.
+        ///
+        /// # Safety
+        ///
+        /// O ponteiro `ptr` deve apontar para uma estrutura `WAVEFORMATEX` válida e alocada pelo Windows.
+        pub unsafe fn from_raw_ptr(ptr: *const WAVEFORMATEX) -> Result<Self, VoiceError> {
+            if ptr.is_null() {
+                return Err(VoiceError::PlaybackFailed(
+                    "Ponteiro de formato de áudio WASAPI nulo".to_string(),
+                ));
+            }
+            let fmt = std::ptr::read_unaligned(ptr);
+            let tag = fmt.wFormatTag;
+            let channels = fmt.nChannels;
+            let sample_rate = fmt.nSamplesPerSec;
+            let avg_bytes_per_sec = fmt.nAvgBytesPerSec;
+            let block_align = fmt.nBlockAlign;
+            let bits_per_sample = fmt.wBitsPerSample;
+            let cb_size = fmt.cbSize;
+
+            let (valid_bits_per_sample, channel_mask, sub_format_data1, is_ks_sub_format) =
+                if tag == 0xFFFE && cb_size >= 22 {
+                    let ext_ptr = ptr as *const WAVEFORMATEXTENSIBLE;
+                    let ext = std::ptr::read_unaligned(ext_ptr);
+                    let sub_format = ext.sub_format;
+                    let is_ks = is_ks_guid(&sub_format);
+                    (
+                        Some(ext.samples),
+                        Some(ext.dw_channel_mask),
+                        Some(sub_format.data1),
+                        is_ks,
+                    )
+                } else {
+                    (None, None, None, false)
+                };
+
+            Ok(Self {
+                tag,
+                channels,
+                sample_rate,
+                avg_bytes_per_sec,
+                block_align,
+                bits_per_sample,
+                cb_size,
+                valid_bits_per_sample,
+                channel_mask,
+                sub_format_data1,
+                is_ks_sub_format,
+            })
+        }
+    }
+
+    /// Classificação formal do formato de amostra WASAPI para conversão exata.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WasapiSampleClassification {
+        /// IEEE 32-bit Float (-1.0f32 a 1.0f32)
+        IeeeFloat32,
+        /// PCM Inteiro de 32 bits (MSB-justificado; compatível com 32-bit, 24-in-32 e 16-in-32)
+        Pcm32Int { valid_bits: u16 },
+        /// PCM Inteiro de 24 bits empacotado (3 bytes por amostra)
+        Pcm24Packed,
+        /// PCM Inteiro de 16 bits (padrão i16 little-endian)
+        Pcm16,
+    }
+
+    pub fn classify_sample_format(
+        parsed: &ParsedWaveFormat,
+    ) -> Result<WasapiSampleClassification, VoiceError> {
+        let is_float = if parsed.tag == 0xFFFE {
+            parsed.is_ks_sub_format && parsed.sub_format_data1 == Some(3)
+        } else {
+            parsed.tag == 3
+        };
+
+        let is_pcm = if parsed.tag == 0xFFFE {
+            parsed.is_ks_sub_format && parsed.sub_format_data1 == Some(1)
+        } else {
+            parsed.tag == 1
+        };
+
+        if is_float {
+            if parsed.bits_per_sample == 32 {
+                Ok(WasapiSampleClassification::IeeeFloat32)
+            } else {
+                Err(VoiceError::PlaybackFailed(format!(
+                    "Formato IEEE Float com {} bits por amostra não suportado (esperado 32 bits). Detalhes: {}",
+                    parsed.bits_per_sample,
+                    parsed.summary()
+                )))
+            }
+        } else if is_pcm {
+            match parsed.bits_per_sample {
+                16 => Ok(WasapiSampleClassification::Pcm16),
+                24 => {
+                    if parsed.block_align == parsed.channels * 3 {
+                        Ok(WasapiSampleClassification::Pcm24Packed)
+                    } else if parsed.block_align == parsed.channels * 4 {
+                        let valid = parsed.valid_bits_per_sample.unwrap_or(24);
+                        Ok(WasapiSampleClassification::Pcm32Int { valid_bits: valid })
+                    } else {
+                        Err(VoiceError::PlaybackFailed(format!(
+                            "Alinhamento de bloco inesperado para PCM de 24 bits: {} (canais: {}). Detalhes: {}",
+                            parsed.block_align, parsed.channels, parsed.summary()
+                        )))
+                    }
+                }
+                32 => {
+                    let valid = parsed.valid_bits_per_sample.unwrap_or(32);
+                    let valid_clamped = if valid > 0 && valid <= 32 { valid } else { 32 };
+                    Ok(WasapiSampleClassification::Pcm32Int {
+                        valid_bits: valid_clamped,
+                    })
+                }
+                other => Err(VoiceError::PlaybackFailed(format!(
+                    "Formato PCM inteiro com {} bits por amostra não suportado (esperado 16, 24 ou 32). Detalhes: {}",
+                    other,
+                    parsed.summary()
+                ))),
+            }
+        } else {
+            Err(VoiceError::PlaybackFailed(format!(
+                "Subtipo de áudio WASAPI não suportado. Detalhes: {}",
+                parsed.summary()
+            )))
+        }
+    }
+
+    pub fn convert_samples_to_wasapi(
+        samples: &[i16],
+        channels: usize,
+        classification: WasapiSampleClassification,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        match classification {
+            WasapiSampleClassification::IeeeFloat32 => {
+                out.reserve(samples.len() * channels * 4);
+                for &s in samples {
+                    let f = (s as f32) / 32767.0f32;
+                    let bytes = f.clamp(-1.0, 1.0).to_le_bytes();
+                    for _ in 0..channels {
+                        out.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            WasapiSampleClassification::Pcm32Int { valid_bits: _ } => {
+                out.reserve(samples.len() * channels * 4);
+                for &s in samples {
+                    let val: i32 = (s as i32) << 16;
+                    let bytes = val.to_le_bytes();
+                    for _ in 0..channels {
+                        out.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            WasapiSampleClassification::Pcm24Packed => {
+                out.reserve(samples.len() * channels * 3);
+                for &s in samples {
+                    let val: i32 = (s as i32) << 8;
+                    let bytes = [
+                        (val & 0xFF) as u8,
+                        ((val >> 8) & 0xFF) as u8,
+                        ((val >> 16) & 0xFF) as u8,
+                    ];
+                    for _ in 0..channels {
+                        out.extend_from_slice(&bytes);
+                    }
+                }
+            }
+            WasapiSampleClassification::Pcm16 => {
+                out.reserve(samples.len() * channels * 2);
+                for &s in samples {
+                    let bytes = s.to_le_bytes();
+                    for _ in 0..channels {
+                        out.extend_from_slice(&bytes);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+pub use wasapi_format::*;
+
+// ---------------------------------------------------------------------------
+// Sink de Reprodução Windows WASAPI Core Audio com Seleção de Dispositivo
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+pub mod wasapi_render_ffi {
+    use std::ffi::c_void;
+
+    pub type GUID = crate::voice::playback::wasapi_format::WasapiGuid;
+    pub type WAVEFORMATEX = crate::voice::playback::wasapi_format::WAVEFORMATEX;
+    pub type WAVEFORMATEXTENSIBLE = crate::voice::playback::wasapi_format::WAVEFORMATEXTENSIBLE;
+    pub use crate::voice::playback::wasapi_format::{
+        is_ks_guid, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, KSDATAFORMAT_SUBTYPE_PCM,
+    };
 
     pub type HRESULT = i32;
 
@@ -327,34 +619,6 @@ mod wasapi_render_ffi {
         data3: 0x4483,
         data4: [0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2],
     };
-
-    pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID {
-        data1: 0x00000003,
-        data2: 0x0000,
-        data3: 0x0010,
-        data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
-    };
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug)]
-    pub struct WAVEFORMATEX {
-        pub wFormatTag: u16,
-        pub nChannels: u16,
-        pub nSamplesPerSec: u32,
-        pub nAvgBytesPerSec: u32,
-        pub nBlockAlign: u16,
-        pub wBitsPerSample: u16,
-        pub cbSize: u16,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug)]
-    pub struct WAVEFORMATEXTENSIBLE {
-        pub format: WAVEFORMATEX,
-        pub samples: u16,
-        pub dw_channel_mask: u32,
-        pub sub_format: GUID,
-    }
 
     #[link(name = "ole32")]
     extern "system" {
@@ -656,46 +920,60 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
                     )));
                 }
 
-                let fmt_copy = *p_format;
-                let is_extensible = fmt_copy.wFormatTag == 0xFFFE;
-                let is_float = if is_extensible && fmt_copy.cbSize >= 22 {
-                    let ext = *(p_format as *const WAVEFORMATEXTENSIBLE);
-                    ext.sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-                } else {
-                    fmt_copy.wFormatTag == 3
+                let parsed = match ParsedWaveFormat::from_raw_ptr(p_format) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                        ((*client_vtbl).Release)(p_client);
+                        ((*dev_vtbl).Release)(p_dev);
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        return Err(e);
+                    }
                 };
 
-                let resampled_samples =
-                    Self::resample_linear(&samples, format.sample_rate, fmt_copy.nSamplesPerSec);
-                let target_channels = fmt_copy.nChannels as usize;
+                let classification = match classify_sample_format(&parsed) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                        ((*client_vtbl).Release)(p_client);
+                        ((*dev_vtbl).Release)(p_dev);
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        return Err(e);
+                    }
+                };
 
-                let mut converted_bytes: Vec<u8> = Vec::new();
-                if is_float && fmt_copy.wBitsPerSample == 32 {
-                    for &s in &resampled_samples {
-                        let f = (s as f32) / 32767.0f32;
-                        let bytes = f.to_le_bytes();
-                        for _ in 0..target_channels {
-                            converted_bytes.extend_from_slice(&bytes);
-                        }
-                    }
-                } else if fmt_copy.wBitsPerSample == 16 {
-                    for &s in &resampled_samples {
-                        let bytes = s.to_le_bytes();
-                        for _ in 0..target_channels {
-                            converted_bytes.extend_from_slice(&bytes);
-                        }
-                    }
-                } else {
+                if parsed.block_align == 0 || parsed.channels == 0 || parsed.sample_rate == 0 {
                     CoTaskMemFree(p_format as *mut std::ffi::c_void);
                     ((*client_vtbl).Release)(p_client);
                     ((*dev_vtbl).Release)(p_dev);
                     ((*enum_vtbl).Release)(p_enum);
                     CoUninitialize();
                     return Err(VoiceError::PlaybackFailed(format!(
-                        "Formato do dispositivo de saída não suportado: {} bits por amostra",
-                        fmt_copy.wBitsPerSample
+                        "Parâmetros de formato inválidos retornados pelo dispositivo de saída: {}",
+                        parsed.summary()
                     )));
                 }
+
+                println!(
+                    "[WASAPI Playback] Formato do endpoint negociado via GetMixFormat: {} | Classificação: {:?}",
+                    parsed.summary(),
+                    classification
+                );
+
+                let mono_samples = if format.channels > 1 {
+                    AudioCodec::to_mono(&samples, format.channels)
+                } else {
+                    samples
+                };
+
+                let resampled_samples =
+                    Self::resample_linear(&mono_samples, format.sample_rate, parsed.sample_rate);
+                let target_channels = parsed.channels as usize;
+
+                let converted_bytes =
+                    convert_samples_to_wasapi(&resampled_samples, target_channels, classification);
 
                 let hr = ((*client_vtbl).Initialize)(
                     p_client,
@@ -739,7 +1017,7 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
                 let render_vtbl = *(p_render as *mut *const IAudioRenderClientVtbl);
                 self.is_playing.store(true, Ordering::SeqCst);
 
-                let block_align = fmt_copy.nBlockAlign as usize;
+                let block_align = parsed.block_align as usize;
                 let total_frames = converted_bytes.len() / block_align;
                 let mut frames_written = 0usize;
 
@@ -1497,5 +1775,362 @@ mod tests {
         assert!(sink.play(&output).is_ok());
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(sink.interrupt().is_ok());
+    }
+
+    #[test]
+    fn test_wasapi_waveformat_layout_and_offsets() {
+        use crate::voice::playback::wasapi_format::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE};
+
+        assert_eq!(
+            std::mem::size_of::<WAVEFORMATEX>(),
+            18,
+            "WAVEFORMATEX deve ter exatamente 18 bytes no padrão Windows C ABI"
+        );
+        assert_eq!(
+            std::mem::size_of::<WAVEFORMATEXTENSIBLE>(),
+            40,
+            "WAVEFORMATEXTENSIBLE deve ter exatamente 40 bytes no padrão Windows C ABI"
+        );
+        assert_eq!(
+            std::mem::align_of::<WAVEFORMATEX>(),
+            2,
+            "Alinhamento de WAVEFORMATEX deve ser 2 bytes"
+        );
+        assert_eq!(
+            std::mem::align_of::<WAVEFORMATEXTENSIBLE>(),
+            2,
+            "Alinhamento de WAVEFORMATEXTENSIBLE deve ser 2 bytes"
+        );
+
+        // Validação de offsets em WAVEFORMATEXTENSIBLE
+        let ext = std::mem::MaybeUninit::<WAVEFORMATEXTENSIBLE>::uninit();
+        let base_ptr = ext.as_ptr() as usize;
+        unsafe {
+            let p_ext = ext.as_ptr();
+            let p_samples = std::ptr::addr_of!((*p_ext).samples) as usize;
+            let p_mask = std::ptr::addr_of!((*p_ext).dw_channel_mask) as usize;
+            let p_sub = std::ptr::addr_of!((*p_ext).sub_format) as usize;
+
+            assert_eq!(
+                p_samples - base_ptr,
+                18,
+                "Offset de 'samples' deve ser 18 bytes"
+            );
+            assert_eq!(
+                p_mask - base_ptr,
+                20,
+                "Offset de 'dw_channel_mask' deve ser 20 bytes"
+            );
+            assert_eq!(
+                p_sub - base_ptr,
+                24,
+                "Offset de 'sub_format' (GUID) deve ser exatamente 24 bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wasapi_classify_sample_format() {
+        use crate::voice::playback::wasapi_format::{
+            classify_sample_format, ParsedWaveFormat, WasapiSampleClassification,
+        };
+
+        // 1. Extensible IEEE Float (32 bits)
+        let ext_float = ParsedWaveFormat {
+            tag: 0xFFFE,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 8,
+            block_align: 8,
+            bits_per_sample: 32,
+            cb_size: 22,
+            valid_bits_per_sample: Some(32),
+            channel_mask: Some(3),
+            sub_format_data1: Some(3),
+            is_ks_sub_format: true,
+        };
+        assert_eq!(
+            classify_sample_format(&ext_float).unwrap(),
+            WasapiSampleClassification::IeeeFloat32
+        );
+
+        // 2. Extensible 32-bit PCM inteiro
+        let ext_pcm32 = ParsedWaveFormat {
+            tag: 0xFFFE,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 8,
+            block_align: 8,
+            bits_per_sample: 32,
+            cb_size: 22,
+            valid_bits_per_sample: Some(32),
+            channel_mask: Some(3),
+            sub_format_data1: Some(1),
+            is_ks_sub_format: true,
+        };
+        assert_eq!(
+            classify_sample_format(&ext_pcm32).unwrap(),
+            WasapiSampleClassification::Pcm32Int { valid_bits: 32 }
+        );
+
+        // 3. Extensible 24 bits em container de 32 bits
+        let ext_pcm24_in_32 = ParsedWaveFormat {
+            tag: 0xFFFE,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 8,
+            block_align: 8,
+            bits_per_sample: 32,
+            cb_size: 22,
+            valid_bits_per_sample: Some(24),
+            channel_mask: Some(3),
+            sub_format_data1: Some(1),
+            is_ks_sub_format: true,
+        };
+        assert_eq!(
+            classify_sample_format(&ext_pcm24_in_32).unwrap(),
+            WasapiSampleClassification::Pcm32Int { valid_bits: 24 }
+        );
+
+        // 4. Extensible 24 bits empacotado (3 bytes/amostra)
+        let ext_pcm24_packed = ParsedWaveFormat {
+            tag: 0xFFFE,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 6,
+            block_align: 6,
+            bits_per_sample: 24,
+            cb_size: 22,
+            valid_bits_per_sample: Some(24),
+            channel_mask: Some(3),
+            sub_format_data1: Some(1),
+            is_ks_sub_format: true,
+        };
+        assert_eq!(
+            classify_sample_format(&ext_pcm24_packed).unwrap(),
+            WasapiSampleClassification::Pcm24Packed
+        );
+
+        // 5. Extensible 16 bits PCM
+        let ext_pcm16 = ParsedWaveFormat {
+            tag: 0xFFFE,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 4,
+            block_align: 4,
+            bits_per_sample: 16,
+            cb_size: 22,
+            valid_bits_per_sample: Some(16),
+            channel_mask: Some(3),
+            sub_format_data1: Some(1),
+            is_ks_sub_format: true,
+        };
+        assert_eq!(
+            classify_sample_format(&ext_pcm16).unwrap(),
+            WasapiSampleClassification::Pcm16
+        );
+
+        // 6. Legado PCM (tag 1)
+        let leg_pcm = ParsedWaveFormat {
+            tag: 1,
+            channels: 2,
+            sample_rate: 44100,
+            avg_bytes_per_sec: 44100 * 4,
+            block_align: 4,
+            bits_per_sample: 16,
+            cb_size: 0,
+            valid_bits_per_sample: None,
+            channel_mask: None,
+            sub_format_data1: None,
+            is_ks_sub_format: false,
+        };
+        assert_eq!(
+            classify_sample_format(&leg_pcm).unwrap(),
+            WasapiSampleClassification::Pcm16
+        );
+
+        // 7. Legado IEEE Float (tag 3)
+        let leg_float = ParsedWaveFormat {
+            tag: 3,
+            channels: 2,
+            sample_rate: 48000,
+            avg_bytes_per_sec: 48000 * 8,
+            block_align: 8,
+            bits_per_sample: 32,
+            cb_size: 0,
+            valid_bits_per_sample: None,
+            channel_mask: None,
+            sub_format_data1: None,
+            is_ks_sub_format: false,
+        };
+        assert_eq!(
+            classify_sample_format(&leg_float).unwrap(),
+            WasapiSampleClassification::IeeeFloat32
+        );
+
+        // 8. Formatos não suportados falham fechados
+        let unsupp_tag = ParsedWaveFormat {
+            tag: 0x00FF,
+            channels: 2,
+            sample_rate: 44100,
+            avg_bytes_per_sec: 44100 * 4,
+            block_align: 4,
+            bits_per_sample: 16,
+            cb_size: 0,
+            valid_bits_per_sample: None,
+            channel_mask: None,
+            sub_format_data1: None,
+            is_ks_sub_format: false,
+        };
+        assert!(classify_sample_format(&unsupp_tag).is_err());
+    }
+
+    #[test]
+    fn test_wasapi_convert_samples_all_formats() {
+        use crate::voice::playback::wasapi_format::{
+            convert_samples_to_wasapi, WasapiSampleClassification,
+        };
+
+        let samples: [i16; 4] = [0, 32767, -32768, 16384];
+
+        // 1. IEEE 32-bit Float estéreo (2 canais)
+        let float_bytes =
+            convert_samples_to_wasapi(&samples, 2, WasapiSampleClassification::IeeeFloat32);
+        assert_eq!(
+            float_bytes.len(),
+            4 * 2 * 4,
+            "4 amostras x 2 canais x 4 bytes = 32 bytes"
+        );
+        let f0_left = f32::from_le_bytes(float_bytes[0..4].try_into().unwrap());
+        let f0_right = f32::from_le_bytes(float_bytes[4..8].try_into().unwrap());
+        assert_eq!(f0_left, 0.0);
+        assert_eq!(f0_right, 0.0);
+
+        let f1_left = f32::from_le_bytes(float_bytes[8..12].try_into().unwrap());
+        assert!((f1_left - 1.0).abs() < 1e-4);
+
+        let f2_left = f32::from_le_bytes(float_bytes[16..20].try_into().unwrap());
+        assert_eq!(f2_left, -1.0);
+
+        // 2. PCM 32-bit Inteiro estéreo
+        let pcm32_bytes = convert_samples_to_wasapi(
+            &samples,
+            2,
+            WasapiSampleClassification::Pcm32Int { valid_bits: 32 },
+        );
+        assert_eq!(pcm32_bytes.len(), 4 * 2 * 4);
+        let i0 = i32::from_le_bytes(pcm32_bytes[0..4].try_into().unwrap());
+        assert_eq!(i0, 0);
+
+        let i1 = i32::from_le_bytes(pcm32_bytes[8..12].try_into().unwrap());
+        assert_eq!(i1, (32767i32) << 16);
+
+        let i2 = i32::from_le_bytes(pcm32_bytes[16..20].try_into().unwrap());
+        assert_eq!(i2, (-32768i32) << 16);
+
+        // 3. PCM 24-bit Empacotado estéreo
+        let pcm24_bytes =
+            convert_samples_to_wasapi(&samples, 2, WasapiSampleClassification::Pcm24Packed);
+        assert_eq!(
+            pcm24_bytes.len(),
+            4 * 2 * 3,
+            "4 amostras x 2 canais x 3 bytes = 24 bytes"
+        );
+        let sample1_left = [pcm24_bytes[6], pcm24_bytes[7], pcm24_bytes[8]];
+        let expected_val: i32 = (32767i32) << 8;
+        let expected_bytes = &expected_val.to_le_bytes()[..3];
+        assert_eq!(sample1_left, expected_bytes);
+
+        // 4. PCM 16-bit Inteiro estéreo
+        let pcm16_bytes = convert_samples_to_wasapi(&samples, 2, WasapiSampleClassification::Pcm16);
+        assert_eq!(
+            pcm16_bytes.len(),
+            4 * 2 * 2,
+            "4 amostras x 2 canais x 2 bytes = 16 bytes"
+        );
+        let s0 = i16::from_le_bytes(pcm16_bytes[0..2].try_into().unwrap());
+        let s1 = i16::from_le_bytes(pcm16_bytes[4..6].try_into().unwrap());
+        assert_eq!(s0, 0);
+        assert_eq!(s1, 32767);
+    }
+
+    #[test]
+    fn test_wasapi_regression_32bit_output_device_error() {
+        use crate::voice::playback::wasapi_format::{
+            classify_sample_format, convert_samples_to_wasapi, ParsedWaveFormat,
+            WAVEFORMATEXTENSIBLE,
+        };
+
+        // Simula o formato exato retornado por GetMixFormat para fones Bluetooth (ex: Redmi Buds 6 Play)
+        // Cenário A: Dispositivo com subformato PCM de 32 bits (ou 24-in-32)
+        let raw_ext_pcm = WAVEFORMATEXTENSIBLE {
+            format: crate::voice::playback::wasapi_format::WAVEFORMATEX {
+                wFormatTag: 0xFFFE,
+                nChannels: 2,
+                nSamplesPerSec: 48000,
+                nAvgBytesPerSec: 48000 * 8,
+                nBlockAlign: 8,
+                wBitsPerSample: 32,
+                cbSize: 22,
+            },
+            samples: 24, // 24 bits válidos em container de 32 bits
+            dw_channel_mask: 0x00000003,
+            sub_format: crate::voice::playback::wasapi_format::KSDATAFORMAT_SUBTYPE_PCM,
+        };
+
+        let parsed_pcm = unsafe { ParsedWaveFormat::from_raw_ptr(&raw_ext_pcm.format as *const _) }
+            .expect("Deve decodificar");
+        let summary_pcm = parsed_pcm.summary();
+        println!("Formato simulado PCM 32-bit: {}", summary_pcm);
+
+        // Verifica que todos os campos obrigatórios estão presentes no registro
+        assert!(summary_pcm.contains("wFormatTag=0xFFFE"));
+        assert!(summary_pcm.contains("wBitsPerSample=32"));
+        assert!(summary_pcm.contains("nChannels=2"));
+        assert!(summary_pcm.contains("nSamplesPerSec=48000Hz"));
+        assert!(summary_pcm.contains("nBlockAlign=8"));
+        assert!(summary_pcm.contains("cbSize=22"));
+        assert!(summary_pcm.contains("SubFormat="));
+        assert!(summary_pcm.contains("wValidBitsPerSample=Some(24)"));
+
+        // O erro anterior era: "Formato do dispositivo de saída não suportado: 32 bits por amostra"
+        // Agora deve classificar com sucesso como Pcm32Int { valid_bits: 24 }
+        let class_pcm = classify_sample_format(&parsed_pcm).expect("32-bit PCM NÃO deve falhar");
+        assert_eq!(
+            class_pcm,
+            crate::voice::playback::wasapi_format::WasapiSampleClassification::Pcm32Int {
+                valid_bits: 24
+            }
+        );
+
+        // Cenário B: Dispositivo com subformato IEEE Float de 32 bits
+        let mut raw_ext_float = raw_ext_pcm;
+        raw_ext_float.samples = 32;
+        raw_ext_float.sub_format =
+            crate::voice::playback::wasapi_format::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+
+        let parsed_float =
+            unsafe { ParsedWaveFormat::from_raw_ptr(&raw_ext_float.format as *const _) }
+                .expect("Deve decodificar float");
+        let summary_float = parsed_float.summary();
+        println!("Formato simulado Float 32-bit: {}", summary_float);
+
+        assert!(summary_float.contains("wBitsPerSample=32"));
+        assert!(summary_float.contains("KSDATAFORMAT_SUBTYPE_IEEE_FLOAT"));
+
+        let class_float =
+            classify_sample_format(&parsed_float).expect("32-bit Float NÃO deve falhar");
+        assert_eq!(
+            class_float,
+            crate::voice::playback::wasapi_format::WasapiSampleClassification::IeeeFloat32
+        );
+
+        // Conversão de amostras de fala para o formato negociado
+        let speech_samples = vec![1000i16, -2000i16, 3000i16, -4000i16];
+        let pcm_bytes = convert_samples_to_wasapi(&speech_samples, 2, class_pcm);
+        assert_eq!(pcm_bytes.len(), 4 * 2 * 4);
+
+        let float_bytes = convert_samples_to_wasapi(&speech_samples, 2, class_float);
+        assert_eq!(float_bytes.len(), 4 * 2 * 4);
     }
 }

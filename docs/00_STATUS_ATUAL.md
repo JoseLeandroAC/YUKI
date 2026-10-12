@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1.1 — migração para WASAPI Core Audio, seleção estável de microfone/fones e suporte a headset Bluetooth (Redmi Buds 6 Play) concluídos; 579 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 584 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados
+Status geral: Marco 8.1.1 — migração para WASAPI Core Audio, correção pontual do playback WASAPI de 32 bits (Redmi Buds 6 Play) e suporte a headset Bluetooth concluídos; 584 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 589 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -33,7 +33,8 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
   10. **Migração para WASAPI Core Audio Nativo em Rust:** Eliminação definitiva do erro 322 da API MCI (`MCIERR_WAVE_INPUTSUNSUITABLE`) através de streaming COM nativo em memória (`IAudioClient`, `IAudioCaptureClient`), com zero arquivos temporários em disco, downmix multicanal e conversão transparente para o padrão canônico da Yuki (16kHz mono 16-bit PCM);
   11. **Enumeração e Seleção Estável de Dispositivos (`devices.rs`):** Descoberta de todos os endpoints do sistema via WASAPI (`IMMDeviceEnumerator`), permitindo listar (`yuki voice devices [--all]`) e selecionar microfones e alto-falantes/fones específicos por ID, nome exato ou substring (`--input-device`, `--output-device`);
   12. **Suporte a Headset Bluetooth (Redmi Buds 6 Play):** Roteamento dedicado compatível com os perfis Bluetooth HFP (Hands-Free mono bidirecional) e A2DP (estéreo de alta fidelidade), sem conflitos de link de rádio e com fail-closed explicativo caso o fone esteja desligado/desconectado;
-  13. **Suíte Adversarial Expandida:** 71 cenários adversariais aprovados (testes 68, 69, 70 e 71 cobrindo anti-sobreposição, silêncio por construção, integração operacional e seleção de dispositivos fail-closed sem mascaramento mock).
+  13. **Suíte Adversarial Expandida:** 71 cenários adversariais aprovados (testes 68, 69, 70 e 71 cobrindo anti-sobreposição, silêncio por construção, integração operacional e seleção de dispositivos fail-closed sem mascaramento mock);
+  14. **Correção do Playback WASAPI de 32 Bits (Redmi Buds 6 Play):** Módulo `wasapi_format` com layout FFI binário rigoroso (`packed(2)` para `WAVEFORMATEX` 18 bytes e `WAVEFORMATEXTENSIBLE` 40 bytes), suporte formal a `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` e `KSDATAFORMAT_SUBTYPE_PCM`, conversão de amostras para float 32-bit e PCM inteiro MSB-justificado (32-bit, 24-in-32, 24-bit empacotado e 16-bit), registro completo estruturado de `GetMixFormat` e testes unitários e de integração de reprodução.
 
 A situação atual pode ser resumida como:
 

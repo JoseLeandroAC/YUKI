@@ -1403,5 +1403,41 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — migração para WASAPI Core Audio, seleção estável de microfone/fones e suporte a headset Bluetooth (Redmi Buds 6 Play) concluídos."`
 
+---
+
+## 2026-10-12 — Marco 8.1.1: Correção Pontual do Playback WASAPI de 32 Bits (Redmi Buds 6 Play)
+
+- **Contexto e Diagnóstico Operacional**:
+  - Na homologação real no Windows com o headset Redmi Buds 6 Play conectado, a captura WASAPI e a síntese TTS funcionaram com sucesso, gerando `yuki_speech.wav` (~5,53s).
+  - No entanto, a reprodução física direcionada para o fone falhou com o erro:
+    `Formato do dispositivo de saída não suportado: 32 bits por amostra`.
+- **Causa Raiz Identificada**:
+  1. **Desalinhamento da Estrutura FFI (`WAVEFORMATEXTENSIBLE`):** No Windows C ABI (`ksmedia.h`), `WAVEFORMATEX` possui 18 bytes e alinhamento 2. Em Rust, declarar sem `packed(2)` inseria padding de 2 bytes ao final, deslocando o GUID `sub_format` em `WAVEFORMATEXTENSIBLE` em 4 bytes (offset 28 em vez de 24). Como resultado, comparações com GUIDs padrão como `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` sempre falhavam.
+  2. **Tratamento Exclusivo de Float:** O sink assumia que todo formato de 32 bits seria IEEE Float e não tratava `KSDATAFORMAT_SUBTYPE_PCM` em contêineres de 32 bits (`Pcm32Int` e 24 bits em contêiner de 32 bits).
+- **Implementação Conclusiva**:
+  1. **Módulo `wasapi_format` (`src/voice/playback.rs`):**
+     - Estruturas `WAVEFORMATEX` (18 bytes) e `WAVEFORMATEXTENSIBLE` (40 bytes) declaradas com `#[repr(C, packed(2))]`, garantindo paridade binária com o Windows C ABI.
+     - Suporte formal a `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` (`0x00000003`) e `KSDATAFORMAT_SUBTYPE_PCM` (`0x00000001`).
+     - Leitura desacoplada de referências não alinhadas via `std::ptr::read_unaligned` e `ParsedWaveFormat::from_raw_ptr`.
+  2. **Classificação e Conversão de Amostras:**
+     - Enum `WasapiSampleClassification` (`IeeeFloat32`, `Pcm32Int { valid_bits }`, `Pcm24Packed`, `Pcm16`).
+     - Conversão de amostras de fala para IEEE Float 32-bit e PCM inteiro MSB-justificado (`(s as i32) << 16` para contêiner de 32 bits; `(s as i32) << 8` para 24-bit empacotado).
+  3. **Registro Estruturado de Formato:**
+     - `ParsedWaveFormat::summary()` registra explicitamente: `wFormatTag`, `wBitsPerSample`, `nChannels`, `nSamplesPerSec`, `nBlockAlign`, `cbSize`, `SubFormat`, `wValidBitsPerSample` e `dwChannelMask`.
+  4. **Testes Unitários e de Integração:**
+     - 4 testes unitários em `src/voice/playback.rs`: layout FFI, classificação de formatos, conversão de amostras e teste de regressão para o erro de 32 bits do Redmi Buds 6 Play.
+     - 1 teste de integração em `tests/voice_integration.rs`: teste end-to-end com áudio sintetizado em ambos os subtipos de 32 bits (Float e PCM).
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **71/71 testes aprovados**.
+  - **Total de Testes no Workspace:** **584 testes ativos aprovados** (5 testes live opt-in ignorados, totalizando 589 testes; 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — correção pontual do playback WASAPI de 32 bits e suporte a IEEE Float e PCM inteiro em contêineres de 32 bits concluídos com sucesso."`
+
+
 
 
