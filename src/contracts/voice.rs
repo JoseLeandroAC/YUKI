@@ -300,6 +300,9 @@ pub enum VoiceError {
     #[error("Falha na síntese de fala (TTS): {0}")]
     SynthesisFailed(String),
 
+    #[error("Falha na captura de áudio: {0}")]
+    CaptureFailed(String),
+
     #[error("Falha na reprodução de áudio: {0}")]
     PlaybackFailed(String),
 

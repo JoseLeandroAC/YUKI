@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod capture;
 pub mod conversation;
 pub mod playback;
 pub mod router;
@@ -8,6 +9,7 @@ pub mod tts;
 pub mod wakeword;
 
 pub use audio::*;
+pub use capture::*;
 pub use conversation::*;
 pub use playback::*;
 pub use router::*;
@@ -18,3 +20,4 @@ pub use tts::{
     MockTtsProvider, VocalTone, VoiceIdentity,
 };
 pub use wakeword::*;
+

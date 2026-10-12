@@ -118,11 +118,17 @@ pub enum VoiceCommands {
         #[arg(short, long, default_value = "yuki_speech.wav")]
         output: String,
     },
-    /// Transcreve um arquivo de áudio WAV usando STT local
+    /// Transcreve áudio usando STT local (do microfone ou de arquivo WAV)
     Listen {
-        /// Caminho do arquivo de áudio WAV para transcrição
+        /// Caminho do arquivo de áudio WAV para transcrição (se omitido, grava do microfone)
         #[arg(short, long)]
-        file: String,
+        file: Option<String>,
+        /// Força gravação a partir do microfone
+        #[arg(short, long, default_value_t = false)]
+        mic: bool,
+        /// Duração da gravação do microfone em segundos (máximo 30s, padrão: 5s)
+        #[arg(short, long, default_value_t = 5)]
+        seconds: u64,
     },
 }
 
@@ -557,30 +563,93 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 Err(e) => eprintln!("Erro ao sintetizar áudio: {}", e),
             }
         }
-        VoiceCommands::Listen { file } => {
-            let data = match std::fs::read(&file) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("Erro ao ler arquivo '{}': {}", file, e);
+        VoiceCommands::Listen { file, mic, seconds } => {
+            let audio_input = if let (Some(path), false) = (file, mic) {
+                let data = match std::fs::read(&path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Erro ao ler arquivo '{}': {}", path, e);
+                        return;
+                    }
+                };
+                let (format, samples) = match AudioCodec::decode_wav(&data) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("Erro ao decodificar arquivo WAV '{}': {}", path, e);
+                        return;
+                    }
+                };
+                let duration_ms = (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
+                AudioInput::new(data, format, duration_ms, path)
+            } else {
+                use std::sync::Arc;
+                use std::time::Duration;
+                use yuki::voice::capture::{
+                    AudioCaptureBackend, MockCaptureBackend, PushToTalkController,
+                    WindowsAudioCaptureBackend,
+                };
+
+                let duration_sec = seconds.clamp(1, 30);
+                println!(
+                    "Iniciando captura de áudio do microfone por {} segundos...",
+                    duration_sec
+                );
+
+                let backend: Arc<dyn AudioCaptureBackend> = {
+                    #[cfg(windows)]
+                    {
+                        let win = WindowsAudioCaptureBackend::new();
+                        if win.is_device_available() {
+                            Arc::new(win)
+                        } else {
+                            println!("Nenhum microfone físico acessível detectado. Utilizando MockCaptureBackend para diagnóstico.");
+                            Arc::new(MockCaptureBackend::new())
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        Arc::new(MockCaptureBackend::new())
+                    }
+                };
+
+                let ptt = PushToTalkController::new(backend);
+                if let Err(e) = ptt.press() {
+                    eprintln!("Falha ao iniciar captura de microfone: {}", e);
                     return;
                 }
-            };
-            let (format, samples) = match AudioCodec::decode_wav(&data) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Erro ao decodificar arquivo WAV '{}': {}", file, e);
-                    return;
+
+                println!(
+                    "Gravando... Fale com a Yuki agora (tempo máximo: {}s)...",
+                    duration_sec
+                );
+                tokio::time::sleep(Duration::from_secs(duration_sec)).await;
+
+                match ptt.release() {
+                    Ok(input) => {
+                        println!(
+                            "Captura concluída ({} bytes, {}ms).",
+                            input.payload.len(),
+                            input.duration_ms
+                        );
+                        input
+                    }
+                    Err(e) => {
+                        eprintln!("Falha ao encerrar captura de áudio: {}", e);
+                        return;
+                    }
                 }
             };
-            let duration_ms = (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
+
             let stt = LocalWhisperSttProvider::default();
-            println!("Transcrevendo áudio via STT local ({})...", file);
-            let input = AudioInput::new(data, format, duration_ms, file.clone());
-            match stt.transcribe(&input).await {
+            println!(
+                "Transcrevendo áudio via STT local (fonte: {})...",
+                audio_input.source
+            );
+            match stt.transcribe(&audio_input).await {
                 Ok(transcript) => {
                     println!("Transcrição obtida:");
                     println!("\"{}\"", transcript);
-                    println!("Duração: {:.2}s", duration_ms as f64 / 1000.0);
+                    println!("Duração: {:.2}s", audio_input.duration_ms as f64 / 1000.0);
                 }
                 Err(e) => eprintln!("Falha na transcrição: {}", e),
             }
