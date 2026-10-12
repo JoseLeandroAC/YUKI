@@ -1,3 +1,4 @@
+use crate::contracts::identifiers::generate_unique_id;
 use crate::contracts::voice::{
     AudioInput, SpeechToTextProvider, VoiceError, VoiceProviderMetadata, VoiceProviderType,
 };
@@ -201,58 +202,74 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
                 ))
             })?;
 
-            // 4. Cria arquivo temporário atômico para o áudio
+            // 4. Cria arquivo temporário atômico para o áudio com alta entropia
             let temp_dir = std::env::temp_dir();
-            let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", uuid_timestamp()));
+            let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
 
             std::fs::write(&temp_wav_path, &normalized_wav)
                 .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
 
-            // 5. Executa comando com timeout dentro de spawn_blocking
-            let bin_path_clone = bin_path.clone();
-            let model_path_clone = model_path.clone();
-            let lang_clone = self.config.language.clone();
-            let timeout_duration = self.config.timeout;
-            let temp_wav_for_cmd = temp_wav_path.clone();
-
-            let join_handle = tokio::task::spawn_blocking(move || {
-                let mut cmd = std::process::Command::new(bin_path_clone);
-                cmd.arg("-m")
-                    .arg(model_path_clone)
-                    .arg("-f")
-                    .arg(&temp_wav_for_cmd)
-                    .arg("-l")
-                    .arg(&lang_clone)
-                    .arg("--no-timestamps");
-
-                cmd.output()
-            });
-
-            // Limpa o arquivo temporário ao final da execução (Drop)
+            // Limpa o arquivo temporário ao final da execução (Drop garantido)
             struct TempCleaner(PathBuf);
             impl Drop for TempCleaner {
                 fn drop(&mut self) {
                     let _ = std::fs::remove_file(&self.0);
                 }
             }
-            let _cleaner = TempCleaner(temp_wav_path);
+            let _cleaner = TempCleaner(temp_wav_path.clone());
 
-            let output_res = match tokio::time::timeout(timeout_duration, join_handle).await {
-                Ok(join_res) => match join_res {
-                    Ok(cmd_res) => cmd_res.map_err(|e| {
-                        VoiceError::TranscriptionFailed(format!(
-                            "Erro ao executar processo whisper: {}",
-                            e
-                        ))
-                    })?,
-                    Err(join_err) => {
-                        return Err(VoiceError::TranscriptionFailed(format!(
-                            "Falha ao executar thread do whisper: {}",
-                            join_err
-                        )));
-                    }
-                },
+            // 5. Executa processo Whisper de forma assíncrona com controle de timeout e término garantido
+            let timeout_duration = self.config.timeout;
+            let mut child = tokio::process::Command::new(bin_path)
+                .arg("-m")
+                .arg(model_path)
+                .arg("-f")
+                .arg(&temp_wav_path)
+                .arg("-l")
+                .arg(&self.config.language)
+                .arg("--no-timestamps")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    VoiceError::TranscriptionFailed(format!(
+                        "Falha ao iniciar processo whisper: {}",
+                        e
+                    ))
+                })?;
+
+            let mut stdout = child.stdout.take().ok_or_else(|| {
+                VoiceError::TranscriptionFailed("Stdout do processo não capturado".to_string())
+            })?;
+            let mut stderr = child.stderr.take().ok_or_else(|| {
+                VoiceError::TranscriptionFailed("Stderr do processo não capturado".to_string())
+            })?;
+
+            let mut stdout_bytes = Vec::new();
+            let mut stderr_bytes = Vec::new();
+
+            let status_res = tokio::time::timeout(timeout_duration, async {
+                use tokio::io::AsyncReadExt;
+                let read_out = stdout.read_to_end(&mut stdout_bytes);
+                let read_err = stderr.read_to_end(&mut stderr_bytes);
+                let wait_child = child.wait();
+                let (_, _, status) = tokio::try_join!(read_out, read_err, wait_child)?;
+                Ok::<std::process::ExitStatus, std::io::Error>(status)
+            })
+            .await;
+
+            let status = match status_res {
+                Ok(Ok(st)) => st,
+                Ok(Err(e)) => {
+                    return Err(VoiceError::TranscriptionFailed(format!(
+                        "Erro ao aguardar processo whisper: {}",
+                        e
+                    )));
+                }
                 Err(_) => {
+                    // Previne processos órfãos: encerra imediatamente o processo filho
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Err(VoiceError::Timeout(format!(
                         "Reconhecimento de fala excedeu o limite de {:?}",
                         timeout_duration
@@ -260,28 +277,19 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
                 }
             };
 
-            if !output_res.status.success() {
-                let stderr = String::from_utf8_lossy(&output_res.stderr);
+            if !status.success() {
+                let err_msg = String::from_utf8_lossy(&stderr_bytes);
                 return Err(VoiceError::TranscriptionFailed(format!(
                     "Processo whisper finalizou com erro (código {:?}): {}",
-                    output_res.status.code(),
-                    stderr.trim()
+                    status.code(),
+                    err_msg.trim()
                 )));
             }
 
-            let text = String::from_utf8_lossy(&output_res.stdout)
+            let text = String::from_utf8_lossy(&stdout_bytes)
                 .trim()
                 .to_string();
             Ok(text)
         })
     }
-}
-
-fn uuid_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{:x}", ms)
 }

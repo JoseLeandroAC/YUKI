@@ -1,3 +1,4 @@
+use crate::contracts::identifiers::generate_unique_id;
 use crate::contracts::voice::{
     AudioFormat, AudioOutput, TextToSpeechProvider, VoiceConfiguration, VoiceError,
     VoiceProviderMetadata, VoiceProviderType,
@@ -156,40 +157,9 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
             })?;
 
             let temp_dir = std::env::temp_dir();
-            let temp_out = temp_dir.join(format!("yuki_tts_{}.wav", uuid_timestamp()));
+            let temp_out = temp_dir.join(format!("yuki_tts_{}.wav", generate_unique_id("tts")));
 
-            let bin_clone = bin_path.clone();
-            let model_clone = model_path.clone();
-            let temp_out_clone = temp_out.clone();
-            let text_for_cmd = text_owned.clone();
-            let timeout_duration = self.config.timeout;
-
-            let join_handle = tokio::task::spawn_blocking(move || {
-                use std::io::Write;
-                let mut child = std::process::Command::new(bin_clone)
-                    .arg("-m")
-                    .arg(model_clone)
-                    .arg("-f")
-                    .arg(&temp_out_clone)
-                    .arg("--length_scale")
-                    .arg(format!("{:.2}", length_scale))
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("Falha ao iniciar processo piper: {}", e))?;
-
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text_for_cmd.as_bytes());
-                }
-
-                let output = child
-                    .wait_with_output()
-                    .map_err(|e| format!("Falha ao aguardar piper: {}", e))?;
-
-                Ok::<std::process::Output, String>(output)
-            });
-
+            // Limpa o arquivo temporário ao final da execução (Drop garantido)
             struct TempCleaner(PathBuf);
             impl Drop for TempCleaner {
                 fn drop(&mut self) {
@@ -198,28 +168,65 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
             }
             let _cleaner = TempCleaner(temp_out.clone());
 
-            let output_res = match tokio::time::timeout(timeout_duration, join_handle).await {
-                Ok(j_res) => match j_res {
-                    Ok(cmd_res) => cmd_res.map_err(VoiceError::SynthesisFailed)?,
-                    Err(e) => {
-                        return Err(VoiceError::SynthesisFailed(format!(
-                            "Erro na thread de síntese: {}",
-                            e
-                        )));
-                    }
-                },
+            let timeout_duration = self.config.timeout;
+            let mut child = tokio::process::Command::new(bin_path)
+                .arg("-m")
+                .arg(model_path)
+                .arg("-f")
+                .arg(&temp_out)
+                .arg("--length_scale")
+                .arg(format!("{:.2}", length_scale))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    VoiceError::SynthesisFailed(format!("Falha ao iniciar processo piper: {}", e))
+                })?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(text_owned.as_bytes()).await;
+            }
+
+            let mut stderr = child.stderr.take().ok_or_else(|| {
+                VoiceError::SynthesisFailed("Stderr do processo piper não capturado".to_string())
+            })?;
+
+            let mut stderr_bytes = Vec::new();
+
+            let status_res = tokio::time::timeout(timeout_duration, async {
+                use tokio::io::AsyncReadExt;
+                let read_err = stderr.read_to_end(&mut stderr_bytes);
+                let wait_child = child.wait();
+                let (_, status) = tokio::try_join!(read_err, wait_child)?;
+                Ok::<std::process::ExitStatus, std::io::Error>(status)
+            })
+            .await;
+
+            let status = match status_res {
+                Ok(Ok(st)) => st,
+                Ok(Err(e)) => {
+                    return Err(VoiceError::SynthesisFailed(format!(
+                        "Erro ao aguardar processo piper: {}",
+                        e
+                    )));
+                }
                 Err(_) => {
+                    // Previne processos órfãos: encerra imediatamente o processo filho
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Err(VoiceError::Timeout(
                         "Síntese de voz excedeu tempo limite".to_string(),
                     ));
                 }
             };
 
-            if !output_res.status.success() {
-                let stderr = String::from_utf8_lossy(&output_res.stderr);
+            if !status.success() {
+                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
                 return Err(VoiceError::SynthesisFailed(format!(
                     "Piper finalizou com erro: {}",
-                    stderr.trim()
+                    stderr_str.trim()
                 )));
             }
 
@@ -241,10 +248,13 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
     }
 }
 
-/// Sintetizador acústico determinístico soberano embutido na Yuki.
+/// Gerador acústico determinístico soberano de diagnóstico e fallback offline da Yuki.
 ///
-/// Produz formas de onda WAV canônicas com entonação melódica feminina (F0 ~ 210-230 Hz),
-/// permitindo execução e validação completa sem necessidade de dependências C++ ou downloads prévios.
+/// Produz formas de onda WAV canônicas com entonação melódica harmônica feminina (F0 ~ 210-230 Hz),
+/// permitindo execução, diagnóstico de hardware e testes ponta-a-ponta em ambientes sem o motor Piper instalado.
+///
+/// NOTA DE TRANSPARÊNCIA: Este provedor sintetiza tons senoidais puros com envelopes de amplitude
+/// para validação de integridade acústica; não produz fala fonêmica neural inteligível.
 pub struct LocalAcousticTtsProvider {
     metadata: VoiceProviderMetadata,
     sample_rate: u32,
@@ -259,7 +269,7 @@ impl Default for LocalAcousticTtsProvider {
 impl LocalAcousticTtsProvider {
     pub fn new(sample_rate: u32) -> Self {
         let metadata = VoiceProviderMetadata::new(
-            "Yuki-Acoustic-Local",
+            "Yuki-Acoustic-Diagnostic-Fallback",
             VoiceProviderType::LocalEdge,
             vec!["pt-BR".to_string(), "pt".to_string()],
             sample_rate,
@@ -351,13 +361,4 @@ impl TextToSpeechProvider for LocalAcousticTtsProvider {
             ))
         })
     }
-}
-
-fn uuid_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{:x}", ms)
 }
