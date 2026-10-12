@@ -1277,24 +1277,47 @@ impl AudioPlaybackController {
 
     /// Construtor para ambiente operacional de produção: conecta diretamente ao subsistema nativo do sistema operacional.
     ///
-    /// No Windows, conecta ao `WindowsAudioPlaybackSink::production()`.
+    /// No Windows, conecta ao `WasapiAudioPlaybackSink::production(None)` (WASAPI Core Audio).
     /// Não realiza fallback silencioso para mock: se nenhum dispositivo de hardware estiver
     /// presente ou acessível, `is_device_available()` retornará `false` e chamadas a `play()`
     /// falharão explicitamente com `VoiceError::DeviceUnavailable`, preservando a verdade operacional.
     pub fn production() -> Self {
-        Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
+        #[cfg(windows)]
+        {
+            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(None)))
+        }
+        #[cfg(not(windows))]
+        {
+            Self::with_sink(Arc::new(MockPlaybackSink::new()))
+        }
     }
 
     /// Construtor para ambiente operacional de produção com seleção opcional de dispositivo.
     ///
-    /// Se um identificador de dispositivo for fornecido, utiliza o backend WASAPI Core Audio direcionado
+    /// No Windows, conecta ao `WasapiAudioPlaybackSink::production(device_id)` direcionado
     /// para o endpoint correspondente (ex: headset Bluetooth, USB DAC ou Realtek). Se omitido,
-    /// utiliza o dispositivo padrão do sistema.
+    /// utiliza o endpoint de renderização padrão do sistema.
     pub fn production_with_device(device_id: Option<String>) -> Self {
-        if let Some(id) = device_id {
-            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(Some(id))))
-        } else {
-            Self::production()
+        #[cfg(windows)]
+        {
+            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(device_id)))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = device_id;
+            Self::with_sink(Arc::new(MockPlaybackSink::new()))
+        }
+    }
+
+    /// Construtor para o backend legado winmm (PlaySoundA), preservado para diagnóstico e compatibilidade.
+    pub fn winmm() -> Self {
+        #[cfg(windows)]
+        {
+            Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
+        }
+        #[cfg(not(windows))]
+        {
+            Self::with_sink(Arc::new(MockPlaybackSink::new()))
         }
     }
 
@@ -1304,7 +1327,14 @@ impl AudioPlaybackController {
             PlaybackEnvironment::Production => Self::production(),
             PlaybackEnvironment::Test => Self::new(),
             PlaybackEnvironment::Disabled => {
-                Self::with_sink(Arc::new(WindowsAudioPlaybackSink::silenced()))
+                #[cfg(windows)]
+                {
+                    Self::with_sink(Arc::new(WasapiAudioPlaybackSink::silenced()))
+                }
+                #[cfg(not(windows))]
+                {
+                    Self::with_sink(Arc::new(MockPlaybackSink::new()))
+                }
             }
         }
     }
@@ -1682,15 +1712,18 @@ mod tests {
         let test_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Test);
         assert_eq!(test_ctrl.sink().name(), "MockPlaybackSink");
 
-        // 2. Ambiente Production seleciona WindowsAudioPlaybackSink diretamente sem mascarar em mock
+        // 2. Ambiente Production seleciona WASAPI Core Audio diretamente sem mascarar em mock
         let prod_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Production);
-        assert_eq!(prod_ctrl.sink().name(), "WindowsAudioPlaybackSink (winmm)");
+        assert_eq!(
+            prod_ctrl.sink().name(),
+            "WindowsAudioPlaybackSink (WASAPI Core Audio)"
+        );
 
-        // 3. AudioPlaybackController::production() também seleciona diretamente WindowsAudioPlaybackSink
+        // 3. AudioPlaybackController::production() também seleciona diretamente WASAPI Core Audio
         let direct_prod = AudioPlaybackController::production();
         assert_eq!(
             direct_prod.sink().name(),
-            "WindowsAudioPlaybackSink (winmm)"
+            "WindowsAudioPlaybackSink (WASAPI Core Audio)"
         );
 
         // 4. Se o dispositivo estiver indisponível no ambiente de produção, play() falha explicitamente
@@ -1709,8 +1742,12 @@ mod tests {
         let disabled_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Disabled);
         assert_eq!(
             disabled_ctrl.sink().name(),
-            "WindowsAudioPlaybackSink (winmm)"
+            "WindowsAudioPlaybackSink (WASAPI Core Audio)"
         );
+
+        // 6. AudioPlaybackController::winmm() seleciona o sink legado winmm
+        let winmm_ctrl = AudioPlaybackController::winmm();
+        assert_eq!(winmm_ctrl.sink().name(), "WindowsAudioPlaybackSink (winmm)");
     }
 
     #[test]

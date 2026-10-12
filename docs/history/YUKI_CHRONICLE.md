@@ -1438,6 +1438,51 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — correção pontual do playback WASAPI de 32 bits e suporte a IEEE Float e PCM inteiro em contêineres de 32 bits concluídos com sucesso."`
 
+---
+
+## 2026-10-12 — Marco 8.1.1: Preparação do Laboratório Vocal e Integração Whisper + Piper
+
+- **Contexto e Missão**:
+  - Com o subsistema de áudio Windows operando com WASAPI Core Audio tanto para captura (16kHz mono) quanto para reprodução física em fones Bluetooth (IEEE Float 32-bit e PCM), restava unificar a indicação do driver em `voice status`, estruturar a conexão com os motores neurais offline de reconhecimento (Whisper.cpp) e síntese (Piper TTS), e estabelecer a infraestrutura do **Laboratório Yuki Voice** para calibração fonêmica e avaliação auditiva humana.
+- **Implementação Conclusiva**:
+  1. **Unificação do Driver de Reprodução em Produção (`src/voice/playback.rs`):**
+     - `AudioPlaybackController::production()` e `production_with_device()` vinculados diretamente a `WasapiAudioPlaybackSink::production()`, eliminando o fallback involuntário para o sink WinMM.
+     - `voice status` agora exibe com precisão: `Driver de Reprodução: DISPONÍVEL (WindowsAudioPlaybackSink (WASAPI Core Audio))`.
+  2. **Reconhecimento de Fala Local Soberano (Whisper.cpp STT - `src/voice/stt/local.rs`):**
+     - Descoberta automática de binários em `bin/whisper/`, `bin/` ou `PATH`, e de modelos quantizados em `models/whisper/` (`ggml-small.bin`, `ggml-base.bin`, etc.).
+     - Detecção de silêncio acústico pré-inferência (`is_silent_pcm`), evitando invocar o processo Whisper quando não há energia vocal no áudio gravado.
+     - Cronometragem de latência via `Instant::now()` e sanitização da transcrição contra marcadores de tempo e tags especiais (`[BLANK_AUDIO]`).
+     - Instruções transparentes para download manual sem downloads silenciosos em segundo plano.
+  3. **Síntese Neural de Voz Local (Piper TTS - `src/voice/tts/local.rs`):**
+     - Suporte completo aos parâmetros de inferência da Yuki: `--length_scale 1.14` (fala serena ~0.88x), `--noise_scale 0.55` (voz suave/aveludada), `--noise_w 0.70` (estabilidade fonêmica).
+     - Mapeamento e catálogo tipado das 4 vozes oficiais pt-BR da Rhasspy (`pt_BR-faber-medium`, `pt_BR-cadu-medium`, `pt_BR-edresson-low`, `pt_BR-jeff-medium`).
+     - Declaração explícita de transparência ontológica e de gênero: o catálogo oficial upstream possui locutores masculinos; o sistema aceita e expõe automaticamente qualquer modelo ONNX feminino comunitário posicionado em `models/piper/`, ou utiliza o sintetizador harmônico determinístico de diagnóstico F0=220Hz.
+  4. **Laboratório Yuki Voice (`src/voice/lab.rs`):**
+     - 5 frases de teste padronizadas (`saudacao`, `explicacao_tecnica`, `conversa_natural`, `aviso`, `pronuncia`).
+     - Geração e arquivamento de amostras WAV em `data/voice_samples/` com nomenclatura canônica `{voice_id}_{phrase_id}_{timestamp}.wav` e metadados `.meta.json`.
+     - Sistema de avaliação auditiva estruturada (critérios de 1 a 100 para Naturalidade, Tonalidade, Suavidade, Expressividade e Ritmo), gravação atômica em `data/voice_evaluations.json` e confronto direto com as metas do Perfil Vocal Yuki v0.1.
+  5. **Comandos CLI Especializados (`src/main.rs`):**
+     - `yuki voice voices`: catálogo de modelos com status e URLs oficiais.
+     - `yuki voice sample`: geração e audição de amostras específicas com parametrização fina.
+     - `yuki voice compare`: comparação sequencial A/B/C entre modelos disponíveis.
+     - `yuki voice evaluate`: registro estruturado de notas do operador.
+     - `yuki voice profile`: exibição da especificação técnica v0.1 e agregação histórica de avaliações.
+  6. **Testes e Validação:**
+     - 5 novos testes de integração e unitários em `tests/voice_stt_tts.rs` cobrindo silêncio STT, catálogo Piper, frases do laboratório, geração de amostras e persistência de avaliações.
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **71/71 testes aprovados**.
+  - **Total de Testes no Workspace:** **589 testes ativos aprovados** (5 testes live opt-in ignorados, totalizando 594 testes; 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Relatório Oficial de Auditoria:**
+  - `docs/audits/MARCO_8_1_1_VOICE_LAB_WHISPER_PIPER.md`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Preparação do Laboratório Vocal, integração Whisper.cpp + Piper TTS e unificação WASAPI concluídas com 100% dos testes e portões aprovados."`
+
+
 
 
 

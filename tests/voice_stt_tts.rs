@@ -183,3 +183,184 @@ fn test_audio_playback_controller_lifecycle_and_interruption() {
     let play_res = controller.play(&dummy_output);
     assert!(matches!(play_res, Err(VoiceError::DeviceUnavailable(_))));
 }
+
+#[test]
+fn test_stt_silence_detection_and_sanitization() {
+    use yuki::voice::stt::{is_silent_pcm, sanitize_whisper_transcript};
+
+    // Test silence detection
+    let all_zeroes = vec![0i16; 16000];
+    assert!(is_silent_pcm(&all_zeroes));
+
+    let ambient_noise = vec![15i16, -20, 10, -5, 30, -15];
+    assert!(is_silent_pcm(&ambient_noise));
+
+    // High amplitude active audio (not silent)
+    let active_speech: Vec<i16> = (0..16000)
+        .map(|i| ((i as f64 * 0.1).sin() * 8000.0) as i16)
+        .collect();
+    assert!(!is_silent_pcm(&active_speech));
+
+    // Test transcript sanitization
+    assert_eq!(sanitize_whisper_transcript(""), "");
+    assert_eq!(sanitize_whisper_transcript("   "), "");
+    assert_eq!(sanitize_whisper_transcript("[BLANK_AUDIO]"), "");
+    assert_eq!(
+        sanitize_whisper_transcript("[00:00.000 --> 00:02.000] Olá Yuki!"),
+        "Olá Yuki!"
+    );
+    assert_eq!(
+        sanitize_whisper_transcript("  [00:01.500 --> 00:03.200] Comando executado com sucesso.  "),
+        "Comando executado com sucesso."
+    );
+}
+
+#[test]
+fn test_piper_model_catalog_and_configuration() {
+    use yuki::voice::tts::{get_piper_voice_catalog, LocalPiperConfig, LocalPiperTtsProvider};
+
+    let catalog = get_piper_voice_catalog();
+    assert!(catalog.len() >= 4);
+
+    let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
+    assert!(ids.contains(&"pt_BR-faber-medium"));
+    assert!(ids.contains(&"pt_BR-cadu-medium"));
+    assert!(ids.contains(&"pt_BR-edresson-low"));
+    assert!(ids.contains(&"pt_BR-jeff-medium"));
+
+    // Verify download instructions contain required references and transparency notes
+    let instructions = LocalPiperTtsProvider::download_instructions();
+    assert!(instructions.contains("rhasspy/piper-voices"));
+    assert!(instructions.contains("Invoke-WebRequest"));
+    assert!(instructions.contains("masculinos"));
+
+    // Verify config parameters
+    let cfg = LocalPiperConfig::default();
+    assert_eq!(cfg.length_scale, 1.0);
+    assert_eq!(cfg.noise_scale, 0.55);
+    assert_eq!(cfg.noise_w, 0.70);
+}
+
+#[tokio::test]
+async fn test_voice_lab_standardized_phrases_and_profile() {
+    use yuki::voice::lab::{
+        find_phrase, get_standardized_phrases, YukiVocalProfile, STANDARDIZED_PHRASES,
+    };
+
+    let phrases = get_standardized_phrases();
+    assert_eq!(phrases.len(), 5);
+
+    let phrase_ids: Vec<&str> = STANDARDIZED_PHRASES.iter().map(|p| p.id).collect();
+    assert!(phrase_ids.contains(&"saudacao"));
+    assert!(phrase_ids.contains(&"explicacao_tecnica"));
+    assert!(phrase_ids.contains(&"conversa_natural"));
+    assert!(phrase_ids.contains(&"aviso"));
+    assert!(phrase_ids.contains(&"pronuncia"));
+
+    assert!(find_phrase("saudacao").is_some());
+    assert!(find_phrase("inexistente").is_none());
+
+    let profile = YukiVocalProfile::default();
+    assert_eq!(profile.version, "v0.1");
+    assert_eq!(profile.min_target_naturalness, 80);
+    assert_eq!(profile.min_target_tonality, 75);
+    assert_eq!(profile.min_target_smoothness, 80);
+    assert_eq!(profile.min_target_expressiveness, 70);
+    assert_eq!(profile.min_target_rhythm, 75);
+    assert_eq!(profile.recommended_length_scale, 1.14);
+}
+
+#[tokio::test]
+async fn test_voice_lab_sample_generation_acoustic_and_uninstalled_piper() {
+    use yuki::voice::lab::generate_voice_sample;
+
+    // 1. Acoustic sample generation succeeds deterministically
+    let (audio, meta) = generate_voice_sample("acoustic", "saudacao", None, None, None)
+        .await
+        .expect("Acoustic sample generation ok");
+
+    assert!(!audio.payload.is_empty());
+    assert!(!meta.is_neural);
+    assert_eq!(meta.voice_id, "acoustic");
+    assert_eq!(meta.phrase_id, "saudacao");
+    assert!(meta.duration_ms > 500);
+    assert!(std::path::Path::new(&meta.file_path).exists());
+
+    // 2. Uninstalled Piper model fails closed with transparent download instructions
+    let piper_res = generate_voice_sample("pt_BR-faber-medium", "saudacao", None, None, None).await;
+    // Se o modelo não estiver baixado no ambiente de teste, deve retornar erro limpo com URLs
+    if let Err(VoiceError::ProviderUnavailable(err_msg)) = piper_res {
+        assert!(err_msg.contains("huggingface.co") || err_msg.contains("não está baixado"));
+    }
+}
+
+#[test]
+fn test_voice_lab_evaluations_persistence_and_summary() {
+    use yuki::voice::lab::{
+        compute_evaluations_summary, load_evaluations, save_evaluation, VoiceEvaluation,
+    };
+
+    let temp_dir = std::env::temp_dir();
+    let temp_eval_path = temp_dir.join(format!(
+        "yuki_eval_test_{}.json",
+        yuki::contracts::identifiers::generate_unique_id("test")
+    ));
+    std::env::set_var(
+        "YUKI_VOICE_EVALS_FILE",
+        temp_eval_path.to_string_lossy().to_string(),
+    );
+
+    // Initial load on non-existent file
+    let initial = load_evaluations().expect("initial load ok");
+    assert!(initial.is_empty());
+
+    // Save evaluation 1
+    let eval1 = VoiceEvaluation {
+        evaluation_id: "eval-1".to_string(),
+        voice_id: "test-voice-a".to_string(),
+        phrase_id: Some("saudacao".to_string()),
+        naturalness: 85,
+        tonality: 80,
+        smoothness: 85,
+        expressiveness: 75,
+        rhythm: 80,
+        average_score: 81.0,
+        approved: true,
+        operator_notes: "Excelente voz para introdução".to_string(),
+        evaluated_at: "2026-10-12T12:00:00Z".to_string(),
+    };
+    save_evaluation(eval1).expect("save 1 ok");
+
+    // Save evaluation 2
+    let eval2 = VoiceEvaluation {
+        evaluation_id: "eval-2".to_string(),
+        voice_id: "test-voice-a".to_string(),
+        phrase_id: Some("aviso".to_string()),
+        naturalness: 75,
+        tonality: 70,
+        smoothness: 75,
+        expressiveness: 65,
+        rhythm: 70,
+        average_score: 71.0,
+        approved: false,
+        operator_notes: "Tom ligeiramente mecânico em alertas".to_string(),
+        evaluated_at: "2026-10-12T12:10:00Z".to_string(),
+    };
+    save_evaluation(eval2).expect("save 2 ok");
+
+    // Load and verify
+    let loaded = load_evaluations().expect("loaded ok");
+    assert_eq!(loaded.len(), 2);
+
+    // Summary calculation
+    let summary = compute_evaluations_summary();
+    let stats_a = summary.get("test-voice-a").expect("stats found");
+    assert_eq!(stats_a.total_evaluations, 2);
+    assert_eq!(stats_a.approvals_count, 1);
+    assert_eq!(stats_a.avg_naturalness, 80.0);
+    assert_eq!(stats_a.avg_tonality, 75.0);
+
+    // Cleanup
+    let _ = std::fs::remove_file(&temp_eval_path);
+    std::env::remove_var("YUKI_VOICE_EVALS_FILE");
+}

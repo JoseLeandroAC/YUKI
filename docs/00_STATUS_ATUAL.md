@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1.1 — migração para WASAPI Core Audio, correção pontual do playback WASAPI de 32 bits (Redmi Buds 6 Play) e suporte a headset Bluetooth concluídos; 584 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 589 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados
+Status geral: Marco 8.1.1 — Preparação do Laboratório Vocal, integração Whisper.cpp + Piper TTS e unificação WASAPI concluídas; 589 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 594 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -10,7 +10,7 @@ Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança e Migração WASAPI Core Audio)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança, Migração WASAPI Core Audio e Laboratório Vocal)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -20,7 +20,7 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
 - **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
 - **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):** Playback real via `winmm.dll`, captura e PTT no Windows, VAD acústico desacoplado, subprocessos assíncronos sem órfãos, integridade referencial com chaves estrangeiras, concorrência protegida, reconciliação soberana e portão de risco independente;
-- **Marco 8.1.1 (Alinhamento Técnico Final, Hardening Conclusivo, Correção Final de Áudio e WASAPI):**
+- **Marco 8.1.1 (Alinhamento Técnico Final, Hardening Conclusivo, Correção Final de Áudio, WASAPI e Laboratório Vocal):**
   1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos (`getrandom`), comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo/vazio, sanitização estrita de auditoria (zero token vazado em logs) e falha fechada em `grant_approval` legado (SEC-01);
   2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` com `UPDATE` atômico condicional único no SQLite verificando status, expiração e integridade de parâmetros, eliminando janela de corrida para reutilização de autorização humana (SEC-02);
   3. **Máquina de Estados de Aprovação Estrita e Disputa Concorrente:** FSM formal com `can_transition_to` e `is_terminal` em `ApprovalStatus`; transições CAS no SQLite (`transition_approval_status`); resolução estrita de exclusão mútua entre Grant e Deny simultâneos onde exatamente um prevalece e o outro falha de forma limpa;
@@ -34,7 +34,8 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
   11. **Enumeração e Seleção Estável de Dispositivos (`devices.rs`):** Descoberta de todos os endpoints do sistema via WASAPI (`IMMDeviceEnumerator`), permitindo listar (`yuki voice devices [--all]`) e selecionar microfones e alto-falantes/fones específicos por ID, nome exato ou substring (`--input-device`, `--output-device`);
   12. **Suporte a Headset Bluetooth (Redmi Buds 6 Play):** Roteamento dedicado compatível com os perfis Bluetooth HFP (Hands-Free mono bidirecional) e A2DP (estéreo de alta fidelidade), sem conflitos de link de rádio e com fail-closed explicativo caso o fone esteja desligado/desconectado;
   13. **Suíte Adversarial Expandida:** 71 cenários adversariais aprovados (testes 68, 69, 70 e 71 cobrindo anti-sobreposição, silêncio por construção, integração operacional e seleção de dispositivos fail-closed sem mascaramento mock);
-  14. **Correção do Playback WASAPI de 32 Bits (Redmi Buds 6 Play):** Módulo `wasapi_format` com layout FFI binário rigoroso (`packed(2)` para `WAVEFORMATEX` 18 bytes e `WAVEFORMATEXTENSIBLE` 40 bytes), suporte formal a `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` e `KSDATAFORMAT_SUBTYPE_PCM`, conversão de amostras para float 32-bit e PCM inteiro MSB-justificado (32-bit, 24-in-32, 24-bit empacotado e 16-bit), registro completo estruturado de `GetMixFormat` e testes unitários e de integração de reprodução.
+  14. **Correção do Playback WASAPI de 32 Bits (Redmi Buds 6 Play):** Módulo `wasapi_format` com layout FFI binário rigoroso (`packed(2)` para `WAVEFORMATEX` 18 bytes e `WAVEFORMATEXTENSIBLE` 40 bytes), suporte formal a `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` e `KSDATAFORMAT_SUBTYPE_PCM`, conversão de amostras para float 32-bit e PCM inteiro MSB-justificado (32-bit, 24-in-32, 24-bit empacotado e 16-bit), registro completo estruturado de `GetMixFormat` e testes unitários e de integração de reprodução;
+  15. **Laboratório Vocal e Integração Whisper + Piper:** Unificação do driver de reprodução operacional para WASAPI (`WasapiAudioPlaybackSink` exibido em `voice status`), descoberta local de binários/modelos Whisper.cpp e Piper TTS, detecção inteligente de silêncio acústico pré-transcrição, suporte aos parâmetros de inferência (`length_scale = 1.14`, `noise_scale = 0.55`, `noise_w = 0.70`), catálogo tipado de vozes pt-BR com transparência honesta de gênero, 5 frases padronizadas de calibração, armazenamento canônico de amostras em `data/voice_samples/`, persistência atômica de avaliações em `data/voice_evaluations.json` e 5 novos comandos CLI (`voices`, `sample`, `compare`, `evaluate`, `profile`).
 
 A situação atual pode ser resumida como:
 
@@ -52,7 +53,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-579 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 584 TESTES; 71/71 ADVERSARIAIS)
+589 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 594 TESTES; 71/71 ADVERSARIAIS)
 
 ---
 

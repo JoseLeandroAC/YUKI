@@ -2463,7 +2463,7 @@ async fn test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagaca
     let prod_controller = AudioPlaybackController::production();
     assert_eq!(
         prod_controller.sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
     prod_controller.set_device_available(false);
 
@@ -2502,7 +2502,7 @@ async fn test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagaca
     );
     assert_eq!(
         prod_coord.playback().sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     let env_prod_coord = VoiceConversationCoordinator::for_environment(
@@ -2515,7 +2515,7 @@ async fn test_70_integracao_operacional_de_audio_selecao_de_ambiente_e_propagaca
     );
     assert_eq!(
         env_prod_coord.playback().sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     // 3. Invariante: VoiceConversationCoordinator propaga falha de playback sem mascaramento

@@ -247,13 +247,13 @@ async fn test_voice_runtime_environment_selection_and_coordinator_wiring() {
     let prod_controller = AudioPlaybackController::production();
     assert_eq!(
         prod_controller.sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     let prod_env_ctrl = AudioPlaybackController::for_environment(PlaybackEnvironment::Production);
     assert_eq!(
         prod_env_ctrl.sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     // 2. A configuração de testes seleciona o mock
@@ -288,7 +288,7 @@ async fn test_voice_runtime_environment_selection_and_coordinator_wiring() {
     );
     assert_eq!(
         prod_coord.playback().sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     // Instanciação com for_test()
@@ -313,7 +313,7 @@ async fn test_voice_runtime_environment_selection_and_coordinator_wiring() {
     );
     assert_eq!(
         env_prod_coord.playback().sink().name(),
-        "WindowsAudioPlaybackSink (winmm)"
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
     );
 
     let env_test_coord = VoiceConversationCoordinator::for_environment(
@@ -449,7 +449,10 @@ fn test_production_backend_without_device_fails_closed_without_mock_masquerade()
 
     // 7. A ausência de dispositivo não é relatada como reprodução física bem-sucedida
     let prod_ctrl = AudioPlaybackController::production();
-    assert_eq!(prod_ctrl.sink().name(), "WindowsAudioPlaybackSink (winmm)");
+    assert_eq!(
+        prod_ctrl.sink().name(),
+        "WindowsAudioPlaybackSink (WASAPI Core Audio)"
+    );
 
     // Força indisponibilidade de dispositivo para testar invariante de segurança
     prod_ctrl.set_device_available(false);

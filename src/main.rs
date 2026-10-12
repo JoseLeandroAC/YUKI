@@ -163,6 +163,76 @@ pub enum VoiceCommands {
         #[arg(short, long, default_value_t = false)]
         play: bool,
     },
+    /// Lista os modelos de voz suportados (catálogo oficial pt-BR e modelos locais detectados)
+    Voices,
+    /// Gera uma amostra de teste no Laboratório Vocal para calibração e análise auditiva
+    Sample {
+        /// ID do modelo de voz (ex: "pt_BR-faber-medium", "acoustic")
+        #[arg(short, long, default_value = "acoustic")]
+        voice: String,
+        /// ID da frase padronizada (saudacao, explicacao_tecnica, conversa_natural, aviso, pronuncia)
+        #[arg(long, default_value = "saudacao")]
+        phrase: String,
+        /// Reproduz fisicamente a amostra no dispositivo de áudio
+        #[arg(long, default_value_t = false)]
+        play: bool,
+        /// Identificador ou nome do dispositivo de saída para reprodução (opcional)
+        #[arg(long)]
+        output_device: Option<String>,
+        /// Fator de escala de duração/cadência (ex: 1.14)
+        #[arg(long)]
+        length_scale: Option<f32>,
+        /// Escala de variabilidade fonêmica (ex: 0.55)
+        #[arg(long)]
+        noise_scale: Option<f32>,
+        /// Peso de estabilidade fonêmica (ex: 0.70)
+        #[arg(long)]
+        noise_w: Option<f32>,
+    },
+    /// Gera amostras comparativas da mesma frase padronizada entre os modelos de voz disponíveis
+    Compare {
+        /// ID da frase padronizada (saudacao, explicacao_tecnica, conversa_natural, aviso, pronuncia)
+        #[arg(long, default_value = "saudacao")]
+        phrase: String,
+        /// Reproduz fisicamente cada amostra sequencialmente no dispositivo de áudio
+        #[arg(long, default_value_t = false)]
+        play: bool,
+        /// Identificador ou nome do dispositivo de saída para reprodução (opcional)
+        #[arg(long)]
+        output_device: Option<String>,
+    },
+    /// Registra uma avaliação estruturada de qualidade e naturalidade vocal no histórico
+    Evaluate {
+        /// ID da voz avaliada (ex: pt_BR-faber-medium, acoustic)
+        #[arg(short, long)]
+        voice: String,
+        /// ID da frase avaliada (saudacao, explicacao_tecnica, etc.)
+        #[arg(long)]
+        phrase: Option<String>,
+        /// Pontuação de Naturalidade fonêmica (1 a 100)
+        #[arg(long)]
+        naturalness: u8,
+        /// Pontuação de Tonalidade/Timbre (1 a 100)
+        #[arg(long)]
+        tonality: u8,
+        /// Pontuação de Suavidade melódica (1 a 100)
+        #[arg(long)]
+        smoothness: u8,
+        /// Pontuação de Expressividade/Empatia (1 a 100)
+        #[arg(long)]
+        expressiveness: u8,
+        /// Pontuação de Ritmo e Cadência (1 a 100)
+        #[arg(long)]
+        rhythm: u8,
+        /// Marca a voz como aprovada para operação padrão da Yuki
+        #[arg(long, default_value_t = false)]
+        approved: bool,
+        /// Comentários e observações qualitativas do operador
+        #[arg(long, default_value = "")]
+        notes: String,
+    },
+    /// Exibe o Perfil Vocal da Yuki (especificação v0.1, parâmetros recomendados e estatísticas de avaliações)
+    Profile,
 }
 
 #[tokio::main]
@@ -1058,6 +1128,418 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     }
                 }
                 Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
+            }
+        }
+        VoiceCommands::Voices => {
+            use yuki::voice::stt::{list_local_whisper_models, LocalWhisperSttProvider};
+            use yuki::voice::tts::{get_piper_voice_catalog, LocalPiperTtsProvider};
+
+            println!("=== Catálogo de Modelos de Voz da Yuki (STT e TTS) ===");
+            println!("\n--- Síntese Neural de Voz (Piper TTS) ---");
+            let piper_catalog = get_piper_voice_catalog();
+            for model in &piper_catalog {
+                let status_str = if model.is_installed {
+                    format!(
+                        "[INSTALADO] ({})",
+                        model
+                            .local_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    )
+                } else {
+                    "[NÃO BAIXADO]".to_string()
+                };
+                println!(
+                    "• ID: {} | {} ({})",
+                    model.id, model.name, model.speaker_gender
+                );
+                println!("  Status:       {}", status_str);
+                println!(
+                    "  Amostragem:   {}Hz | Qualidade: {}",
+                    model.sample_rate, model.quality
+                );
+                println!("  Descrição:    {}", model.description);
+                if !model.is_installed && !model.download_onnx_url.is_empty() {
+                    println!("  Download ONNX: {}", model.download_onnx_url);
+                    println!("  Download JSON: {}", model.download_json_url);
+                }
+                println!();
+            }
+
+            println!("--- Sintetizador Acústico Embarcado (Fallback de Diagnóstico) ---");
+            println!("• ID: acoustic | Sintetizador Harmônico Determinístico");
+            println!("  Status:       [DISPONÍVEL] (Embarcado no binário)");
+            println!("  Amostragem:   16000Hz | Tom: Feminino afável (~220Hz)");
+            println!("  Descrição:    Sintetizador melódico puro para diagnóstico de hardware e testes sem dependências.\n");
+
+            println!("--- Reconhecimento de Fala (Whisper STT Local) ---");
+            let whisper_models = list_local_whisper_models();
+            if whisper_models.is_empty() {
+                println!("  Nenhum modelo .bin do Whisper detectado em ./models/whisper/.");
+            } else {
+                for m in &whisper_models {
+                    println!("• Modelo local: {}", m.display());
+                }
+            }
+
+            println!("\n--- Instruções de Download e Instalação (Sem Downloads Silenciosos) ---");
+            println!("{}", LocalPiperTtsProvider::download_instructions());
+            println!("\n{}", LocalWhisperSttProvider::installation_instructions());
+        }
+        VoiceCommands::Sample {
+            voice,
+            phrase,
+            play,
+            output_device,
+            length_scale,
+            noise_scale,
+            noise_w,
+        } => {
+            use yuki::voice::lab::{find_phrase, generate_voice_sample};
+
+            println!("=== Laboratório Yuki Voice — Geração de Amostra ===");
+            if let Some(p) = find_phrase(&phrase) {
+                println!("Frase selecionada [{}]: \"{}\"", p.id, p.text);
+            } else {
+                println!("Frase customizada/ID: \"{}\"", phrase);
+            }
+            println!("Voz alvo: {}", voice);
+
+            match generate_voice_sample(&voice, &phrase, length_scale, noise_scale, noise_w).await {
+                Ok((audio_out, meta)) => {
+                    println!("\n✓ Amostra gerada com sucesso!");
+                    println!("ID da Amostra:     {}", meta.sample_id);
+                    println!("Arquivo WAV:       {}", meta.file_path);
+                    println!(
+                        "Duração:           {:.2}s ({} ms)",
+                        meta.duration_ms as f64 / 1000.0,
+                        meta.duration_ms
+                    );
+                    println!(
+                        "Formato:           {}Hz, {} canais, {} bits",
+                        meta.sample_rate, meta.channels, audio_out.format.bits_per_sample
+                    );
+                    println!(
+                        "Parâmetros:        length_scale={:.2}, noise_scale={:.2}, noise_w={:.2}",
+                        meta.length_scale, meta.noise_scale, meta.noise_w
+                    );
+                    println!(
+                        "Tipo de motor:     {}",
+                        if meta.is_neural {
+                            "Neural (Piper ONNX)"
+                        } else {
+                            "Acústico de Diagnóstico (Harmônico F0=220Hz)"
+                        }
+                    );
+
+                    if play {
+                        let target_device_id = if let Some(ref dev_query) = output_device {
+                            match find_device(dev_query, AudioDeviceFlow::Output) {
+                                Ok(dev) => Some(dev.id),
+                                Err(e) => {
+                                    eprintln!(
+                                        "Falha ao resolver dispositivo de saída '{}': {}",
+                                        dev_query, e
+                                    );
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        let playback =
+                            AudioPlaybackController::production_with_device(target_device_id);
+                        if !playback.is_device_available() {
+                            eprintln!(
+                                "Aviso: Nenhum dispositivo de áudio físico disponível para reprodução."
+                            );
+                        } else {
+                            println!(
+                                "Reproduzindo amostra no dispositivo ({}) ...",
+                                playback.sink().name()
+                            );
+                            if let Err(e) = playback.play(&audio_out) {
+                                eprintln!("Erro na reprodução física: {}", e);
+                            } else {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    audio_out.duration_ms.max(100),
+                                ))
+                                .await;
+                                println!("Reprodução concluída.");
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Erro ao gerar amostra: {}", e),
+            }
+        }
+        VoiceCommands::Compare {
+            phrase,
+            play,
+            output_device,
+        } => {
+            use yuki::voice::lab::{find_phrase, generate_voice_sample};
+            use yuki::voice::tts::get_piper_voice_catalog;
+
+            println!("=== Laboratório Yuki Voice — Comparação Multi-Voz ===");
+            let phrase_text = find_phrase(&phrase).map(|p| p.text).unwrap_or(&phrase);
+            println!("Frase de teste [{}]: \"{}\"\n", phrase, phrase_text);
+
+            let mut candidates: Vec<String> = vec!["acoustic".to_string()];
+            let catalog = get_piper_voice_catalog();
+            for model in catalog {
+                if model.is_installed {
+                    candidates.push(model.id);
+                }
+            }
+
+            println!(
+                "Vozes disponíveis para comparação: {} candidato(s)",
+                candidates.len()
+            );
+
+            let mut results = Vec::new();
+            for cand in &candidates {
+                println!("Gerando amostra para voz '{}'...", cand);
+                match generate_voice_sample(cand, &phrase, None, None, None).await {
+                    Ok((audio_out, meta)) => {
+                        results.push((cand.clone(), audio_out, meta));
+                    }
+                    Err(e) => {
+                        eprintln!("  Falha na voz '{}': {}", cand, e);
+                    }
+                }
+            }
+
+            println!("\n--- Tabela Comparativa de Amostras ---");
+            println!(
+                "{:<24} | {:<10} | {:<8} | {:<32}",
+                "Voz", "Duração", "Tipo", "Caminho"
+            );
+            println!("{:-<24}-+-{:-<10}-+-{:-<8}-+-{:-<32}", "", "", "", "");
+            for (voice_name, _, meta) in &results {
+                println!(
+                    "{:<24} | {:<9.2}s | {:<8} | {}",
+                    voice_name,
+                    meta.duration_ms as f64 / 1000.0,
+                    if meta.is_neural {
+                        "Neural"
+                    } else {
+                        "Acústico"
+                    },
+                    meta.file_path
+                );
+            }
+
+            if play && !results.is_empty() {
+                let target_device_id = if let Some(ref dev_query) = output_device {
+                    match find_device(dev_query, AudioDeviceFlow::Output) {
+                        Ok(dev) => Some(dev.id),
+                        Err(e) => {
+                            eprintln!("Falha ao resolver dispositivo de saída: {}", e);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let playback = AudioPlaybackController::production_with_device(target_device_id);
+                if playback.is_device_available() {
+                    println!("\nIniciando audição sequencial comparativa...");
+                    for (name, audio_out, _) in &results {
+                        println!("▶ Reproduzindo voz '{}'...", name);
+                        let _ = playback.play(audio_out);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            audio_out.duration_ms.max(100) + 600,
+                        ))
+                        .await;
+                    }
+                    println!("Audição comparativa finalizada.");
+                }
+            }
+        }
+        VoiceCommands::Evaluate {
+            voice,
+            phrase,
+            naturalness,
+            tonality,
+            smoothness,
+            expressiveness,
+            rhythm,
+            approved,
+            notes,
+        } => {
+            use yuki::contracts::identifiers::generate_unique_id;
+            use yuki::voice::lab::{save_evaluation, VoiceEvaluation, YukiVocalProfile};
+
+            if naturalness > 100
+                || tonality > 100
+                || smoothness > 100
+                || expressiveness > 100
+                || rhythm > 100
+            {
+                eprintln!("Erro: Todas as pontuações devem estar entre 1 e 100.");
+                return;
+            }
+
+            let avg = (naturalness as f32
+                + tonality as f32
+                + smoothness as f32
+                + expressiveness as f32
+                + rhythm as f32)
+                / 5.0;
+            let now = yuki::contracts::identifiers::now_utc().to_rfc3339();
+
+            let eval = VoiceEvaluation {
+                evaluation_id: generate_unique_id("eval"),
+                voice_id: voice.clone(),
+                phrase_id: phrase,
+                naturalness,
+                tonality,
+                smoothness,
+                expressiveness,
+                rhythm,
+                average_score: avg,
+                approved,
+                operator_notes: notes.clone(),
+                evaluated_at: now,
+            };
+
+            match save_evaluation(eval.clone()) {
+                Ok(_) => {
+                    println!("=== Avaliação de Voz Registrada com Sucesso ===");
+                    println!("ID da Avaliação:   {}", eval.evaluation_id);
+                    println!("Voz Avaliada:      {}", eval.voice_id);
+                    println!(
+                        "Frase Avaliada:    {}",
+                        eval.phrase_id.as_deref().unwrap_or("Todas / Geral")
+                    );
+                    println!("Naturalidade:      {}/100", eval.naturalness);
+                    println!("Tonalidade:        {}/100", eval.tonality);
+                    println!("Suavidade:         {}/100", eval.smoothness);
+                    println!("Expressividade:    {}/100", eval.expressiveness);
+                    println!("Ritmo/Cadência:    {}/100", eval.rhythm);
+                    println!("Média Geral:       {:.1}/100", eval.average_score);
+                    println!(
+                        "Aprovada para Uso: {}",
+                        if eval.approved {
+                            "SIM (Recomendada)"
+                        } else {
+                            "NÃO (Reprovada / Requer Ajuste)"
+                        }
+                    );
+                    if !notes.is_empty() {
+                        println!("Observações:       \"{}\"", notes);
+                    }
+
+                    let profile = YukiVocalProfile::default();
+                    println!("\n--- Confronto com Metas do Perfil Yuki v0.1 ---");
+                    let check_nat = if eval.naturalness >= profile.min_target_naturalness {
+                        "✓ OK"
+                    } else {
+                        "✗ Abaixo da meta (>= 80)"
+                    };
+                    let check_ton = if eval.tonality >= profile.min_target_tonality {
+                        "✓ OK"
+                    } else {
+                        "✗ Abaixo da meta (>= 75)"
+                    };
+                    let check_smo = if eval.smoothness >= profile.min_target_smoothness {
+                        "✓ OK"
+                    } else {
+                        "✗ Abaixo da meta (>= 80)"
+                    };
+                    let check_exp = if eval.expressiveness >= profile.min_target_expressiveness {
+                        "✓ OK"
+                    } else {
+                        "✗ Abaixo da meta (>= 70)"
+                    };
+                    let check_rhy = if eval.rhythm >= profile.min_target_rhythm {
+                        "✓ OK"
+                    } else {
+                        "✗ Abaixo da meta (>= 75)"
+                    };
+                    println!("• Naturalidade:    {}", check_nat);
+                    println!("• Tonalidade:      {}", check_ton);
+                    println!("• Suavidade:       {}", check_smo);
+                    println!("• Expressividade:  {}", check_exp);
+                    println!("• Ritmo/Cadência:  {}", check_rhy);
+                }
+                Err(e) => eprintln!("Erro ao persistir avaliação: {}", e),
+            }
+        }
+        VoiceCommands::Profile => {
+            use yuki::voice::lab::{compute_evaluations_summary, YukiVocalProfile};
+
+            let profile = YukiVocalProfile::default();
+            println!("=== Perfil Vocal da Yuki — Especificação Técnica v0.1 ===");
+            println!("Versão da Identidade:   {}", profile.version);
+            println!("Identidade Alvo:        {}", profile.target_identity);
+            println!("F0 (Freq. Fundamental): {}", profile.target_f0_hz);
+            println!("Cadência e Ritmo:       {}", profile.target_cadence);
+            println!("\nParâmetros Recomendados de Inferência (Piper):");
+            println!(
+                "• length_scale:         {:.2} (velocidade serena ~0.88x)",
+                profile.recommended_length_scale
+            );
+            println!(
+                "• noise_scale:          {:.2} (redução de ruído e tom mais suave)",
+                profile.recommended_noise_scale
+            );
+            println!(
+                "• noise_w:              {:.2} (estabilidade fonêmica)",
+                profile.recommended_noise_w
+            );
+
+            println!("\nMetas Mínimas de Qualidade (Escala 1-100):");
+            println!(
+                "• Naturalidade:         >= {}",
+                profile.min_target_naturalness
+            );
+            println!("• Tonalidade:           >= {}", profile.min_target_tonality);
+            println!(
+                "• Suavidade:            >= {}",
+                profile.min_target_smoothness
+            );
+            println!(
+                "• Expressividade:       >= {}",
+                profile.min_target_expressiveness
+            );
+            println!("• Ritmo/Cadência:       >= {}", profile.min_target_rhythm);
+
+            println!("\nMapeamento de Modelos Candidatos:");
+            println!("• Candidata A: pt_BR-faber-medium   (Oficial Rhasspy, locutor masculino, alta clareza)");
+            println!("• Candidata B: pt_BR-cadu-medium    (Oficial Rhasspy, locutor masculino, coloquial)");
+            println!("• Candidata C: pt_BR-edresson-low   (Oficial Rhasspy, locutor masculino, ultraleve)");
+            println!("• Diagnóstico: acoustic             (Embarcado, harmônico determinístico F0=220Hz)");
+
+            println!("\nNota de Transparência sobre Gênero e Voz Feminina:");
+            println!("O catálogo upstream oficial da Rhasspy para pt-BR possui modelos exclusivamente masculinos.");
+            println!("Para utilizar voz feminina neural nativa:");
+            println!("1. Posicione modelo comunitário ONNX pt-BR feminino em ./models/piper/");
+            println!("2. Ou aguarde treinamento / fine-tuning dedicado com dataset da Yuki (planejado para Marco 9+)");
+
+            let summaries = compute_evaluations_summary();
+            println!(
+                "\n--- Histórico de Avaliações Registradas ({}) ---",
+                summaries.len()
+            );
+            if summaries.is_empty() {
+                println!("  Nenhuma avaliação registrada ainda. Use 'yuki voice evaluate' após testar as amostras.");
+            } else {
+                for (voice_id, stat) in summaries {
+                    println!(
+                        "• Voz: {} ({} avaliações, {} aprovações)",
+                        voice_id, stat.total_evaluations, stat.approvals_count
+                    );
+                    println!(
+                        "  Média Geral: {:.1}/100 | Nat: {:.1} | Ton: {:.1} | Suav: {:.1} | Exp: {:.1} | Rit: {:.1}",
+                        stat.avg_overall, stat.avg_naturalness, stat.avg_tonality, stat.avg_smoothness, stat.avg_expressiveness, stat.avg_rhythm
+                    );
+                }
             }
         }
     }
