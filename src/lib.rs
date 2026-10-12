@@ -11,6 +11,7 @@ pub mod personality;
 pub mod security;
 pub mod verification;
 pub mod voice;
+pub mod missions;
 
 pub use contracts::*;
 pub use core::*;
