@@ -210,6 +210,36 @@ pub enum ApprovalStatus {
     Consumed,
 }
 
+impl ApprovalStatus {
+    /// Determina se o estado é terminal (imutável).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Denied | Self::Expired | Self::Consumed)
+    }
+
+    /// Valida se a transição para o próximo estado é ontologicamente e arquiteturalmente permitida.
+    ///
+    /// Transições permitidas:
+    /// - Pending -> Granted, Denied, Expired
+    /// - Granted -> Consumed, Expired
+    ///
+    /// Estados terminais (Denied, Expired, Consumed) NUNCA podem transicionar para nenhum outro estado.
+    pub fn can_transition_to(&self, next: &ApprovalStatus) -> bool {
+        match (self, next) {
+            (ApprovalStatus::Pending, ApprovalStatus::Granted) => true,
+            (ApprovalStatus::Pending, ApprovalStatus::Denied) => true,
+            (ApprovalStatus::Pending, ApprovalStatus::Expired) => true,
+            (ApprovalStatus::Granted, ApprovalStatus::Consumed) => true,
+            (ApprovalStatus::Granted, ApprovalStatus::Expired) => true,
+            // Nenhuma transição é permitida a partir de estados terminais
+            (ApprovalStatus::Consumed, _) => false,
+            (ApprovalStatus::Denied, _) => false,
+            (ApprovalStatus::Expired, _) => false,
+            // Nenhuma outra transição é permitida
+            _ => false,
+        }
+    }
+}
+
 /// Registro estrito de aprovação humana vinculada.
 ///
 /// INVARIANTE INEGOCIÁVEL:

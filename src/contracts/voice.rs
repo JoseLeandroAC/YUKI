@@ -93,7 +93,7 @@ impl AudioInput {
 }
 
 /// Áudio de saída gerado por síntese (TTS).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioOutput {
     pub payload: Vec<u8>,
     pub format: AudioFormat,

@@ -101,8 +101,11 @@ impl MissionApprovalManager {
         }
 
         if crate::contracts::identifiers::now_utc() > approval.expires_at {
-            self.store
-                .update_approval_status(approval_id, ApprovalStatus::Expired)?;
+            let _ = self.store.transition_approval_status(
+                approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Expired,
+            );
             return Err(MissionError::ApprovalExpired(format!(
                 "Aprovação '{}' expirou em {}",
                 approval_id, approval.expires_at
@@ -116,29 +119,51 @@ impl MissionApprovalManager {
             )));
         }
 
-        // Validação estrita e obrigatória do token de confirmação
-        if let Some(expected_token) = &approval.confirmation_token {
-            let provided = match auth_token {
-                Some(t) if !t.trim().is_empty() => t.trim(),
-                _ => {
-                    return Err(MissionError::ApprovalMismatch(format!(
-                        "Aprovação '{}' requer token de confirmação de segurança obrigatório",
-                        approval_id
-                    )));
-                }
-            };
-
-            if !constant_time_eq(provided, expected_token) {
+        // Validação estrita e obrigatória do token de confirmação (fail-closed contra aprovações legadas sem token)
+        let expected_token = match &approval.confirmation_token {
+            Some(t) => t,
+            None => {
                 return Err(MissionError::ApprovalMismatch(format!(
-                    "Token de confirmação inválido para a aprovação '{}'",
+                    "Aprovação legada '{}' não possui token de confirmação criptográfico e não pode ser concedida por segurança (fail-closed)",
                     approval_id
                 )));
             }
+        };
+
+        let provided = match auth_token {
+            Some(t) if !t.trim().is_empty() => t.trim(),
+            _ => {
+                return Err(MissionError::ApprovalMismatch(format!(
+                    "Aprovação '{}' requer token de confirmação de segurança obrigatório",
+                    approval_id
+                )));
+            }
+        };
+
+        if !constant_time_eq(provided, expected_token) {
+            return Err(MissionError::ApprovalMismatch(format!(
+                "Token de confirmação inválido para a aprovação '{}'",
+                approval_id
+            )));
         }
 
-        approval.status = ApprovalStatus::Granted;
+        // Concessão atômica sob CAS garantindo que não houve concorrência ou negação paralela
         self.store
-            .update_approval_status(approval_id, ApprovalStatus::Granted)?;
+            .transition_approval_status(
+                approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Granted,
+            )
+            .map_err(|e| match e {
+                MissionError::InvalidStateTransition { from, to } => {
+                    MissionError::ApprovalMismatch(format!(
+                        "Transição de status de aprovação inválida: de '{}' para '{}'",
+                        from, to
+                    ))
+                }
+                other => other,
+            })?;
+        approval.status = ApprovalStatus::Granted;
 
         // Emite evento de auditoria MissionApprovalGranted
         self.record_audit(
@@ -186,9 +211,23 @@ impl MissionApprovalManager {
             )));
         }
 
-        approval.status = ApprovalStatus::Denied;
+        // Negação atômica sob CAS
         self.store
-            .update_approval_status(approval_id, ApprovalStatus::Denied)?;
+            .transition_approval_status(
+                approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Denied,
+            )
+            .map_err(|e| match e {
+                MissionError::InvalidStateTransition { from, to } => {
+                    MissionError::ApprovalMismatch(format!(
+                        "Transição de status de aprovação inválida: de '{}' para '{}'",
+                        from, to
+                    ))
+                }
+                other => other,
+            })?;
+        approval.status = ApprovalStatus::Denied;
 
         // Emite evento de auditoria MissionApprovalDenied
         self.record_audit(

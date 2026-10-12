@@ -334,9 +334,8 @@ impl MissionRunner {
             // Valida e renova o lease persistente com fencing token antes de executar o passo
             self.store
                 .verify_mission_lease(&mission.id, &self.runner_id, fence_token)?;
-            let _ = self
-                .store
-                .renew_mission_lease(&mission.id, &self.runner_id, fence_token, 300);
+            self.store
+                .renew_mission_lease(&mission.id, &self.runner_id, fence_token, 300)?;
 
             // Executa o passo sob fence token
             self.execute_step(&mut mission, &next_step, fence_token)

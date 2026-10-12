@@ -17,7 +17,7 @@ use yuki::missions::runner::MissionRunner;
 use yuki::missions::store::SqliteMissionStore;
 use yuki::verification::verifier::Verifier;
 use yuki::voice::audio::AudioCodec;
-use yuki::voice::playback::{AudioPlaybackController, PlaybackStatus};
+use yuki::voice::playback::{AudioPlaybackController, AudioPlaybackSink, PlaybackStatus};
 use yuki::voice::router::GovernedVoiceRouter;
 use yuki::voice::session::VoiceSessionManager;
 use yuki::voice::stt::mock::MockSttProvider;
@@ -1988,4 +1988,369 @@ fn test_62_ciclo_de_vida_de_playback_com_transicao_para_completed_e_failed() {
     let fail_res = controller.play(&output);
     assert!(fail_res.is_err());
     assert_eq!(controller.status(), PlaybackStatus::Failed);
+}
+
+#[test]
+fn test_63_disputa_de_lease_bloqueio_ativo_recuperacao_pos_expiracao_e_fencing_token_invalido() {
+    let store = SqliteMissionStore::open_in_memory().unwrap();
+    let mission_id = "mission_lease_exp_test";
+
+    let step = MissionStep::new(
+        "step_lease_1",
+        mission_id,
+        1,
+        "Passo de teste de expiração de lease",
+        Some("system.echo".to_string()),
+        serde_json::json!({}),
+        false,
+        vec![],
+    );
+    let mission = MissionPlanner::default()
+        .create_mission(
+            mission_id,
+            "Lease Expiration Test",
+            "Test description",
+            "op",
+            "corr",
+            MissionPlan::new(vec![step.clone()]),
+            None,
+        )
+        .unwrap();
+    store.create_mission(&mission).unwrap();
+    store.save_step(&step).unwrap();
+
+    // 1. Worker 1 adquire lease com TTL curto de 1 segundo
+    let fence_1 = store
+        .acquire_mission_lease(mission_id, "worker_1", 1)
+        .unwrap();
+    assert_eq!(fence_1, 1);
+
+    // 2. Worker 2 tenta adquirir imediatamente enquanto lease está ativa: rejeitado
+    let conflict = store.acquire_mission_lease(mission_id, "worker_2", 1);
+    assert!(conflict.is_err());
+    assert!(matches!(
+        conflict.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 3. Worker 1 tenta adquirir novamente sem expirar: rejeitado (não pode re-adquirir sobre si mesmo)
+    let reacquire = store.acquire_mission_lease(mission_id, "worker_1", 1);
+    assert!(reacquire.is_err());
+
+    // 4. Aguarda expiração do lease (> 1s)
+    std::thread::sleep(std::time::Duration::from_millis(1150));
+
+    // 5. Worker 2 tenta adquirir a lease após expiração: CAS no banco deve ter sucesso e incrementar o token
+    let fence_2 = store
+        .acquire_mission_lease(mission_id, "worker_2", 10)
+        .unwrap();
+    assert_eq!(
+        fence_2, 2,
+        "Fencing token deve ser incrementado para 2 após expiração"
+    );
+
+    // 6. Worker 1 (antigo proprietário) tenta renovar lease com seu fencing token desatualizado (1): deve falhar
+    let stale_renew = store.renew_mission_lease(mission_id, "worker_1", fence_1, 10);
+    assert!(stale_renew.is_err());
+    assert!(matches!(
+        stale_renew.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 7. Worker 1 tenta liberar o lease com o token desatualizado (1): deve falhar
+    let stale_release = store.release_mission_lease(mission_id, "worker_1", fence_1);
+    assert!(stale_release.is_err());
+    assert!(matches!(
+        stale_release.unwrap_err(),
+        MissionError::ExecutionFailed(_)
+    ));
+
+    // 8. Worker 1 tenta verificar lease com token 1: deve falhar
+    let stale_verify = store.verify_mission_lease(mission_id, "worker_1", fence_1);
+    assert!(stale_verify.is_err());
+
+    // 9. Worker 2 valida com sucesso com fence_token 2
+    assert!(store
+        .verify_mission_lease(mission_id, "worker_2", fence_2)
+        .is_ok());
+
+    // 10. Worker 2 libera lease com sucesso
+    assert!(store
+        .release_mission_lease(mission_id, "worker_2", fence_2)
+        .is_ok());
+}
+
+#[test]
+fn test_64_maquina_de_estados_de_aprovacao_rejeicao_de_transicoes_invalidas_e_terminais() {
+    // 1. Validação unitária da máquina de estados do enum ApprovalStatus
+    assert!(ApprovalStatus::Pending.can_transition_to(&ApprovalStatus::Granted));
+    assert!(ApprovalStatus::Pending.can_transition_to(&ApprovalStatus::Denied));
+    assert!(ApprovalStatus::Pending.can_transition_to(&ApprovalStatus::Expired));
+    assert!(!ApprovalStatus::Pending.can_transition_to(&ApprovalStatus::Consumed));
+    assert!(!ApprovalStatus::Pending.can_transition_to(&ApprovalStatus::Pending));
+
+    assert!(ApprovalStatus::Granted.can_transition_to(&ApprovalStatus::Consumed));
+    assert!(ApprovalStatus::Granted.can_transition_to(&ApprovalStatus::Expired));
+    assert!(!ApprovalStatus::Granted.can_transition_to(&ApprovalStatus::Granted));
+    assert!(!ApprovalStatus::Granted.can_transition_to(&ApprovalStatus::Denied));
+    assert!(!ApprovalStatus::Granted.can_transition_to(&ApprovalStatus::Pending));
+
+    // Estados terminais não transicionam para nada
+    assert!(ApprovalStatus::Consumed.is_terminal());
+    assert!(ApprovalStatus::Denied.is_terminal());
+    assert!(ApprovalStatus::Expired.is_terminal());
+    assert!(!ApprovalStatus::Pending.is_terminal());
+    assert!(!ApprovalStatus::Granted.is_terminal());
+
+    for terminal in [
+        ApprovalStatus::Consumed,
+        ApprovalStatus::Denied,
+        ApprovalStatus::Expired,
+    ] {
+        for target in [
+            ApprovalStatus::Pending,
+            ApprovalStatus::Granted,
+            ApprovalStatus::Denied,
+            ApprovalStatus::Expired,
+            ApprovalStatus::Consumed,
+        ] {
+            assert!(
+                !terminal.can_transition_to(&target),
+                "Estado terminal {:?} não pode transicionar para {:?}",
+                terminal,
+                target
+            );
+        }
+    }
+
+    // 2. Validação integrada na persistência SQLite
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = MissionApprovalManager::new(store.clone(), None);
+
+    let step = MissionStep::new(
+        "step_fsm",
+        "m_fsm",
+        1,
+        "Passo FSM",
+        Some("system.echo".to_string()),
+        serde_json::json!({"action": "fsm"}),
+        true,
+        vec![],
+    );
+    let approval = approval_mgr
+        .request_approval("m_fsm", &step, "user_fsm", 300)
+        .unwrap();
+    let token = approval.confirmation_token.as_ref().unwrap();
+
+    // Pending -> Granted
+    let granted = approval_mgr
+        .grant_approval_authenticated(&approval.id, "user_fsm", Some(token))
+        .unwrap();
+    assert_eq!(granted.status, ApprovalStatus::Granted);
+
+    // Granted -> Consumed
+    let consumed = store
+        .consume_approval_atomically(
+            &approval.id,
+            "m_fsm",
+            "step_fsm",
+            "system.echo",
+            "user_fsm",
+            &step.parameters,
+        )
+        .unwrap();
+    assert_eq!(consumed.status, ApprovalStatus::Consumed);
+
+    // Tentativa ilegal de transicionar Consumed -> Granted no SQLite deve ser rejeitada
+    let illegal_update = store.update_approval_status(&approval.id, ApprovalStatus::Granted);
+    assert!(illegal_update.is_err());
+    assert!(matches!(
+        illegal_update.unwrap_err(),
+        MissionError::InvalidStateTransition { .. }
+    ));
+
+    // Tentativa ilegal de transicionar Consumed -> Denied
+    let illegal_deny = store.update_approval_status(&approval.id, ApprovalStatus::Denied);
+    assert!(illegal_deny.is_err());
+    assert!(matches!(
+        illegal_deny.unwrap_err(),
+        MissionError::InvalidStateTransition { .. }
+    ));
+}
+
+#[test]
+fn test_65_concorrencia_estrita_disputa_entre_grant_e_deny_simultaneos() {
+    let store = Arc::new(SqliteMissionStore::open_in_memory().unwrap());
+    let approval_mgr = Arc::new(MissionApprovalManager::new(store.clone(), None));
+
+    let step = MissionStep::new(
+        "step_race",
+        "m_race",
+        1,
+        "Passo Concorrência",
+        Some("system.echo".to_string()),
+        serde_json::json!({"action": "race"}),
+        true,
+        vec![],
+    );
+    let approval = approval_mgr
+        .request_approval("m_race", &step, "user_race", 300)
+        .unwrap();
+    let token = approval.confirmation_token.clone().unwrap();
+    let approval_id = approval.id.clone();
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let mgr_grant = approval_mgr.clone();
+    let app_id_grant = approval_id.clone();
+    let tok_grant = token.clone();
+    let bar_grant = barrier.clone();
+
+    let handle_grant = std::thread::spawn(move || {
+        bar_grant.wait();
+        mgr_grant.grant_approval_authenticated(&app_id_grant, "user_race", Some(&tok_grant))
+    });
+
+    let mgr_deny = approval_mgr.clone();
+    let app_id_deny = approval_id.clone();
+    let bar_deny = barrier.clone();
+
+    let handle_deny = std::thread::spawn(move || {
+        bar_deny.wait();
+        mgr_deny.deny_approval(&app_id_deny, "user_race", "Rejeição concorrente")
+    });
+
+    let res_grant = handle_grant.join().unwrap();
+    let res_deny = handle_deny.join().unwrap();
+
+    // Invariante de exclusão mútua atômica sob CAS:
+    // Exatamente uma das operações deve ser Ok, e a outra deve ser Err
+    match (res_grant, res_deny) {
+        (Ok(_), Err(e)) => {
+            assert!(matches!(e, MissionError::ApprovalMismatch(_)));
+        }
+        (Err(e), Ok(_)) => {
+            assert!(matches!(e, MissionError::ApprovalMismatch(_)));
+        }
+        _ => panic!("Exatamente uma das operações deve ter sucesso"),
+    }
+
+    // O status no banco deve ser estritamente Granted ou Denied
+    let final_app = store.get_approval(&approval_id).unwrap().unwrap();
+    assert!(
+        final_app.status == ApprovalStatus::Granted || final_app.status == ApprovalStatus::Denied
+    );
+}
+
+#[test]
+fn test_66_bloqueio_de_auto_ativacao_para_wake_word_experimental_e_opt_in_explicito() {
+    use yuki::voice::wakeword::WakeWordEngineStatus;
+
+    // 1. Detector padrão com motor fonético heurístico (Experimental)
+    let mut detector = WakeWordDetector::new("yuki", 0.5, true);
+    assert_eq!(detector.status(), WakeWordEngineStatus::Experimental);
+
+    // Por padrão, allow_experimental é false e can_auto_activate é false
+    assert!(!detector.allow_experimental());
+    assert!(!detector.can_auto_activate());
+
+    // Constrói quadro sonoro válido compatível com 'Yuki'
+    let frame1 = AudioFrame::new(
+        (0..480)
+            .map(|i| ((i as f32 * 0.08).sin() * 2500.0) as i16)
+            .collect(),
+        16000,
+        1,
+        0,
+    );
+    let frame2 = AudioFrame::new(
+        (0..160)
+            .map(|i| ((i as f32 * 0.05).sin() * 500.0) as i16)
+            .collect(),
+        16000,
+        1,
+        30,
+    );
+    let frame3 = AudioFrame::new(
+        (0..480)
+            .map(|i| (((i as f32 * 0.18).sin() + (i as f32 * 0.3).sin()) * 1400.0) as i16)
+            .collect(),
+        16000,
+        1,
+        60,
+    );
+
+    let _ = detector.process_frame(&frame1);
+    let _ = detector.process_frame(&frame2);
+    // Sem opt-in, bloqueia auto-ativação retornando WakeWordDetection::None
+    let blocked_detection = detector.process_frame(&frame3).unwrap();
+    assert_eq!(blocked_detection, WakeWordDetection::None);
+
+    // 2. Com opt-in explícito, auto-ativação é habilitada
+    detector.set_allow_experimental(true);
+    assert!(detector.allow_experimental());
+    assert!(detector.can_auto_activate());
+
+    let _ = detector.process_frame(&frame1);
+    let _ = detector.process_frame(&frame2);
+    let allowed_detection = detector.process_frame(&frame3).unwrap();
+    assert!(matches!(
+        allowed_detection,
+        WakeWordDetection::Detected { .. }
+    ));
+
+    // 3. Motor com status Ready (como MockWakeWordEngine) não depende de allow_experimental
+    let (mut ready_detector, mock_engine) = WakeWordDetector::mock("yuki");
+    assert_eq!(ready_detector.status(), WakeWordEngineStatus::Ready);
+    assert!(
+        ready_detector.can_auto_activate(),
+        "Motor Ready sempre pode auto-ativar"
+    );
+
+    let speech_frame = AudioFrame::new(
+        (0..640)
+            .map(|i| ((i as f32 * 0.1).sin() * 1500.0) as i16)
+            .collect(),
+        16000,
+        1,
+        100,
+    );
+    mock_engine.set_forced_confidence(Some(0.95));
+    let ready_detection = ready_detector.process_frame(&speech_frame).unwrap();
+    assert!(matches!(
+        ready_detection,
+        WakeWordDetection::Detected { .. }
+    ));
+}
+
+#[test]
+fn test_67_controlador_de_playback_unificado_estimativa_de_conclusao_e_silencio_seguro() {
+    use yuki::voice::playback::{
+        is_live_audio_test_allowed, is_test_environment, WindowsAudioPlaybackSink,
+    };
+
+    // 1. Controlador indica que conclusão é baseada em estimativa temporal de quadros PCM
+    let (controller, _mock_sink) = AudioPlaybackController::mock();
+    assert!(controller.is_completion_estimated());
+
+    // 2. Em ambiente de testes, a segurança acústica garante silêncio total sem a variável YUKI_LIVE_AUDIO_TESTS=1
+    assert!(!is_live_audio_test_allowed());
+    assert!(is_test_environment());
+
+    // 3. Validação do controlador: play, inspeção de buffer via current_output e interrupção limpa
+    let output = AudioOutput::new(vec![0u8; 640], AudioFormat::default(), 20, "yuki-voice");
+    assert!(controller.play(&output).is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Playing);
+    assert_eq!(controller.current_output(), Some(output.clone()));
+
+    // Interrupção limpa o current_output e transiciona para Interrupted
+    assert!(controller.interrupt().is_ok());
+    assert_eq!(controller.status(), PlaybackStatus::Interrupted);
+    assert_eq!(controller.current_output(), None);
+
+    // 4. WindowsAudioPlaybackSink direto sob ambiente de testes: valida buffer e executa sem tocar alto-falante
+    let win_sink = WindowsAudioPlaybackSink::new();
+    let win_play_res = win_sink.play(&output);
+    assert!(win_play_res.is_ok());
+    assert!(win_sink.interrupt().is_ok());
 }

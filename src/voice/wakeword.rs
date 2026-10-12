@@ -301,9 +301,13 @@ impl WakeWordEngine for SttWakeWordEngine {
         let kw_lower = keyword.to_lowercase();
         let stt = self.stt_provider.clone();
 
-        let transcript_res = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { stt.transcribe(&audio_input).await })
-        });
+        let transcript_res = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async { stt.transcribe(&audio_input).await })
+            })
+        } else {
+            return Ok(None);
+        };
 
         match transcript_res {
             Ok(text) => {
@@ -415,6 +419,7 @@ pub struct WakeWordDetector {
     keyword: String,
     sensitivity: f32,
     enabled: bool,
+    allow_experimental: bool,
     history_frames: Vec<AudioFrame>,
     max_history_frames: usize,
     vad: VoiceActivityDetector,
@@ -433,6 +438,7 @@ impl WakeWordDetector {
             keyword: keyword.into().to_lowercase(),
             sensitivity: sensitivity.clamp(0.1, 1.0),
             enabled,
+            allow_experimental: false,
             history_frames: Vec::new(),
             max_history_frames: 10,
             vad: VoiceActivityDetector::default(),
@@ -450,6 +456,7 @@ impl WakeWordDetector {
             keyword: keyword.into().to_lowercase(),
             sensitivity: sensitivity.clamp(0.1, 1.0),
             enabled,
+            allow_experimental: false,
             history_frames: Vec::new(),
             max_history_frames: 10,
             vad: VoiceActivityDetector::default(),
@@ -486,6 +493,27 @@ impl WakeWordDetector {
         self.sensitivity = sensitivity.clamp(0.1, 1.0);
     }
 
+    pub fn allow_experimental(&self) -> bool {
+        self.allow_experimental
+    }
+
+    pub fn set_allow_experimental(&mut self, allow: bool) {
+        self.allow_experimental = allow;
+    }
+
+    /// Avalia se o detector pode transitar automaticamente para captura de voz (`Capturing`).
+    /// Motores em status `Ready` sempre podem; motores `Experimental` requerem opt-in explícito (`allow_experimental = true`).
+    pub fn can_auto_activate(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        match self.engine.status() {
+            WakeWordEngineStatus::Ready => true,
+            WakeWordEngineStatus::Experimental => self.allow_experimental,
+            WakeWordEngineStatus::Unavailable => false,
+        }
+    }
+
     pub fn engine(&self) -> &Arc<dyn WakeWordEngine> {
         &self.engine
     }
@@ -502,14 +530,20 @@ impl WakeWordDetector {
     /// Analisa um quadro de áudio PCM.
     ///
     /// 1. Se desabilitado ou motor indisponível, ignora.
-    /// 2. Acumula em janela deslizante.
-    /// 3. Executa VAD para validar presença de voz humana.
-    /// 4. Se houver voz, invoca o `WakeWordEngine` para verificar evidência da palavra-chave.
+    /// 2. Se o motor for experimental e o opt-in não foi concedido, bloqueia auto-ativação.
+    /// 3. Acumula em janela deslizante.
+    /// 4. Executa VAD para validar presença de voz humana.
+    /// 5. Se houver voz, invoca o `WakeWordEngine` para verificar evidência da palavra-chave.
     pub fn process_frame(&mut self, frame: &AudioFrame) -> Result<WakeWordDetection, VoiceError> {
         if !self.enabled
             || self.engine.status() == WakeWordEngineStatus::Unavailable
             || frame.samples.is_empty()
         {
+            return Ok(WakeWordDetection::None);
+        }
+
+        // Se o motor for experimental e o opt-in não foi concedido, bloqueia auto-ativação
+        if self.engine.status() == WakeWordEngineStatus::Experimental && !self.allow_experimental {
             return Ok(WakeWordDetection::None);
         }
 
@@ -532,6 +566,14 @@ impl WakeWordDetector {
         {
             if confidence >= threshold {
                 self.history_frames.clear(); // Previne repetições contínuas espúrias
+                if self.engine.status() == WakeWordEngineStatus::Experimental {
+                    tracing::warn!(
+                        keyword = %self.keyword,
+                        confidence,
+                        engine = %self.engine.name(),
+                        "Wake word auto-ativada via motor heurístico acústico experimental"
+                    );
+                }
                 return Ok(WakeWordDetection::Detected {
                     confidence,
                     timestamp_ms: frame.timestamp_ms,
@@ -589,6 +631,8 @@ mod tests {
     #[test]
     fn test_phonetic_engine_detects_synthesized_yuki() {
         let mut detector = WakeWordDetector::new("yuki", 0.5, true);
+        detector.set_allow_experimental(true);
+        assert!(detector.can_auto_activate());
 
         // Constrói janela com padrão fonético de "Yu-ki":
         // Sílaba 1: /ju/ (F0 ~ 220Hz, ZCR menor)
@@ -615,5 +659,40 @@ mod tests {
         let det = detector.process_frame(&frame3).unwrap();
 
         assert!(matches!(det, WakeWordDetection::Detected { .. }));
+    }
+
+    #[test]
+    fn test_phonetic_engine_blocks_auto_activate_without_opt_in() {
+        let mut detector = WakeWordDetector::new("yuki", 0.5, true);
+        // Por padrão, allow_experimental é false
+        assert!(!detector.allow_experimental());
+        assert!(!detector.can_auto_activate());
+
+        let frame1_samples: Vec<i16> = (0..480)
+            .map(|i| ((i as f32 * 0.08).sin() * 2500.0) as i16)
+            .collect();
+        let frame1 = AudioFrame::new(frame1_samples, 16000, 1, 0);
+        let frame2_samples: Vec<i16> = (0..160)
+            .map(|i| ((i as f32 * 0.05).sin() * 500.0) as i16)
+            .collect();
+        let frame2 = AudioFrame::new(frame2_samples, 16000, 1, 30);
+        let frame3_samples: Vec<i16> = (0..480)
+            .map(|i| (((i as f32 * 0.18).sin() + (i as f32 * 0.3).sin()) * 1400.0) as i16)
+            .collect();
+        let frame3 = AudioFrame::new(frame3_samples, 16000, 1, 60);
+
+        let _ = detector.process_frame(&frame1);
+        let _ = detector.process_frame(&frame2);
+        // Mesmo com áudio acústico válido, sem opt-in NÃO auto-ativa
+        let det = detector.process_frame(&frame3).unwrap();
+        assert_eq!(det, WakeWordDetection::None);
+
+        // Com opt-in concedido, can_auto_activate se torna true
+        detector.set_allow_experimental(true);
+        assert!(detector.can_auto_activate());
+        let _ = detector.process_frame(&frame1);
+        let _ = detector.process_frame(&frame2);
+        let det_opt_in = detector.process_frame(&frame3).unwrap();
+        assert!(matches!(det_opt_in, WakeWordDetection::Detected { .. }));
     }
 }

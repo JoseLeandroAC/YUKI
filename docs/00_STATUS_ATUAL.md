@@ -1,16 +1,16 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-12
-Status geral: Marco 8.1.1 (Correções Críticas de Homologação, Hardening Atômico e Auditoria de Segurança) — Concluído, 100% Testado e Submetido à Auditoria Independente Externa; 559 testes ativos aprovados (3 testes live opt-in ignorados, totalizando 562 testes; 0 falhas) no workspace; 62/62 testes adversariais aprovados
+Status geral: Marco 8.1.1 — alinhamento final implementado e submetido à auditoria independente; 564 testes ativos aprovados (4 testes live opt-in ignorados, totalizando 568 testes; 0 falhas) no workspace; 67/67 testes adversariais aprovados
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
-Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c) e "marco-8.1-final" (bd588e5)
+Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
 
 ---
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação e Auditoria de Segurança)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final e Auditoria de Segurança)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -20,14 +20,16 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
 - **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
 - **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):** Playback real via `winmm.dll`, captura e PTT no Windows, VAD acústico desacoplado, subprocessos assíncronos sem órfãos, integridade referencial com chaves estrangeiras, concorrência protegida, reconciliação soberana e portão de risco independente;
-- **Marco 8.1.1 (Correções Críticas de Homologação e Auditoria de Segurança):**
+- **Marco 8.1.1 (Alinhamento Técnico Final e Hardening Conclusivo):**
   1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos (`getrandom`), comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo/vazio, sanitização estrita de auditoria (zero token vazado em logs) e falha fechada em `grant_approval` legado (SEC-01);
   2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` com `UPDATE` atômico condicional único no SQLite verificando status, expiração e integridade de parâmetros, eliminando janela de corrida para reutilização de autorização humana (SEC-02);
-  3. **Leases Persistentes Multi-Instância com Fencing Tokens:** Tabela `mission_leases` no SQLite com TTL, lock exclusivo e tokens monotônicos (`fence_token`) validados em cada etapa pelo `MissionRunner`, impedindo split-brain e mutações por processos atrasados (SEC-03);
-  4. **Honestidade Arquitetural da Wake Word:** Enum `WakeWordEngineStatus` (Ready, Experimental, Unavailable), reclassificação factual do motor fonético como `Experimental` (heurística de energia, não reconhecimento lexical), remoção de fallbacks silenciosos em STT e consolidação do Push-to-Talk como mecanismo soberano primário (SEC-04);
-  5. **Ciclo de Vida de Reprodução e Pinned Buffer:** `WindowsAudioPlaybackSink` fixa buffers WAV em memória (`Arc<Vec<u8>>`) evitando use-after-free em execuções assíncronas do driver multimídia WinMM; `AudioPlaybackController` estendido com estados `Completed` e `Failed` rastreados por temporizador (SEC-05);
-  6. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
-  7. **Suíte Adversarial Expandida:** 62 cenários adversariais aprovados (5 novos testes específicos 58 a 62 cobrindo todos os vetores de vulnerabilidade do Marco 8.1.1).
+  3. **Máquina de Estados de Aprovação Estrita e Disputa Concorrente:** FSM formal com `can_transition_to` e `is_terminal` em `ApprovalStatus`; transições CAS no SQLite (`transition_approval_status`); resolução estrita de exclusão mútua entre Grant e Deny simultâneos onde exatamente um prevalece e o outro falha de forma limpa;
+  4. **Leases Persistentes Multi-Instância com Fencing Tokens e Recuperação Pós-Expiração:** Tabela `mission_leases` no SQLite com TTL, lock exclusivo com transação imediata (`TransactionBehavior::Immediate`), rejeição de aquisições concorrentes em leases ativas, e recuperação pós-expiração com incremento atômico de `fence_token` invalidando o antigo proprietário;
+  5. **Wake Word com Bloqueio de Auto-Ativação Experimental por Padrão:** Enum `WakeWordEngineStatus` (Ready, Experimental, Unavailable); motor heurístico classificado honestamente como `Experimental`; flag `allow_experimental` (padrão `false`) exigida para auto-ativação em motores experimentais; método `can_auto_activate()`; remoção de fallbacks silenciosos em STT e Push-to-Talk soberano;
+  6. **Controlador de Reprodução Unificado e Transparência Temporal:** Unificação do estado em `PlaybackStateInner` sob mutex único atômico; buffer WAV pinned com `Drop` seguro no driver `winmm`; declaração explícita `is_completion_estimated() -> true`;
+  7. **Invariante de Segurança Acústica em Testes:** Execução padrão de testes (`cargo test`) 100% silenciosa; emissão física em alto-falantes estritamente opt-in via `YUKI_LIVE_AUDIO_TESTS=1`;
+  8. **Fail-Closed em Capacidades Desconhecidas:** `step_requires_approval` retorna estritamente `true` para capacidades não registradas no catálogo, forçando aprovação humana contra alucinações (SEC-06);
+  9. **Suíte Adversarial Conclusiva:** 67 cenários adversariais aprovados (testes 63 a 67 cobrindo FSM de aprovações, concorrência Grant/Deny, expiração e fencing de leases, bloqueio de wake word experimental e segurança acústica do playback controller).
 
 A situação atual pode ser resumida como:
 
@@ -45,7 +47,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-559 TESTES ATIVOS PASSANDO (0 FALHAS, 3 LIVE OPT-IN IGNORADOS, TOTALIZANDO 562 TESTES; 62/62 ADVERSARIAIS)
+564 TESTES ATIVOS PASSANDO (0 FALHAS, 4 LIVE OPT-IN IGNORADOS, TOTALIZANDO 568 TESTES; 67/67 ADVERSARIAIS)
 
 ---
 

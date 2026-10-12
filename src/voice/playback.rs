@@ -54,6 +54,30 @@ mod winmm {
     }
 }
 
+/// Verifica se a execução atual possui autorização explícita para emissão de áudio físico.
+///
+/// Invariante de Segurança Acústica:
+/// A execução de testes (`cargo test`) DEVE ser 100% silenciosa por padrão.
+/// Emissão física em alto-falantes só é permitida com opt-in explícito via:
+/// `YUKI_LIVE_AUDIO_TESTS=1`.
+pub fn is_live_audio_test_allowed() -> bool {
+    std::env::var("YUKI_LIVE_AUDIO_TESTS").as_deref() == Ok("1")
+}
+
+pub fn is_test_environment() -> bool {
+    if is_live_audio_test_allowed() {
+        return false;
+    }
+    cfg!(test)
+        || std::env::var("YUKI_MOCK_AUDIO").is_ok()
+        || std::env::current_exe()
+            .map(|p| {
+                let s = p.to_string_lossy();
+                s.contains("deps\\") || s.contains("deps/")
+            })
+            .unwrap_or(false)
+}
+
 /// Sink concreto para Windows usando APIs nativas multimídia (winmm.dll).
 ///
 /// Não requer dependências externas pesadas e garante controle direto de
@@ -62,6 +86,17 @@ mod winmm {
 #[derive(Debug)]
 pub struct WindowsAudioPlaybackSink {
     current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+}
+
+impl Drop for WindowsAudioPlaybackSink {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            unsafe {
+                winmm::PlaySoundA(std::ptr::null(), std::ptr::null_mut(), 0);
+            }
+        }
+    }
 }
 
 impl Default for WindowsAudioPlaybackSink {
@@ -103,6 +138,15 @@ impl AudioPlaybackSink for WindowsAudioPlaybackSink {
     fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
         #[cfg(windows)]
         {
+            if is_test_environment() {
+                // Em ambiente de testes sem opt-in explícito YUKI_LIVE_AUDIO_TESTS=1,
+                // silencia a saída física no hardware mas valida e retém o buffer em memória.
+                let wav_bytes = Arc::new(self.prepare_wav_bytes(output)?);
+                let mut buf_lock = self.current_wav_buffer.lock().unwrap();
+                *buf_lock = Some(wav_bytes);
+                return Ok(());
+            }
+
             if !self.is_device_available() {
                 return Err(VoiceError::DeviceUnavailable(
                     "Nenhum dispositivo de reprodução de áudio detectado no sistema operacional (waveOut)"
@@ -258,6 +302,26 @@ impl AudioPlaybackSink for MockPlaybackSink {
 // AudioPlaybackController
 // ---------------------------------------------------------------------------
 
+/// Estado interno encapsulado sob único Mutex para prevenir deadlocks e condições de corrida entre campos.
+#[derive(Debug)]
+struct PlaybackStateInner {
+    status: PlaybackStatus,
+    current_output: Option<AudioOutput>,
+    device_available_override: Option<bool>,
+    playback_timing: Option<(std::time::Instant, u64)>,
+}
+
+impl Default for PlaybackStateInner {
+    fn default() -> Self {
+        Self {
+            status: PlaybackStatus::Idle,
+            current_output: None,
+            device_available_override: None,
+            playback_timing: None,
+        }
+    }
+}
+
 /// Controlador seguro de saída e reprodução de áudio da Yuki.
 ///
 /// Garante:
@@ -266,12 +330,10 @@ impl AudioPlaybackSink for MockPlaybackSink {
 /// - Interrupção física instantânea na detecção de fala do operador (barge-in).
 /// - Tratamento explícito de dispositivo de áudio indisponível ou inacessível.
 /// - Limpeza imediata de buffers e recursos na finalização ou cancelamento.
+/// - Proteção de concorrência com mutex único atômico (`PlaybackStateInner`).
 #[derive(Debug, Clone)]
 pub struct AudioPlaybackController {
-    status: Arc<Mutex<PlaybackStatus>>,
-    current_output: Arc<Mutex<Option<AudioOutput>>>,
-    device_available_override: Arc<Mutex<Option<bool>>>,
-    playback_timing: Arc<Mutex<Option<(std::time::Instant, u64)>>>,
+    state: Arc<Mutex<PlaybackStateInner>>,
     sink: Arc<dyn AudioPlaybackSink>,
 }
 
@@ -285,11 +347,12 @@ impl AudioPlaybackController {
     /// Construtor padrão da plataforma.
     ///
     /// No Windows com hardware de áudio detectado, inicializa com `WindowsAudioPlaybackSink`.
-    /// Em ambientes CI ou sem dispositivos de saída, faz fallback limpo para `MockPlaybackSink`.
+    /// Em ambientes CI ou de teste (sem opt-in explícito `YUKI_LIVE_AUDIO_TESTS=1`), faz fallback
+    /// limpo para `MockPlaybackSink` para garantir silêncio absoluto.
     pub fn new() -> Self {
         #[cfg(windows)]
         {
-            if std::env::var("YUKI_MOCK_AUDIO").is_ok() {
+            if is_test_environment() {
                 Self::with_sink(Arc::new(MockPlaybackSink::new()))
             } else {
                 let win_sink = WindowsAudioPlaybackSink::new();
@@ -312,10 +375,7 @@ impl AudioPlaybackController {
     /// Construtor parametrizado com sink explícito.
     pub fn with_sink(sink: Arc<dyn AudioPlaybackSink>) -> Self {
         Self {
-            status: Arc::new(Mutex::new(PlaybackStatus::Idle)),
-            current_output: Arc::new(Mutex::new(None)),
-            device_available_override: Arc::new(Mutex::new(None)),
-            playback_timing: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(PlaybackStateInner::default())),
             sink,
         }
     }
@@ -334,36 +394,51 @@ impl AudioPlaybackController {
 
     /// Define o estado de disponibilidade do dispositivo de áudio (para testes e diagnósticos).
     pub fn set_device_available(&self, available: bool) {
-        *self.device_available_override.lock().unwrap() = Some(available);
+        let mut state = self.state.lock().unwrap();
+        state.device_available_override = Some(available);
     }
 
     /// Verifica se há dispositivo de áudio disponível, respeitando sobrescrições manuais.
     pub fn is_device_available(&self) -> bool {
-        if let Some(forced) = *self.device_available_override.lock().unwrap() {
+        let state = self.state.lock().unwrap();
+        if let Some(forced) = state.device_available_override {
             return forced;
         }
+        drop(state);
         self.sink.is_device_available()
     }
 
     /// Retorna o estado atual da reprodução, atualizando atomicamente para Completed se a duração do áudio tiver expirado.
     pub fn status(&self) -> PlaybackStatus {
-        let mut status_lock = self.status.lock().unwrap();
-        if *status_lock == PlaybackStatus::Playing {
-            if let Some((start_instant, duration_ms)) = *self.playback_timing.lock().unwrap() {
+        let mut state = self.state.lock().unwrap();
+        if state.status == PlaybackStatus::Playing {
+            if let Some((start_instant, duration_ms)) = state.playback_timing {
                 if start_instant.elapsed().as_millis() as u64 >= duration_ms {
-                    *status_lock = PlaybackStatus::Completed;
+                    state.status = PlaybackStatus::Completed;
+                    state.current_output = None;
                 }
             }
         }
-        *status_lock
+        state.status
+    }
+
+    /// Retorna cópia do áudio atualmente em reprodução, se houver.
+    pub fn current_output(&self) -> Option<AudioOutput> {
+        self.state.lock().unwrap().current_output.clone()
+    }
+
+    /// Declara explicitamente se a transição para `PlaybackStatus::Completed` é calculada com base
+    /// na estimativa de duração dos quadros PCM e taxa de amostragem, em vez de callback físico do driver.
+    pub fn is_completion_estimated(&self) -> bool {
+        true
     }
 
     /// Envia um buffer de áudio sintetizado para reprodução física.
     /// Rejeita se o dispositivo estiver indisponível ou interrompe reprodução prévia em curso.
     pub fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
         if !self.is_device_available() {
-            let mut status_lock = self.status.lock().unwrap();
-            *status_lock = PlaybackStatus::Failed;
+            let mut state = self.state.lock().unwrap();
+            state.status = PlaybackStatus::Failed;
             return Err(VoiceError::DeviceUnavailable(
                 "Dispositivo de reprodução de áudio (alto-falante) não detectado ou inacessível"
                     .to_string(),
@@ -377,14 +452,12 @@ impl AudioPlaybackController {
 
         // Envia para o sink físico/mock
         if let Err(e) = self.sink.play(output) {
-            let mut status_lock = self.status.lock().unwrap();
-            *status_lock = PlaybackStatus::Failed;
-            *self.playback_timing.lock().unwrap() = None;
+            let mut state = self.state.lock().unwrap();
+            state.status = PlaybackStatus::Failed;
+            state.playback_timing = None;
+            state.current_output = None;
             return Err(e);
         }
-
-        let mut status_lock = self.status.lock().unwrap();
-        let mut out_lock = self.current_output.lock().unwrap();
 
         let duration_ms = if output.duration_ms > 0 {
             output.duration_ms
@@ -395,9 +468,10 @@ impl AudioPlaybackController {
             100
         };
 
-        *self.playback_timing.lock().unwrap() = Some((std::time::Instant::now(), duration_ms));
-        *out_lock = Some(output.clone());
-        *status_lock = PlaybackStatus::Playing;
+        let mut state = self.state.lock().unwrap();
+        state.playback_timing = Some((std::time::Instant::now(), duration_ms));
+        state.current_output = Some(output.clone());
+        state.status = PlaybackStatus::Playing;
 
         Ok(())
     }
@@ -406,12 +480,10 @@ impl AudioPlaybackController {
     pub fn interrupt(&self) -> Result<(), VoiceError> {
         let _ = self.sink.interrupt();
 
-        let mut status_lock = self.status.lock().unwrap();
-        let mut out_lock = self.current_output.lock().unwrap();
-
-        *status_lock = PlaybackStatus::Interrupted;
-        *self.playback_timing.lock().unwrap() = None;
-        *out_lock = None; // Limpeza imediata do buffer
+        let mut state = self.state.lock().unwrap();
+        state.status = PlaybackStatus::Interrupted;
+        state.playback_timing = None;
+        state.current_output = None;
 
         Ok(())
     }
@@ -420,24 +492,20 @@ impl AudioPlaybackController {
     pub fn stop(&self) {
         let _ = self.sink.interrupt();
 
-        let mut status_lock = self.status.lock().unwrap();
-        let mut out_lock = self.current_output.lock().unwrap();
-
-        *status_lock = PlaybackStatus::Stopped;
-        *self.playback_timing.lock().unwrap() = None;
-        *out_lock = None;
+        let mut state = self.state.lock().unwrap();
+        state.status = PlaybackStatus::Stopped;
+        state.playback_timing = None;
+        state.current_output = None;
     }
 
     /// Reseta o controlador para Idle.
     pub fn reset(&self) {
         let _ = self.sink.interrupt();
 
-        let mut status_lock = self.status.lock().unwrap();
-        let mut out_lock = self.current_output.lock().unwrap();
-
-        *status_lock = PlaybackStatus::Idle;
-        *self.playback_timing.lock().unwrap() = None;
-        *out_lock = None;
+        let mut state = self.state.lock().unwrap();
+        state.status = PlaybackStatus::Idle;
+        state.playback_timing = None;
+        state.current_output = None;
     }
 }
 
@@ -482,12 +550,30 @@ mod tests {
         assert_eq!(mock.interrupted_count(), 1);
     }
 
+    #[test]
+    fn test_playback_controller_completion_estimation_and_output() {
+        let (controller, _) = AudioPlaybackController::mock();
+        assert!(controller.is_completion_estimated());
+        assert_eq!(controller.current_output(), None);
+
+        let output = AudioOutput::new(vec![0u8; 100], AudioFormat::default(), 50, "test");
+        assert!(controller.play(&output).is_ok());
+        assert_eq!(controller.current_output(), Some(output));
+        controller.stop();
+        assert_eq!(controller.current_output(), None);
+    }
+
     #[cfg(windows)]
     #[test]
-    fn test_windows_sink_device_detection() {
+    fn test_windows_sink_device_detection_and_safety_silence() {
         let sink = WindowsAudioPlaybackSink::new();
-        // Em máquina com placa de som, deve detectar dispositivo
         let available = sink.is_device_available();
         println!("Windows audio sink device available: {}", available);
+
+        // Sem a variável YUKI_LIVE_AUDIO_TESTS=1, a execução em teste é silenciada com segurança
+        let output = AudioOutput::new(vec![0u8; 320], AudioFormat::default(), 10, "test-safety");
+        let play_res = sink.play(&output);
+        assert!(play_res.is_ok(), "Deve validar buffer sem erro");
+        assert!(sink.interrupt().is_ok());
     }
 }

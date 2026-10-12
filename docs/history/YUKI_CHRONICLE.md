@@ -1268,6 +1268,28 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 ##### 4. Classificação
 - **MARCO 8.1.1 (CORREÇÕES CRÍTICAS DE HOMOLOGAÇÃO, HARDENING ATÔMICO E AUDITORIA DE SEGURANÇA) — CONCLUÍDO COM SUCESSO E SUBMETIDO À AUDITORIA INDEPENDENTE EXTERNA**.
 
+---
 
+#### [Event Time: 2026-10-12 | Record Creation Time: 2026-10-12]
+### Marco 8.1.1 — Rodada Final de Alinhamento Técnico e Correções Residuais
 
-
+- **Branch**: `feature/marco-8.1.1-homologation-fixes`
+- **Baseline de Entrada**: `62cc878`
+- **Contexto**: A auditoria independente do ChatGPT confirmou as melhorias do Marco 8.1.1 (bypass de token corrigido, tokens de 256 bits, consumo atômico no SQLite, leases persistentes com fencing tokens, honestidade na wake word e pinned buffer no winmm), mas apontou discrepâncias técnicas residuais: necessidade de FSM formal com transições CAS em aprovações, resolução estrita de disputa simultânea Grant vs Deny, tratamento de expiração de lease com incremento de fencing token e bloqueio de antigo proprietário, flag explícita `allow_experimental` bloqueando auto-ativação por wake word heurística por padrão, controlador de reprodução unificado sob mutex único com transparência temporal, e garantia estrita de silêncio absoluto em testes sem opt-in físico.
+- **Implementações Realizadas**:
+  1. FSM de aprovações com `ApprovalStatus::can_transition_to` e `ApprovalStatus::is_terminal`; transições protegidas por CAS no SQLite (`transition_approval_status`).
+  2. Concorrência atômica entre Grant e Deny: exatamente uma operação vence e a outra falha de forma limpa.
+  3. Leases persistentes com `PRAGMA busy_timeout = 5000;`, transação imediata (`TransactionBehavior::Immediate`), rejeição de aquisições simultâneas em leases ativas e recuperação pós-expiração incrementando `fence_token` monotonicamente e invalidando proprietários antigos.
+  4. `WakeWordDetector` com flag `allow_experimental: bool` (padrão `false`), bloqueio de auto-ativação sem opt-in para motores heurísticos experimentais, log `tracing::warn!` em uso experimental e método `can_auto_activate()`.
+  5. `AudioPlaybackController` unificado em `PlaybackStateInner` sob mutex único atômico; declaração explícita de término estimado via `is_completion_estimated() -> true`; buffer pinned e `Drop` seguro com `PlaySoundA(NULL, NULL, 0)`.
+  6. Invariante de segurança acústica nos testes: execução padrão `cargo test` 100% silenciosa; áudio físico restrito a opt-in com `YUKI_LIVE_AUDIO_TESTS=1`.
+- **Métricas Finais e Portões de Qualidade**:
+  - **Suíte Adversarial (`tests/marco_8_adversarial.rs`):** **67 cenários adversariais** (5 novos testes 63 a 67), 100% aprovados.
+  - **Total de Testes no Workspace:** **564 testes ativos aprovados** (4 testes live opt-in ignorados, 0 falhas).
+  - **Portões de Qualidade Aprovados:**
+    - `cargo fmt --all -- --check`: 100% aprovado.
+    - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings, 0 erros.
+    - `cargo test --workspace --all-targets`: 100% aprovado.
+    - `cargo build --release`: compilação limpa concluída com sucesso.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — alinhamento final implementado e submetido à auditoria independente"`.
