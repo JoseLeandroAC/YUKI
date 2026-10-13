@@ -109,6 +109,51 @@ pub struct AcousticMetrics {
     pub silence_ratio_pct: f32,
 }
 
+/// Métricas granulares de temporização e decomposição de latência do STT.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SttTimingMetrics {
+    /// Tempo de decodificação do áudio de entrada e conversão para mono (ms)
+    pub audio_prep_ms: f64,
+    /// Tempo de normalização de amplitude e re-encoding do WAV (ms)
+    pub audio_norm_ms: f64,
+    /// Tempo de gravação do arquivo temporário em disco (ms)
+    pub temp_write_ms: f64,
+    /// Tempo total de execução do subprocesso whisper-cli (spawn até término) medido pela Yuki (ms)
+    pub subprocess_wall_ms: f64,
+    /// Tempo de carregamento do modelo informado pelo Whisper (ms), se disponível
+    pub whisper_load_ms: Option<f32>,
+    /// Tempo de processamento do Mel spectrogram informado pelo Whisper (ms), se disponível
+    pub whisper_mel_ms: Option<f32>,
+    /// Tempo de amostragem (sampling) informado pelo Whisper (ms), se disponível
+    pub whisper_sample_ms: Option<f32>,
+    /// Tempo do encoder informado pelo Whisper (ms), se disponível
+    pub whisper_encode_ms: Option<f32>,
+    /// Tempo do decoder informado pelo Whisper (ms), se disponível
+    pub whisper_decode_ms: Option<f32>,
+    /// Tempo do prompt processing informado pelo Whisper (ms), se disponível
+    pub whisper_prompt_ms: Option<f32>,
+    /// Tempo total de processamento reportado pelo Whisper no stderr (ms), se disponível
+    pub whisper_total_ms: Option<f32>,
+    /// Número de fallbacks de temperatura acionados durante a decodificação
+    pub whisper_fallbacks: Option<u32>,
+    /// Tempo de sanitização e higienização do texto transcrito (ms)
+    pub post_process_ms: f64,
+    /// Latência total de ponta a ponta do STT (da entrada de áudio à entrega do texto) (ms)
+    pub total_stt_wall_ms: f64,
+}
+
+/// Resumo da configuração de decodificação utilizada na transcrição.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SttDecodingConfigSummary {
+    pub language_requested: String,
+    pub prompt_configured: bool,
+    pub prompt_preview: Option<String>,
+    pub threads: Option<u32>,
+    pub beam_size: Option<u32>,
+    pub best_of: Option<u32>,
+    pub no_fallback: bool,
+}
+
 /// Relatório estruturado de diagnóstico de áudio físico e inferência.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioDiagnosticsReport {
@@ -121,6 +166,10 @@ pub struct AudioDiagnosticsReport {
     pub buffer_metrics: BufferMetrics,
     pub acoustic_canonical: AcousticMetrics,
     pub acoustic_normalized: Option<AcousticMetrics>,
+    #[serde(default)]
+    pub stt_timings: Option<SttTimingMetrics>,
+    #[serde(default)]
+    pub stt_config: Option<SttDecodingConfigSummary>,
     pub raw_wav_path: Option<String>,
     pub canonical_wav_path: Option<String>,
     pub normalized_wav_path: Option<String>,

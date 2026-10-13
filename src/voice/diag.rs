@@ -1,7 +1,7 @@
 use crate::contracts::identifiers::now_utc;
 use crate::contracts::voice::{
     AcousticMetrics, AudioDiagnosticsReport, BufferMetrics, CaptureTimingMetrics,
-    NativeAudioFormatInfo, VoiceError,
+    NativeAudioFormatInfo, SttDecodingConfigSummary, SttTimingMetrics, VoiceError,
 };
 use crate::voice::audio::AudioCodec;
 use std::path::Path;
@@ -186,6 +186,8 @@ pub fn save_diagnostic_session(
         buffer_metrics,
         acoustic_canonical,
         acoustic_normalized: None,
+        stt_timings: None,
+        stt_config: None,
         raw_wav_path: Some(raw_wav_path.to_string_lossy().to_string()),
         canonical_wav_path: Some(canonical_wav_path.to_string_lossy().to_string()),
         normalized_wav_path: None,
@@ -234,6 +236,27 @@ pub fn update_diagnostic_with_normalized(
         let json_bytes = serde_json::to_vec_pretty(&report).map_err(|e| {
             VoiceError::Io(format!(
                 "Falha ao serializar atualização JSON de diagnóstico: {}",
+                e
+            ))
+        })?;
+        let _ = std::fs::write(report_path_str, &json_bytes);
+    }
+    Ok(())
+}
+
+/// Atualiza o relatório de diagnóstico com métricas de temporização e parâmetros do STT.
+pub fn update_diagnostic_with_stt(
+    report: &mut AudioDiagnosticsReport,
+    timings: &SttTimingMetrics,
+    config: &SttDecodingConfigSummary,
+) -> Result<(), VoiceError> {
+    report.stt_timings = Some(timings.clone());
+    report.stt_config = Some(config.clone());
+
+    if let Some(ref report_path_str) = report.report_path {
+        let json_bytes = serde_json::to_vec_pretty(&report).map_err(|e| {
+            VoiceError::Io(format!(
+                "Falha ao serializar atualização JSON de diagnóstico com STT: {}",
                 e
             ))
         })?;
@@ -339,6 +362,85 @@ pub fn print_diagnostic_summary(report: &AudioDiagnosticsReport) {
         println!(
             "• Pico / Clipping:     Pico: {} ({:.2} dBFS) | Clipping: {} ({:.2}%)",
             an.peak, an.peak_dbfs, an.clipping_samples, an.clipping_ratio_pct
+        );
+    }
+
+    if let Some(ref cfg) = report.stt_config {
+        println!("\n--- Configuração de Decodificação STT (Whisper) ---");
+        println!("• Idioma Solicitado:   {}", cfg.language_requested);
+        println!(
+            "• Prompt Lexical:      {}",
+            if cfg.prompt_configured {
+                cfg.prompt_preview.as_deref().unwrap_or("Ativo")
+            } else {
+                "Desativado (Baseline neutro)"
+            }
+        );
+        println!(
+            "• Threads (-t):        {} | Beam Size (-bs): {} | Best-of (-bo): {}",
+            cfg.threads
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "default (4)".into()),
+            cfg.beam_size
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "default (5)".into()),
+            cfg.best_of
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "default (5)".into())
+        );
+        println!(
+            "• Fallback Temperatura:{}",
+            if cfg.no_fallback {
+                " --no-fallback (Sem retentativas de temperatura)"
+            } else {
+                " Padrão (Fallbacks automáticos 0.2, 0.4, 0.6 ativados)"
+            }
+        );
+    }
+
+    if let Some(ref st) = report.stt_timings {
+        println!("\n--- Decomposição de Latência do STT (Wall-clock & Whisper) ---");
+        println!("• Prep / Mono Downmix: {:.2} ms", st.audio_prep_ms);
+        println!("• Normalização & Enc:  {:.2} ms", st.audio_norm_ms);
+        println!("• Gravação Temp WAV:   {:.2} ms", st.temp_write_ms);
+        println!(
+            "• Subprocesso Whisper: {:.2} ms ({:.2}s)",
+            st.subprocess_wall_ms,
+            st.subprocess_wall_ms / 1000.0
+        );
+        if let Some(load) = st.whisper_load_ms {
+            println!("  ├─ Modelo Load:      {:.2} ms", load);
+        }
+        if let Some(mel) = st.whisper_mel_ms {
+            println!("  ├─ Mel Spectrogram:  {:.2} ms", mel);
+        }
+        if let Some(sample) = st.whisper_sample_ms {
+            println!("  ├─ Sampling:         {:.2} ms", sample);
+        }
+        if let Some(enc) = st.whisper_encode_ms {
+            println!("  ├─ Encode:           {:.2} ms", enc);
+        }
+        if let Some(dec) = st.whisper_decode_ms {
+            println!("  ├─ Decode:           {:.2} ms", dec);
+        }
+        if let Some(prompt) = st.whisper_prompt_ms {
+            println!("  ├─ Prompt Time:      {:.2} ms", prompt);
+        }
+        if let Some(tot) = st.whisper_total_ms {
+            println!(
+                "  ├─ Whisper Total:    {:.2} ms ({:.2}s)",
+                tot,
+                tot / 1000.0
+            );
+        }
+        if let Some(fb) = st.whisper_fallbacks {
+            println!("  └─ Fallbacks Usados: {}", fb);
+        }
+        println!("• Pós-processamento:   {:.2} ms", st.post_process_ms);
+        println!(
+            "• Latência Total STT:  {:.2} ms ({:.2}s)",
+            st.total_stt_wall_ms,
+            st.total_stt_wall_ms / 1000.0
         );
     }
 

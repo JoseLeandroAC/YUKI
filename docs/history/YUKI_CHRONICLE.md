@@ -1542,6 +1542,44 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Auditoria diagnóstica do áudio físico concluída, sincronização WASAPI e FFI Float 32-bit corrigidos; STT aguardando homologação física humana controlada com o operador."`
 
+---
+
+## 2026-10-13 — Marco 8.1.1: Aperfeiçoamento Controlado do STT — Etapa 1: Precisão Lexical, Observabilidade e Desempenho
+
+- **Contexto e Missão**:
+  - Após a resolução das causas raízes de distorção na captura WASAPI e FFI de 32 bits, o operador realizou uma bateria de 14 testes físicos controlados (T7 a T20), documentada em `docs/audits/MARCO_8_1_1_STT_WASAPI_POST_PHYSICAL_AUDIT.md`.
+  - A inteligibilidade do português melhorou substancialmente, mas identificaram-se: (1) erros lexicais recorrentes em nomes e termos próprios (ex: "e o que são" em vez de "Yuki"), (2) latência de transcrição de ~11s a 15s sem visibilidade granular interna, e (3) ausência de interface controlada para parametrização e comparação A/B entre configurações de decodificação.
+  - Conforme a diretriz constitucional da Yuki: **"Não presumir que uma otimização é superior antes de medir seus resultados."**
+- **Implementação Conclusiva (Etapa 1)**:
+  1. **Precisão Lexical (M1 — Contexto Lexical Opcional com `--prompt`):**
+     - Suporte nativo ao parâmetro `--prompt` do Whisper.cpp via `LocalWhisperConfig::with_initial_prompt`, com sanitização de injeção (trim de espaços e quebras).
+     - Preset de vocabulário canônico para português brasileiro (`YUKI_DEFAULT_VOCABULARY_PROMPT_PT = "Yuki, FUVEST, OBMEP, Engenharia de Computação."`).
+     - Preservação estrita do default neutro sem prompt (`initial_prompt: None`) para manter o baseline inalterado.
+     - Preservação de neutralidade no modo multilíngue `auto` (zero prompt forçado para não enviesar detecção entre `pt`, `en`, `es`, `ja`).
+  2. **Observabilidade Granular da Latência (M3 — Decomposição Wall-Clock & Interna):**
+     - Criação da struct `SttTimingMetrics` em `src/contracts/voice.rs` medindo: `audio_prep_ms` (conversão e mono downmix), `audio_norm_ms` (normalização e re-encoding WAV), `temp_write_ms` (gravação em disco), `subprocess_wall_ms` (execução do processo whisper-cli medido pela Yuki), timings internos extraídos do stderr do Whisper (`load`, `mel`, `sample`, `encode`, `decode`, `prompt`, `total`), contagem de `fallbacks` de temperatura (tentativas lentas 0.2, 0.4, 0.6), `post_process_ms` e `total_stt_wall_ms`.
+     - Integração de `SttTimingMetrics` e `SttDecodingConfigSummary` ao `AudioDiagnosticsReport` e renderização detalhada via `print_diagnostic_summary`.
+  3. **Decodificação Configurável (M4 — Flags Opcionais de Inferência):**
+     - Adição de flags opcionais na CLI (`voice listen` e `voice turn`): `--prompt`, `--threads` / `-t` (1 a 64), `--beam-size` / `-bs` (1 a 10), `--best-of` / `-bo` (1 a 10), `--no-fallback` / `-nf` e `--fast-stt` / `--fast` (modo experimental greedy: beam=1, best_of=1, sem fallback).
+     - Validações de limites `validate_threads`, `validate_beam_size` e `validate_best_of` fail-closed.
+     - Suporte via variáveis de ambiente (`YUKI_WHISPER_PROMPT`, `YUKI_WHISPER_THREADS`, etc.).
+  4. **Ferramenta Científica de Comparação A/B (`voice compare-stt`):**
+     - Novo subcomando CLI `yuki voice compare-stt <file> [--prompt] [-t] [--beam-size] [--fast] [--diag]` para avaliar pareadamente o mesmo arquivo WAV nas Configurações A (Baseline neutro) e B (Experimental).
+     - Renderização de quadro comparativo lado a lado no console com todos os tempos, métricas de subprocesso, velocidade relativa (speedup), percentual de latência economizada e análise diferencial do texto.
+     - Validação experimental em arquivo real da homologação (`canonical_16k_diag_1a13645e57e_1.wav`):
+       - Baseline A vs Prompt B: Redução de 12.31s para 10.71s (1.15x mais rápido, +13% de economia de tempo), preservando 100% da acurácia textual (`"Yuki, abre a calculatura."`).
+       - Greedy Search (`--fast`): Redução artificial de feixe gerou alucinação (`"Yuki, ABERA CALCULATORA"`), comprovando a importância da medição empírica antes de alterar padrões.
+  5. **Testes Automatizados e Portões de Qualidade:**
+     - 5 novos testes unitários e de integração em `tests/voice_stt_tts.rs` (validação de bounds, presets de idioma, parsing de métricas de stderr, curto-circuito em silêncio com timings e persistência JSON de diagnóstico de STT).
+     - Total de 24/24 testes aprovados em `tests/voice_stt_tts.rs`.
+     - 596 testes ativos aprovados na suíte geral do workspace (0 falhas; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` e `cargo build --release`.
+- **Relatório Oficial de Auditoria Pós-Testes Físicos:**
+  - `docs/audits/MARCO_8_1_1_STT_WASAPI_POST_PHYSICAL_AUDIT.md`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Implementação controlada da Etapa 1 do STT concluída (precisão lexical, observabilidade de latência, decodificação configurável e ferramenta A/B); STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação do operador humano."`
+
+
 
 
 

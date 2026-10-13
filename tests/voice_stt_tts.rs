@@ -684,3 +684,254 @@ fn test_voice_diagnostics_session_artifacts_and_cleanup() {
     let _ = std::fs::remove_file(&norm_path);
     let _ = std::fs::remove_file(&json_path);
 }
+
+#[test]
+fn test_whisper_config_validation_and_builders() {
+    use yuki::voice::stt::{
+        validate_beam_size, validate_best_of, validate_threads, LocalWhisperConfig,
+    };
+
+    // 1. Validação de threads
+    assert!(validate_threads(1).is_ok());
+    assert!(validate_threads(4).is_ok());
+    assert!(validate_threads(64).is_ok());
+    assert!(validate_threads(0).is_err());
+    assert!(validate_threads(65).is_err());
+
+    // 2. Validação de beam size (1 a 10)
+    assert!(validate_beam_size(1).is_ok());
+    assert!(validate_beam_size(5).is_ok());
+    assert!(validate_beam_size(10).is_ok());
+    assert!(validate_beam_size(0).is_err());
+    assert!(validate_beam_size(11).is_err());
+
+    // 3. Validação de best of (1 a 10)
+    assert!(validate_best_of(1).is_ok());
+    assert!(validate_best_of(5).is_ok());
+    assert!(validate_best_of(10).is_ok());
+    assert!(validate_best_of(0).is_err());
+    assert!(validate_best_of(11).is_err());
+
+    // 4. Builders e mutadores
+    let mut cfg = LocalWhisperConfig::default();
+    assert_eq!(cfg.threads, None);
+    assert_eq!(cfg.beam_size, None);
+    assert!(!cfg.no_fallback);
+    assert!(!cfg.is_fast_mode());
+
+    cfg = cfg.with_threads(8).expect("valid threads");
+    assert_eq!(cfg.threads, Some(8));
+
+    cfg = cfg.with_beam_size(3).expect("valid beam size");
+    assert_eq!(cfg.beam_size, Some(3));
+
+    cfg = cfg.with_best_of(3).expect("valid best of");
+    assert_eq!(cfg.best_of, Some(3));
+
+    cfg = cfg.with_no_fallback(true);
+    assert!(cfg.no_fallback);
+
+    // Fast decoding ativa modo greedy (beam=1, bo=1, no-fallback=true)
+    let fast_cfg = LocalWhisperConfig::default().with_fast_decoding();
+    assert_eq!(fast_cfg.beam_size, Some(1));
+    assert_eq!(fast_cfg.best_of, Some(1));
+    assert!(fast_cfg.no_fallback);
+    assert!(fast_cfg.is_fast_mode());
+
+    // Prompt lexical com sanitização de espaço
+    let prompt_cfg = LocalWhisperConfig::default()
+        .with_initial_prompt("  Yuki, FUVEST, Engenharia de Computação.  ");
+    assert_eq!(
+        prompt_cfg.initial_prompt.as_deref(),
+        Some("Yuki, FUVEST, Engenharia de Computação.")
+    );
+
+    let empty_prompt = LocalWhisperConfig::default().with_initial_prompt("   ");
+    assert_eq!(empty_prompt.initial_prompt, None);
+}
+
+#[test]
+fn test_whisper_prompt_language_presets() {
+    use yuki::voice::stt::{
+        default_lexical_prompt_for_language, LocalWhisperConfig, YUKI_DEFAULT_VOCABULARY_PROMPT_PT,
+    };
+
+    assert_eq!(
+        default_lexical_prompt_for_language("pt"),
+        Some(YUKI_DEFAULT_VOCABULARY_PROMPT_PT)
+    );
+    assert_eq!(
+        default_lexical_prompt_for_language("pt-BR"),
+        Some(YUKI_DEFAULT_VOCABULARY_PROMPT_PT)
+    );
+    assert!(default_lexical_prompt_for_language("en").is_some());
+    assert!(default_lexical_prompt_for_language("es").is_some());
+    assert!(default_lexical_prompt_for_language("ja").is_some());
+
+    // Modo auto ou idiomas não-mapeados não devem receber prompt preset para evitar viés
+    assert_eq!(default_lexical_prompt_for_language("auto"), None);
+    assert_eq!(default_lexical_prompt_for_language("xyz"), None);
+
+    let cfg_pt = LocalWhisperConfig::default()
+        .with_language("pt")
+        .with_default_prompt_for_language();
+    assert_eq!(
+        cfg_pt.initial_prompt.as_deref(),
+        Some(YUKI_DEFAULT_VOCABULARY_PROMPT_PT)
+    );
+
+    let cfg_auto = LocalWhisperConfig::default()
+        .with_language("auto")
+        .with_default_prompt_for_language();
+    assert_eq!(cfg_auto.initial_prompt, None);
+}
+
+#[test]
+fn test_whisper_stderr_parsing_extended_metrics() {
+    use yuki::voice::stt::parse_whisper_stderr;
+
+    let mock_stderr = r#"
+whisper_init_from_file_with_params_no_state: loading model from 'models/whisper/ggml-small.bin'
+whisper_model_load: n_vocab       = 51865
+whisper_model_load: n_audio_ctx   = 1500
+whisper_full_with_state: auto-detected language: pt (p = 0.998412)
+whisper_print_timings:     load time =   142.35 ms
+whisper_print_timings:      mel time =    35.12 ms
+whisper_print_timings:   sample time =     8.45 ms
+whisper_print_timings:   encode time =   410.60 ms
+whisper_print_timings:   decode time =   895.20 ms
+whisper_print_timings:   prompt time =    18.70 ms
+whisper_print_timings:    total time =  1510.42 ms
+whisper_print_timings:     fallbacks = 1
+"#;
+
+    let meta = parse_whisper_stderr(mock_stderr);
+
+    assert_eq!(meta.detected_language.as_deref(), Some("pt"));
+    assert!((meta.probability.unwrap() - 0.998412).abs() < 1e-4);
+    assert_eq!(meta.load_time_ms, Some(142.35));
+    assert_eq!(meta.mel_time_ms, Some(35.12));
+    assert_eq!(meta.sample_time_ms, Some(8.45));
+    assert_eq!(meta.encode_time_ms, Some(410.60));
+    assert_eq!(meta.decode_time_ms, Some(895.20));
+    assert_eq!(meta.prompt_time_ms, Some(18.70));
+    assert_eq!(meta.total_time_ms, Some(1510.42));
+    assert_eq!(meta.fallbacks, Some(1));
+}
+
+#[tokio::test]
+async fn test_whisper_stt_silence_short_circuit_with_timings() {
+    let config = LocalWhisperConfig {
+        binary_path: Some(std::path::PathBuf::from("mock_whisper")),
+        model_path: Some(std::path::PathBuf::from("mock_model.bin")),
+        ..Default::default()
+    };
+    let provider = LocalWhisperSttProvider::new(config);
+
+    // Gera áudio 16kHz de 1 segundo de puro silêncio
+    let silent_samples = vec![0i16; 16000];
+    let format = AudioFormat {
+        sample_rate: 16000,
+        channels: 1,
+        bits_per_sample: 16,
+    };
+    let payload = AudioCodec::encode_wav(&silent_samples, &format).expect("encode wav ok");
+    let audio_input = AudioInput::new(payload, format, 1000, "silence_test");
+
+    let result = provider
+        .transcribe_with_metadata(&audio_input)
+        .await
+        .expect("transcribe silence ok");
+
+    assert_eq!(result.text, "");
+    assert!(result.timings.total_stt_wall_ms >= 0.0);
+    assert_eq!(result.timings.subprocess_wall_ms, 0.0);
+    assert_eq!(result.decoding_config.language_requested, "pt");
+}
+
+#[test]
+fn test_diagnostic_report_stt_integration_and_serialization() {
+    use yuki::contracts::voice::{
+        AudioDiagnosticsReport, BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo,
+        SttDecodingConfigSummary, SttTimingMetrics,
+    };
+    use yuki::voice::diag::update_diagnostic_with_stt;
+
+    let mut report = AudioDiagnosticsReport {
+        session_id: "test-stt-diag-01".to_string(),
+        timestamp: "2026-10-13T12:00:00Z".to_string(),
+        device_id: None,
+        device_name: None,
+        native_format: NativeAudioFormatInfo {
+            format_tag: 1,
+            format_tag_hex: "0x0001".to_string(),
+            format_tag_name: "PCM".to_string(),
+            is_extensible: false,
+            is_float: false,
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            block_align: 2,
+            avg_bytes_per_sec: 32000,
+            sub_format_guid: None,
+        },
+        timings: CaptureTimingMetrics {
+            requested_duration_ms: 1000,
+            init_duration_ms: 10,
+            effective_capture_ms: 1000,
+            samples_duration_ms: 1000,
+        },
+        buffer_metrics: BufferMetrics {
+            total_packets: 10,
+            total_raw_frames: 16000,
+            total_raw_bytes: 32000,
+            silent_buffer_events: 0,
+            discontinuity_glitches: 0,
+        },
+        acoustic_canonical: yuki::voice::diag::compute_acoustic_metrics(&[100i16; 16000], 16000),
+        acoustic_normalized: None,
+        stt_timings: None,
+        stt_config: None,
+        raw_wav_path: None,
+        canonical_wav_path: None,
+        normalized_wav_path: None,
+        report_path: None,
+    };
+
+    let timings = SttTimingMetrics {
+        audio_prep_ms: 1.5,
+        audio_norm_ms: 2.3,
+        temp_write_ms: 3.1,
+        subprocess_wall_ms: 450.0,
+        whisper_load_ms: Some(120.0),
+        whisper_mel_ms: Some(30.0),
+        whisper_sample_ms: Some(5.0),
+        whisper_encode_ms: Some(150.0),
+        whisper_decode_ms: Some(140.0),
+        whisper_prompt_ms: Some(10.0),
+        whisper_total_ms: Some(440.0),
+        whisper_fallbacks: Some(0),
+        post_process_ms: 0.8,
+        total_stt_wall_ms: 457.7,
+    };
+
+    let config = SttDecodingConfigSummary {
+        language_requested: "pt".to_string(),
+        prompt_configured: true,
+        prompt_preview: Some("Yuki, FUVEST...".to_string()),
+        threads: Some(4),
+        beam_size: Some(1),
+        best_of: Some(1),
+        no_fallback: true,
+    };
+
+    update_diagnostic_with_stt(&mut report, &timings, &config).expect("update stt ok");
+
+    assert!(report.stt_timings.is_some());
+    assert!(report.stt_config.is_some());
+
+    // Testa roundtrip de serialização JSON
+    let json = serde_json::to_string_pretty(&report).expect("serialize ok");
+    let deserialized: AudioDiagnosticsReport = serde_json::from_str(&json).expect("deserialize ok");
+    assert_eq!(report, deserialized);
+}

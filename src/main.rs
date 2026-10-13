@@ -150,6 +150,24 @@ pub enum VoiceCommands {
         /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
         #[arg(short, long)]
         language: Option<String>,
+        /// Prompt lexical opcional para enviesar o vocabulário (ex: "Yuki, FUVEST, OBMEP")
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Número de threads de decodificação do Whisper (padrão: 4)
+        #[arg(short, long)]
+        threads: Option<u32>,
+        /// Beam size para busca em feixe (padrão: 5, 1 para greedy)
+        #[arg(long)]
+        beam_size: Option<u32>,
+        /// Quantidade de candidatos best-of (padrão: 5, 1 para greedy)
+        #[arg(long)]
+        best_of: Option<u32>,
+        /// Desativa fallbacks de temperatura em caso de incerteza (evita re-tentativas lentas)
+        #[arg(long, default_value_t = false)]
+        no_fallback: bool,
+        /// Modo experimental rápido (greedy search: beam_size=1, best_of=1, sem fallback)
+        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        fast_stt: bool,
         /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
         #[arg(long, visible_alias = "diag", default_value_t = false)]
         diagnostics: bool,
@@ -171,7 +189,48 @@ pub enum VoiceCommands {
         /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
         #[arg(short, long)]
         language: Option<String>,
+        /// Prompt lexical opcional para enviesar o vocabulário (ex: "Yuki, FUVEST, OBMEP")
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Número de threads de decodificação do Whisper (padrão: 4)
+        #[arg(short, long)]
+        threads: Option<u32>,
+        /// Beam size para busca em feixe (padrão: 5, 1 para greedy)
+        #[arg(long)]
+        beam_size: Option<u32>,
+        /// Quantidade de candidatos best-of (padrão: 5, 1 para greedy)
+        #[arg(long)]
+        best_of: Option<u32>,
+        /// Desativa fallbacks de temperatura em caso de incerteza (evita re-tentativas lentas)
+        #[arg(long, default_value_t = false)]
+        no_fallback: bool,
+        /// Modo experimental rápido (greedy search: beam_size=1, best_of=1, sem fallback)
+        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        fast_stt: bool,
         /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
+        #[arg(long, visible_alias = "diag", default_value_t = false)]
+        diagnostics: bool,
+    },
+    /// Executa comparação A/B de decodificação STT sobre um mesmo arquivo WAV (Baseline vs Otimizado)
+    CompareStt {
+        /// Caminho do arquivo WAV para teste
+        file: String,
+        /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
+        #[arg(short, long)]
+        language: Option<String>,
+        /// Prompt lexical para a Configuração B (se omitido, usa vocabulário padrão da Yuki para o idioma)
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Threads para a Configuração B (opcional)
+        #[arg(short, long)]
+        threads: Option<u32>,
+        /// Beam size para a Configuração B (opcional)
+        #[arg(long)]
+        beam_size: Option<u32>,
+        /// Ativa modo de decodificação rápida na Configuração B (beam=1, best_of=1, no-fallback)
+        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        fast: bool,
+        /// Ativa modo de diagnóstico detalhado de áudio
         #[arg(long, visible_alias = "diag", default_value_t = false)]
         diagnostics: bool,
     },
@@ -829,6 +888,12 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             seconds,
             input_device,
             language,
+            prompt,
+            threads,
+            beam_size,
+            best_of,
+            no_fallback,
+            fast_stt,
             diagnostics,
         } => {
             use yuki::voice::stt::{
@@ -994,7 +1059,32 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
             };
 
-            let config = LocalWhisperConfig::default().with_language(effective_lang);
+            let mut config = LocalWhisperConfig::default().with_language(effective_lang);
+            if fast_stt {
+                config = config.with_fast_decoding();
+            }
+            if let Some(t) = threads {
+                if let Err(e) = config.set_threads(t) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(bs) = beam_size {
+                if let Err(e) = config.set_beam_size(bs) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(bo) = best_of {
+                if let Err(e) = config.set_best_of(bo) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if no_fallback {
+                config = config.with_no_fallback(true);
+            }
+            if let Some(ref p) = prompt {
+                config = config.with_initial_prompt(p.clone());
+            }
+
             let stt = LocalWhisperSttProvider::new(config);
             println!(
                 "Transcrevendo áudio via STT local Whisper (fonte: {}, idioma solicitado: '{}')...",
@@ -1022,9 +1112,18 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         audio_input.duration_ms as f64 / 1000.0,
                         audio_input.duration_ms
                     );
-                    println!("Latência total:     {:.2}s", result.elapsed.as_secs_f64());
+                    println!(
+                        "Latência total:     {:.2}s (Subprocesso: {:.2}s)",
+                        result.elapsed.as_secs_f64(),
+                        result.timings.subprocess_wall_ms / 1000.0
+                    );
                     if let Some(inference_ms) = result.whisper_total_time_ms {
                         println!("Tempo inferência:   {:.2}s", inference_ms / 1000.0);
+                    }
+                    if let Some(fb) = result.timings.whisper_fallbacks {
+                        if fb > 0 {
+                            println!("Fallbacks acionados:{}", fb);
+                        }
                     }
 
                     if let Some(ref diag) = result.diagnostics {
@@ -1042,6 +1141,12 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             output_device,
             play,
             language,
+            prompt,
+            threads,
+            beam_size,
+            best_of,
+            no_fallback,
+            fast_stt,
             diagnostics,
         } => {
             use std::sync::Arc;
@@ -1200,8 +1305,32 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
             let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
             let effective_lang = yuki::voice::stt::normalize_language_code(raw_lang);
-            let whisper_cfg =
+            let mut whisper_cfg =
                 yuki::voice::stt::LocalWhisperConfig::default().with_language(effective_lang);
+            if fast_stt {
+                whisper_cfg = whisper_cfg.with_fast_decoding();
+            }
+            if let Some(t) = threads {
+                if let Err(e) = whisper_cfg.set_threads(t) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(bs) = beam_size {
+                if let Err(e) = whisper_cfg.set_beam_size(bs) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(bo) = best_of {
+                if let Err(e) = whisper_cfg.set_best_of(bo) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if no_fallback {
+                whisper_cfg = whisper_cfg.with_no_fallback(true);
+            }
+            if let Some(ref p) = prompt {
+                whisper_cfg = whisper_cfg.with_initial_prompt(p.clone());
+            }
             let local_stt = Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
             let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
                 if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
@@ -1250,6 +1379,293 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
                 Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
             }
+        }
+        VoiceCommands::CompareStt {
+            file,
+            language,
+            prompt,
+            threads,
+            beam_size,
+            fast,
+            diagnostics,
+        } => {
+            use yuki::voice::stt::{
+                normalize_language_code, LocalWhisperConfig, LocalWhisperSttProvider,
+            };
+
+            let data = match std::fs::read(&file) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Erro ao ler arquivo '{}': {}", file, e);
+                    return;
+                }
+            };
+            let (format, samples) = match AudioCodec::decode_wav(&data) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Erro ao decodificar arquivo WAV '{}': {}", file, e);
+                    return;
+                }
+            };
+            let duration_ms = (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
+
+            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+            let effective_lang = normalize_language_code(raw_lang);
+            let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
+
+            let audio_input = AudioInput::new(data, format.clone(), duration_ms, file.clone());
+            if is_diag_active {
+                let acoustic =
+                    yuki::voice::diag::compute_acoustic_metrics(&samples, format.sample_rate);
+                println!("\n=== Análise Acústica Prévia do Arquivo ('{}') ===", file);
+                println!(
+                    "• Duração: {:.2}s ({} ms) | RMS: {:.1} ({:.2} dBFS) | Pico: {} ({:.2} dBFS)",
+                    duration_ms as f64 / 1000.0,
+                    duration_ms,
+                    acoustic.rms,
+                    acoustic.rms_dbfs,
+                    acoustic.peak,
+                    acoustic.peak_dbfs
+                );
+            }
+
+            println!("\n╔══════════════════════════════════════════════════════════════════════════════╗");
+            println!(
+                "║              TESTE COMPARATIVO A/B — STT LOCAL WHISPER (MARCO 8.1.1)         ║"
+            );
+            println!(
+                "╚══════════════════════════════════════════════════════════════════════════════╝"
+            );
+            println!("• Arquivo testado:     {}", file);
+            println!(
+                "• Duração do áudio:    {:.2}s ({} ms)",
+                duration_ms as f64 / 1000.0,
+                duration_ms
+            );
+            println!("• Idioma base:         {}", effective_lang);
+
+            // 1. Execução A: Baseline neutro (parâmetros padrão, sem prompt)
+            let config_a = LocalWhisperConfig::default().with_language(&effective_lang);
+            let stt_a = LocalWhisperSttProvider::new(config_a);
+            println!("\n[1/2] Executando Configuração A (Baseline neutro sem prompt)...");
+            let res_a = match stt_a.transcribe_with_metadata(&audio_input).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Falha na execução A (Baseline): {}", e);
+                    return;
+                }
+            };
+
+            // 2. Execução B: Experimental (Prompt configurado ou default da Yuki + flags de decodificação)
+            let mut config_b = LocalWhisperConfig::default().with_language(&effective_lang);
+            if fast {
+                config_b = config_b.with_fast_decoding();
+            }
+            if let Some(t) = threads {
+                if let Err(e) = config_b.set_threads(t) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(bs) = beam_size {
+                if let Err(e) = config_b.set_beam_size(bs) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(ref p) = prompt {
+                config_b = config_b.with_initial_prompt(p.clone());
+            } else {
+                config_b = config_b.with_default_prompt_for_language();
+            }
+
+            let stt_b = LocalWhisperSttProvider::new(config_b);
+            println!("[2/2] Executando Configuração B (Experimental com contexto lexical/decodificação)...");
+            let res_b = match stt_b.transcribe_with_metadata(&audio_input).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Falha na execução B (Experimental): {}", e);
+                    return;
+                }
+            };
+
+            // 3. Relatório Comparativo Estruturado
+            println!("\n════════════════════════════════════════════════════════════════════════════════");
+            println!(
+                "                           QUADRO COMPARATIVO A/B                               "
+            );
+            println!(
+                "════════════════════════════════════════════════════════════════════════════════"
+            );
+            println!(
+                "{:<24} | {:<25} | {:<25}",
+                "Métrica / Parâmetro", "Config A (Baseline)", "Config B (Experimental)"
+            );
+            println!("{:-<24}-+-{:-<25}-+-{:-<25}", "", "", "");
+
+            let p_a_desc = "Desativado";
+            let p_b_desc = res_b
+                .decoding_config
+                .prompt_preview
+                .as_deref()
+                .unwrap_or("Ativo");
+            println!(
+                "{:<24} | {:<25} | {:<25}",
+                "Prompt Lexical", p_a_desc, p_b_desc
+            );
+
+            let th_a = res_a
+                .decoding_config
+                .threads
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "4 (default)".into());
+            let th_b = res_b
+                .decoding_config
+                .threads
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "4 (default)".into());
+            println!("{:<24} | {:<25} | {:<25}", "Threads (-t)", th_a, th_b);
+
+            let bs_a = res_a
+                .decoding_config
+                .beam_size
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "5 (default)".into());
+            let bs_b = res_b
+                .decoding_config
+                .beam_size
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "5 (default)".into());
+            println!("{:<24} | {:<25} | {:<25}", "Beam Size (-bs)", bs_a, bs_b);
+
+            let bo_a = res_a
+                .decoding_config
+                .best_of
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "5 (default)".into());
+            let bo_b = res_b
+                .decoding_config
+                .best_of
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "5 (default)".into());
+            println!("{:<24} | {:<25} | {:<25}", "Best-of (-bo)", bo_a, bo_b);
+
+            let nf_a = if res_a.decoding_config.no_fallback {
+                "Sim"
+            } else {
+                "Não (0.2, 0.4, 0.6)"
+            };
+            let nf_b = if res_b.decoding_config.no_fallback {
+                "Sim (--no-fallback)"
+            } else {
+                "Não (0.2, 0.4, 0.6)"
+            };
+            println!("{:<24} | {:<25} | {:<25}", "Sem Fallback", nf_a, nf_b);
+
+            println!("{:-<24}-+-{:-<25}-+-{:-<25}", "", "", "");
+            println!(
+                "{:<24} | {:<25} | {:<25}",
+                "Subprocesso (Wall)",
+                format!("{:.1} ms", res_a.timings.subprocess_wall_ms),
+                format!("{:.1} ms", res_b.timings.subprocess_wall_ms)
+            );
+
+            let w_tot_a = res_a
+                .timings
+                .whisper_total_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            let w_tot_b = res_b
+                .timings
+                .whisper_total_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            println!(
+                "{:<24} | {:<25} | {:<25}",
+                "Whisper Total", w_tot_a, w_tot_b
+            );
+
+            let enc_a = res_a
+                .timings
+                .whisper_encode_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            let enc_b = res_b
+                .timings
+                .whisper_encode_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            println!("{:<24} | {:<25} | {:<25}", "Encoder Whisper", enc_a, enc_b);
+
+            let dec_a = res_a
+                .timings
+                .whisper_decode_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            let dec_b = res_b
+                .timings
+                .whisper_decode_ms
+                .map(|v| format!("{:.1} ms", v))
+                .unwrap_or_else(|| "N/D".into());
+            println!("{:<24} | {:<25} | {:<25}", "Decoder Whisper", dec_a, dec_b);
+
+            let fb_a = res_a
+                .timings
+                .whisper_fallbacks
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "0".into());
+            let fb_b = res_b
+                .timings
+                .whisper_fallbacks
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "0".into());
+            println!("{:<24} | {:<25} | {:<25}", "Fallbacks Usados", fb_a, fb_b);
+
+            println!(
+                "{:<24} | {:<25} | {:<25}",
+                "Latência Total STT",
+                format!("{:.2} s", res_a.elapsed.as_secs_f64()),
+                format!("{:.2} s", res_b.elapsed.as_secs_f64())
+            );
+
+            println!(
+                "════════════════════════════════════════════════════════════════════════════════"
+            );
+
+            // Cálculo do delta de desempenho
+            let wall_a = res_a.timings.subprocess_wall_ms;
+            let wall_b = res_b.timings.subprocess_wall_ms;
+            if wall_a > 0.0 && wall_b > 0.0 {
+                let speedup = wall_a / wall_b;
+                let reduction_pct = (1.0 - wall_b / wall_a) * 100.0;
+                if speedup >= 1.0 {
+                    println!(
+                        "• Ganho de Velocidade: {:.2}x mais rápido ({:+.1}% de latência economizada)",
+                        speedup, reduction_pct
+                    );
+                } else {
+                    println!(
+                        "• Variação de Tempo:   {:.2}x ({:+.1}% de tempo adicional)",
+                        speedup, -reduction_pct
+                    );
+                }
+            }
+
+            println!("\n--- Transcrições Obtidas ---");
+            println!("• Config A (Baseline):");
+            println!("  \"{}\"", res_a.text);
+            println!("• Config B (Experimental):");
+            println!("  \"{}\"", res_b.text);
+
+            if res_a.text == res_b.text {
+                println!(
+                    "\n• Análise Textual:      Transcrição IDÊNTICA entre as duas configurações."
+                );
+            } else {
+                println!(
+                    "\n• Análise Textual:      Diferença identificada no reconhecimento do texto."
+                );
+            }
+            println!("════════════════════════════════════════════════════════════════════════════════\n");
         }
         VoiceCommands::Voices => {
             use yuki::voice::stt::{list_local_whisper_models, LocalWhisperSttProvider};

@@ -1,12 +1,65 @@
 use crate::contracts::identifiers::generate_unique_id;
 use crate::contracts::voice::{
-    AudioInput, SpeechToTextProvider, VoiceError, VoiceProviderMetadata, VoiceProviderType,
+    AudioInput, SpeechToTextProvider, SttDecodingConfigSummary, SttTimingMetrics, VoiceError,
+    VoiceProviderMetadata, VoiceProviderType,
 };
 use crate::voice::audio::AudioCodec;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
+
+/// Contexto lexical padrão de referência para português brasileiro.
+pub const YUKI_DEFAULT_VOCABULARY_PROMPT_PT: &str =
+    "Yuki, FUVEST, OBMEP, Engenharia de Computação.";
+
+/// Retorna o contexto lexical padrão recomendado conforme o idioma solicitado.
+/// Retorna `None` para modo 'auto' ou idiomas sem preset para evitar enviesamento.
+pub fn default_lexical_prompt_for_language(lang: &str) -> Option<&'static str> {
+    match normalize_language_code(lang).as_str() {
+        "pt" => Some(YUKI_DEFAULT_VOCABULARY_PROMPT_PT),
+        "en" => Some("Yuki, artificial intelligence, computer science."),
+        "es" => Some("Yuki, inteligencia artificial, ingeniería."),
+        "ja" => Some("Yuki、人工知能、コンピュータ工学。"),
+        _ => None,
+    }
+}
+
+/// Valida limites do número de threads do Whisper (1 a 64).
+pub fn validate_threads(threads: u32) -> Result<u32, VoiceError> {
+    if threads == 0 || threads > 64 {
+        Err(VoiceError::InvalidAudioFormat(format!(
+            "Número de threads inválido: {} (deve estar entre 1 e 64)",
+            threads
+        )))
+    } else {
+        Ok(threads)
+    }
+}
+
+/// Valida limites do tamanho de feixe beam search (1 a 10).
+pub fn validate_beam_size(beam_size: u32) -> Result<u32, VoiceError> {
+    if beam_size == 0 || beam_size > 10 {
+        Err(VoiceError::InvalidAudioFormat(format!(
+            "Tamanho de feixe (beam size) inválido: {} (deve estar entre 1 e 10)",
+            beam_size
+        )))
+    } else {
+        Ok(beam_size)
+    }
+}
+
+/// Valida limites de melhores hipóteses mantidas (1 a 10).
+pub fn validate_best_of(best_of: u32) -> Result<u32, VoiceError> {
+    if best_of == 0 || best_of > 10 {
+        Err(VoiceError::InvalidAudioFormat(format!(
+            "Número de melhores hipóteses (best-of) inválido: {} (deve estar entre 1 e 10)",
+            best_of
+        )))
+    } else {
+        Ok(best_of)
+    }
+}
 
 /// Configuração do adaptador local Whisper para reconhecimento de fala offline.
 #[derive(Debug, Clone)]
@@ -17,6 +70,16 @@ pub struct LocalWhisperConfig {
     pub timeout: Duration,
     pub max_duration_ms: u64,
     pub max_bytes: usize,
+    /// Contexto lexical inicial opcional para condicionamento fonético do decodificador (--prompt)
+    pub initial_prompt: Option<String>,
+    /// Número explícito de threads para o cálculo do Whisper (-t / --threads)
+    pub threads: Option<u32>,
+    /// Tamanho do feixe para busca beam search (-bs / --beam-size)
+    pub beam_size: Option<u32>,
+    /// Número de melhores hipóteses a manter (-bo / --best-of)
+    pub best_of: Option<u32>,
+    /// Desativa o fallback de temperatura ao decodificar (-nf / --no-fallback)
+    pub no_fallback: bool,
 }
 
 impl LocalWhisperConfig {
@@ -30,6 +93,84 @@ impl LocalWhisperConfig {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Configura o contexto lexical inicial (--prompt). Se vazio, desativa o contexto.
+    pub fn with_initial_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let p = prompt.into();
+        let trimmed = p.trim().to_string();
+        self.initial_prompt = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        self
+    }
+
+    /// Configura o contexto lexical padrão recomendado conforme o idioma ativo.
+    pub fn with_default_prompt_for_language(mut self) -> Self {
+        if let Some(preset) = default_lexical_prompt_for_language(&self.language) {
+            self.initial_prompt = Some(preset.to_string());
+        }
+        self
+    }
+
+    /// Define explicitamente o número de threads do Whisper (-t).
+    pub fn set_threads(&mut self, threads: u32) -> Result<(), VoiceError> {
+        let val = validate_threads(threads)?;
+        self.threads = Some(val);
+        Ok(())
+    }
+
+    /// Configura explicitamente o número de threads do Whisper (-t) em padrão builder.
+    pub fn with_threads(mut self, threads: u32) -> Result<Self, VoiceError> {
+        self.set_threads(threads)?;
+        Ok(self)
+    }
+
+    /// Define explicitamente o beam size (-bs).
+    pub fn set_beam_size(&mut self, beam_size: u32) -> Result<(), VoiceError> {
+        let val = validate_beam_size(beam_size)?;
+        self.beam_size = Some(val);
+        Ok(())
+    }
+
+    /// Configura explicitamente o beam size (-bs) em padrão builder.
+    pub fn with_beam_size(mut self, beam_size: u32) -> Result<Self, VoiceError> {
+        self.set_beam_size(beam_size)?;
+        Ok(self)
+    }
+
+    /// Define explicitamente o best-of (-bo).
+    pub fn set_best_of(&mut self, best_of: u32) -> Result<(), VoiceError> {
+        let val = validate_best_of(best_of)?;
+        self.best_of = Some(val);
+        Ok(())
+    }
+
+    /// Configura explicitamente o best-of (-bo) em padrão builder.
+    pub fn with_best_of(mut self, best_of: u32) -> Result<Self, VoiceError> {
+        self.set_best_of(best_of)?;
+        Ok(self)
+    }
+
+    /// Ativa ou desativa o fallback de temperatura (-nf / --no-fallback).
+    pub fn with_no_fallback(mut self, no_fallback: bool) -> Self {
+        self.no_fallback = no_fallback;
+        self
+    }
+
+    /// Ativa modo experimental de baixa latência (greedy search com beam_size=1, best_of=1 e sem fallback).
+    pub fn with_fast_decoding(mut self) -> Self {
+        self.beam_size = Some(1);
+        self.best_of = Some(1);
+        self.no_fallback = true;
+        self
+    }
+
+    /// Retorna verdadeiro se a configuração ativa corresponde a modo de decodificação rápida (greedy search).
+    pub fn is_fast_mode(&self) -> bool {
+        self.beam_size == Some(1) && self.best_of == Some(1) && self.no_fallback
     }
 }
 
@@ -57,6 +198,34 @@ impl Default for LocalWhisperConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
 
+        let initial_prompt = std::env::var("YUKI_WHISPER_PROMPT").ok().and_then(|p| {
+            let t = p.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+
+        let threads = std::env::var("YUKI_WHISPER_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|t| validate_threads(t).ok());
+
+        let beam_size = std::env::var("YUKI_WHISPER_BEAM_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|b| validate_beam_size(b).ok());
+
+        let best_of = std::env::var("YUKI_WHISPER_BEST_OF")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|b| validate_best_of(b).ok());
+
+        let no_fallback = std::env::var("YUKI_WHISPER_NO_FALLBACK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         Self {
             binary_path,
             model_path,
@@ -64,6 +233,11 @@ impl Default for LocalWhisperConfig {
             timeout: Duration::from_secs(timeout_secs),
             max_duration_ms: 30_000,
             max_bytes: 5 * 1024 * 1024,
+            initial_prompt,
+            threads,
+            beam_size,
+            best_of,
+            no_fallback,
         }
     }
 }
@@ -217,10 +391,27 @@ pub struct WhisperDetectionMetadata {
     pub probability: Option<f32>,
     /// Tempo de carregamento do modelo em milissegundos.
     pub load_time_ms: Option<f32>,
+    /// Tempo de cálculo do Mel spectrogram em milissegundos.
+    pub mel_time_ms: Option<f32>,
+    /// Tempo de amostragem (sampling) em milissegundos.
+    pub sample_time_ms: Option<f32>,
     /// Tempo do encoder em milissegundos.
     pub encode_time_ms: Option<f32>,
+    /// Tempo do decoder em milissegundos.
+    pub decode_time_ms: Option<f32>,
+    /// Tempo de processamento do prompt em milissegundos.
+    pub prompt_time_ms: Option<f32>,
     /// Tempo total de processamento em milissegundos reportado pelo whisper.cpp.
     pub total_time_ms: Option<f32>,
+    /// Quantidade de fallbacks de temperatura acionados durante a decodificação.
+    pub fallbacks: Option<u32>,
+}
+
+fn parse_ms_val(line: &str) -> Option<f32> {
+    let idx = line.find('=')?;
+    let s = line[idx + 1..].trim();
+    let val_str = s.split_whitespace().next().unwrap_or("");
+    val_str.parse::<f32>().ok()
 }
 
 /// Extrai idioma detectado, probabilidade e métricas de tempo do stderr do whisper.cpp.
@@ -252,28 +443,40 @@ pub fn parse_whisper_stderr(stderr: &str) -> WhisperDetectionMetadata {
                     meta.probability = Some(prob);
                 }
             }
-        } else if line_trim.contains("whisper_print_timings:     load time =") {
-            if let Some(idx) = line_trim.find('=') {
-                let s = line_trim[idx + 1..].trim();
-                let val_str = s.split_whitespace().next().unwrap_or("");
-                if let Ok(v) = val_str.parse::<f32>() {
-                    meta.load_time_ms = Some(v);
-                }
+        } else if line_trim.contains("load time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.load_time_ms = Some(v);
             }
-        } else if line_trim.contains("whisper_print_timings:   encode time =") {
-            if let Some(idx) = line_trim.find('=') {
-                let s = line_trim[idx + 1..].trim();
-                let val_str = s.split_whitespace().next().unwrap_or("");
-                if let Ok(v) = val_str.parse::<f32>() {
-                    meta.encode_time_ms = Some(v);
-                }
+        } else if line_trim.contains("mel time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.mel_time_ms = Some(v);
             }
-        } else if line_trim.contains("whisper_print_timings:    total time =") {
+        } else if line_trim.contains("sample time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.sample_time_ms = Some(v);
+            }
+        } else if line_trim.contains("encode time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.encode_time_ms = Some(v);
+            }
+        } else if line_trim.contains("decode time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.decode_time_ms = Some(v);
+            }
+        } else if line_trim.contains("prompt time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.prompt_time_ms = Some(v);
+            }
+        } else if line_trim.contains("total time =") {
+            if let Some(v) = parse_ms_val(line_trim) {
+                meta.total_time_ms = Some(v);
+            }
+        } else if line_trim.contains("fallbacks =") {
             if let Some(idx) = line_trim.find('=') {
-                let s = line_trim[idx + 1..].trim();
-                let val_str = s.split_whitespace().next().unwrap_or("");
-                if let Ok(v) = val_str.parse::<f32>() {
-                    meta.total_time_ms = Some(v);
+                let rest = line_trim[idx + 1..].trim();
+                let val_str = rest.split_whitespace().next().unwrap_or("");
+                if let Ok(fb) = val_str.parse::<u32>() {
+                    meta.fallbacks = Some(fb);
                 }
             }
         }
@@ -301,6 +504,10 @@ pub struct LocalTranscriptionResult {
     pub model_path: PathBuf,
     /// Relatório diagnóstico detalhado de áudio (se presente na entrada).
     pub diagnostics: Option<crate::contracts::voice::AudioDiagnosticsReport>,
+    /// Decomposição de latência medida diretamente pela Yuki e reportada pelo Whisper.
+    pub timings: SttTimingMetrics,
+    /// Resumo dos parâmetros de decodificação utilizados na execução.
+    pub decoding_config: SttDecodingConfigSummary,
 }
 
 fn which_whisper() -> Option<PathBuf> {
@@ -421,6 +628,7 @@ impl LocalWhisperSttProvider {
         }
 
         // 2. Decodifica o áudio WAV
+        let t_prep_start = std::time::Instant::now();
         let (format, samples) = AudioCodec::decode_wav(&audio.payload)?;
         if format.sample_rate != 16000 {
             return Err(VoiceError::InvalidAudioFormat(format!(
@@ -446,6 +654,23 @@ impl LocalWhisperSttProvider {
 
         // 4. Converte para mono
         let mut mono_samples = AudioCodec::to_mono(&samples, format.channels);
+        let audio_prep_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
+
+        let decoding_config_summary = SttDecodingConfigSummary {
+            language_requested: self.config.language.clone(),
+            prompt_configured: self.config.initial_prompt.is_some(),
+            prompt_preview: self.config.initial_prompt.as_ref().map(|p| {
+                if p.len() > 60 {
+                    format!("{}...", &p[..57])
+                } else {
+                    p.clone()
+                }
+            }),
+            threads: self.config.threads,
+            beam_size: self.config.beam_size,
+            best_of: self.config.best_of,
+            no_fallback: self.config.no_fallback,
+        };
 
         // 5. Curto-circuito econômico: verifica silêncio acústico ANTES da normalização.
         // Se verificado após a normalização, o piso de ruído seria artificialmente amplificado,
@@ -454,6 +679,12 @@ impl LocalWhisperSttProvider {
             tracing::debug!(
                 "Áudio identificado como silêncio acústico; transcrição concluída vazia."
             );
+            let total_stt_wall_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+            let timings = SttTimingMetrics {
+                audio_prep_ms,
+                total_stt_wall_ms,
+                ..Default::default()
+            };
             return Ok(LocalTranscriptionResult {
                 text: String::new(),
                 language_requested: self.config.language.clone(),
@@ -463,10 +694,13 @@ impl LocalWhisperSttProvider {
                 whisper_total_time_ms: None,
                 model_path: model_path.clone(),
                 diagnostics: audio.diagnostics.clone(),
+                timings,
+                decoding_config: decoding_config_summary,
             });
         }
 
         // 6. Normaliza amplitude com margem de segurança contra saturação (clipping)
+        let t_norm_start = std::time::Instant::now();
         AudioCodec::normalize_amplitude(&mut mono_samples, 28000);
 
         // Re-codifica áudio WAV normalizado para entrega ao processo do whisper
@@ -476,6 +710,7 @@ impl LocalWhisperSttProvider {
             bits_per_sample: 16,
         };
         let normalized_wav = AudioCodec::encode_wav(&mono_samples, &norm_format)?;
+        let audio_norm_ms = t_norm_start.elapsed().as_secs_f64() * 1000.0;
 
         let mut diag_opt = audio.diagnostics.clone();
         if let Some(ref mut diag) = diag_opt {
@@ -487,11 +722,13 @@ impl LocalWhisperSttProvider {
         }
 
         // 7. Cria arquivo temporário atômico para o áudio com alta entropia
+        let t_write_start = std::time::Instant::now();
         let temp_dir = std::env::temp_dir();
         let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
 
         std::fs::write(&temp_wav_path, &normalized_wav)
             .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
+        let temp_write_ms = t_write_start.elapsed().as_secs_f64() * 1000.0;
 
         // Limpa o arquivo temporário ao final da execução (Drop garantido)
         struct TempCleaner(PathBuf);
@@ -503,21 +740,45 @@ impl LocalWhisperSttProvider {
         let _cleaner = TempCleaner(temp_wav_path.clone());
 
         // 8. Executa processo Whisper de forma assíncrona com controle de timeout e término garantido
+        let t_sub_start = std::time::Instant::now();
         let timeout_duration = self.config.timeout;
-        let mut child = tokio::process::Command::new(bin_path)
-            .arg("-m")
+        let mut cmd = tokio::process::Command::new(bin_path);
+        cmd.arg("-m")
             .arg(model_path)
             .arg("-f")
             .arg(&temp_wav_path)
             .arg("-l")
             .arg(&self.config.language)
-            .arg("--no-timestamps")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                VoiceError::TranscriptionFailed(format!("Falha ao iniciar processo whisper: {}", e))
-            })?;
+            .arg("--no-timestamps");
+
+        if let Some(ref prompt) = self.config.initial_prompt {
+            if !prompt.trim().is_empty() {
+                cmd.arg("--prompt").arg(prompt);
+            }
+        }
+
+        if let Some(threads) = self.config.threads {
+            cmd.arg("-t").arg(threads.to_string());
+        }
+
+        if let Some(beam_size) = self.config.beam_size {
+            cmd.arg("-bs").arg(beam_size.to_string());
+        }
+
+        if let Some(best_of) = self.config.best_of {
+            cmd.arg("-bo").arg(best_of.to_string());
+        }
+
+        if self.config.no_fallback {
+            cmd.arg("--no-fallback");
+        }
+
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            VoiceError::TranscriptionFailed(format!("Falha ao iniciar processo whisper: {}", e))
+        })?;
 
         let mut stdout = child.stdout.take().ok_or_else(|| {
             VoiceError::TranscriptionFailed("Stdout do processo não capturado".to_string())
@@ -558,6 +819,7 @@ impl LocalWhisperSttProvider {
             }
         };
 
+        let subprocess_wall_ms = t_sub_start.elapsed().as_secs_f64() * 1000.0;
         let stderr_str = String::from_utf8_lossy(&stderr_bytes);
 
         if !status.success() {
@@ -568,12 +830,41 @@ impl LocalWhisperSttProvider {
             )));
         }
 
-        let elapsed = start_instant.elapsed();
+        let t_post_start = std::time::Instant::now();
         let raw_text = String::from_utf8_lossy(&stdout_bytes);
         let sanitized = sanitize_whisper_transcript(&raw_text);
+        let post_process_ms = t_post_start.elapsed().as_secs_f64() * 1000.0;
+
+        let elapsed = start_instant.elapsed();
+        let total_stt_wall_ms = elapsed.as_secs_f64() * 1000.0;
 
         // Extrai metadados diagnósticos da saída stderr (detecção de idioma e timings)
         let detection_meta = parse_whisper_stderr(&stderr_str);
+
+        let timings = SttTimingMetrics {
+            audio_prep_ms,
+            audio_norm_ms,
+            temp_write_ms,
+            subprocess_wall_ms,
+            whisper_load_ms: detection_meta.load_time_ms,
+            whisper_mel_ms: detection_meta.mel_time_ms,
+            whisper_sample_ms: detection_meta.sample_time_ms,
+            whisper_encode_ms: detection_meta.encode_time_ms,
+            whisper_decode_ms: detection_meta.decode_time_ms,
+            whisper_prompt_ms: detection_meta.prompt_time_ms,
+            whisper_total_ms: detection_meta.total_time_ms,
+            whisper_fallbacks: detection_meta.fallbacks,
+            post_process_ms,
+            total_stt_wall_ms,
+        };
+
+        if let Some(ref mut diag) = diag_opt {
+            let _ = crate::voice::diag::update_diagnostic_with_stt(
+                diag,
+                &timings,
+                &decoding_config_summary,
+            );
+        }
 
         tracing::info!(
             "Transcrição local Whisper concluída em {:?}: \"{}\" (solicitado: {}, detectado: {:?})",
@@ -592,6 +883,8 @@ impl LocalWhisperSttProvider {
             whisper_total_time_ms: detection_meta.total_time_ms,
             model_path: model_path.clone(),
             diagnostics: diag_opt,
+            timings,
+            decoding_config: decoding_config_summary,
         })
     }
 }
