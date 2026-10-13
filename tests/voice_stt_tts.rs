@@ -1654,3 +1654,215 @@ async fn test_ab_resampler_real_audio_dsp_comparison() {
         assert!(ab_rep.wer_fir.is_some());
     }
 }
+
+#[test]
+fn test_dsp_resampler_streaming_oneshot_strict_equivalence_all_chunks_and_signals() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::resample::AudioResampler;
+
+    // Gerador de ruído determinístico LCG simples com seed fixa
+    fn generate_lcg_noise(len: usize, seed: u32) -> Vec<i16> {
+        let mut state = seed;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let s = ((state >> 16) as i32) - 32768;
+            v.push(s.clamp(-32768, 32767) as i16);
+        }
+        v
+    }
+
+    // Gerador de senoide determinística
+    fn generate_sine(len: usize, freq_hz: f64, fs: f64) -> Vec<i16> {
+        (0..len)
+            .map(|i| {
+                let t = i as f64 / fs;
+                (20000.0 * (2.0 * std::f64::consts::PI * freq_hz * t).sin()) as i16
+            })
+            .collect()
+    }
+
+    // 3. Impulsos
+    let mut imp_start = vec![0i16; 480];
+    imp_start[0] = 30000;
+    let mut imp_mid = vec![0i16; 480];
+    imp_mid[240] = 30000;
+    let mut imp_end = vec![0i16; 480];
+    imp_end[479] = 30000;
+
+    // Lista abrangente de sinais de teste (Etapa 2B.1 Seção 5)
+    let test_signals: Vec<(&str, Vec<i16>)> = vec![
+        ("curto_1", vec![15000i16]),
+        ("curto_2", vec![15000i16, -10000]),
+        ("curto_3", vec![1000i16, 2000, 3000]),
+        ("curto_4", vec![1000i16, 2000, 3000, 4000]),
+        ("curto_5", vec![-5000i16, 0, 5000, 10000, 15000]),
+        ("silencio_480", vec![0i16; 480]),
+        ("silencio_1001", vec![0i16; 1001]),
+        ("impulso_comeco", imp_start),
+        ("impulso_meio", imp_mid),
+        ("impulso_fim", imp_end),
+        ("senoide_1k_nao_div_3", generate_sine(482, 1000.0, 48000.0)),
+        ("senoide_1k_1440", generate_sine(1440, 1000.0, 48000.0)),
+        ("ruido_lcg_2400", generate_lcg_noise(2400, 42)),
+        ("ruido_lcg_97", generate_lcg_noise(97, 1337)),
+        ("ruido_lcg_1001", generate_lcg_noise(1001, 777)),
+    ];
+
+    // Tamanhos de blocos exigidos pela auditoria
+    let fixed_chunk_sizes = [1, 2, 3, 7, 64, 127, 480, 1024];
+
+    // Testa ambos os modos: FirAntialiasing e LinearBaseline
+    let strategies = [
+        ResamplerKind::FirAntialiasing,
+        ResamplerKind::LinearBaseline,
+    ];
+
+    for &kind in &strategies {
+        for (sig_name, signal) in &test_signals {
+            // 1. Processamento de referência One-Shot
+            let oneshot_ref = AudioResampler::resample_oneshot(signal, 48000, 16000, kind);
+            let expected_len = AudioResampler::calculate_out_len(signal.len(), 48000, 16000);
+
+            assert_eq!(
+                oneshot_ref.len(),
+                expected_len,
+                "[{:?}] {} len oneshot mismatch: esperado {}, obtido {}",
+                kind,
+                sig_name,
+                expected_len,
+                oneshot_ref.len()
+            );
+
+            // 2. Validação para cada tamanho fixo de bloco
+            for &chunk_size in &fixed_chunk_sizes {
+                let mut resampler = AudioResampler::new(48000, 16000, kind);
+                let mut streamed_out = Vec::new();
+
+                for chunk in signal.chunks(chunk_size) {
+                    let out = resampler.process_streaming(chunk);
+                    streamed_out.extend(out);
+                }
+                let flush_out = resampler.flush();
+                streamed_out.extend(flush_out);
+
+                assert_eq!(
+                    streamed_out.len(),
+                    oneshot_ref.len(),
+                    "[{:?}] {} chunk_size={} comprimento diverge: streamed={}, oneshot={}",
+                    kind,
+                    sig_name,
+                    chunk_size,
+                    streamed_out.len(),
+                    oneshot_ref.len()
+                );
+
+                assert_eq!(
+                    streamed_out,
+                    oneshot_ref,
+                    "[{:?}] {} chunk_size={} equivalência estrita violada (diferença numérica detectada)",
+                    kind,
+                    sig_name,
+                    chunk_size
+                );
+            }
+
+            // 3. Validação com blocos de tamanhos variáveis pseudo-aleatórios e blocos vazios intercalados
+            {
+                let mut resampler = AudioResampler::new(48000, 16000, kind);
+                let mut streamed_var = Vec::new();
+
+                let mut offset = 0;
+                let mut step_seed = 12345u32;
+                while offset < signal.len() {
+                    step_seed = step_seed.wrapping_mul(1103515245).wrapping_add(12345);
+                    let var_size = ((step_seed % 53) + 1) as usize; // blocos de 1 a 53 amostras
+                    let end = (offset + var_size).min(signal.len());
+                    let chunk = &signal[offset..end];
+
+                    // Intercala bloco vazio esporadicamente
+                    if step_seed.is_multiple_of(5) {
+                        let empty_out = resampler.process_streaming(&[]);
+                        assert!(empty_out.is_empty(), "Bloco vazio deve retornar vazio");
+                    }
+
+                    let out = resampler.process_streaming(chunk);
+                    streamed_var.extend(out);
+                    offset = end;
+                }
+                streamed_var.extend(resampler.flush());
+
+                assert_eq!(
+                    streamed_var, oneshot_ref,
+                    "[{:?}] {} blocos variáveis e vazios: equivalência estrita violada",
+                    kind, sig_name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_dsp_resampler_reset_and_transient_preservation() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::resample::AudioResampler;
+
+    let mut resampler = AudioResampler::fir_48k_to_16k();
+
+    // 1. Sinal com impulso unitário no início
+    let mut sig1 = vec![0i16; 300];
+    sig1[0] = 25000;
+
+    let out1_a =
+        AudioResampler::resample_oneshot(&sig1, 48000, 16000, ResamplerKind::FirAntialiasing);
+
+    // Processa via streaming
+    let mut out1_stream = resampler.process_streaming(&sig1[..150]);
+    out1_stream.extend(resampler.process_streaming(&sig1[150..]));
+    out1_stream.extend(resampler.flush());
+
+    assert_eq!(out1_a, out1_stream);
+
+    // O impulso em sample 0 deve produzir energia máxima em out[0]
+    let peak_idx = out1_a
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &s)| s.abs())
+        .map(|(i, _)| i)
+        .unwrap();
+    assert_eq!(
+        peak_idx, 0,
+        "Impulso em t=0 deve ter pico alinhado em out[0]"
+    );
+
+    // 2. Testa reset: após reset(), o resampler deve comportar-se exatamente como novo
+    resampler.reset();
+    assert_eq!(resampler.total_in_samples(), 0);
+    assert_eq!(resampler.emitted_out_samples(), 0);
+
+    let mut out1_after_reset = resampler.process_streaming(&sig1);
+    out1_after_reset.extend(resampler.flush());
+
+    assert_eq!(
+        out1_a, out1_after_reset,
+        "Após reset(), resampler deve gerar saída idêntica"
+    );
+
+    // 3. Sinal com impulso no final
+    let mut sig2 = vec![0i16; 300];
+    sig2[299] = 25000;
+    let out2 =
+        AudioResampler::resample_oneshot(&sig2, 48000, 16000, ResamplerKind::FirAntialiasing);
+
+    let last_peak_idx = out2
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &s)| s.abs())
+        .map(|(i, _)| i)
+        .unwrap();
+    assert_eq!(
+        last_peak_idx,
+        out2.len() - 1,
+        "Impulso no fim deve ter pico na última amostra de saída"
+    );
+}

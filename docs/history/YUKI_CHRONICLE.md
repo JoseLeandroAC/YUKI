@@ -1662,6 +1662,45 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Reamostragem Antialiasing e Integridade Acústica (Etapa 2B) concluída e validada em laboratório com baseline linear preservado; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador humano."`
 
+---
+
+## 2026-10-13 — Marco 8.1.1: Conclusão da Etapa 2B.1 — Correção de Streaming, Finalização (flush) e Consistência do Resampler FIR
+
+- **Contexto e Missão**:
+  - A auditoria da Etapa 2B identificou uma inconsistência entre o caminho em lote (`AudioResampler::resample_oneshot`) e o caminho em streaming (`AudioResampler::process_streaming`).
+  - No streaming anterior, o resampler acumulava amostras e convolvía quando havia 97 amostras, introduzindo desalinhamento temporal de borda em relação ao modo centrado e não possuía uma operação explícita de finalização (`flush()`), resultando na perda das últimas amostras da gravação capturada.
+  - Além disso, a auditoria exigiu a investigação formal do resultado de WER de 100% no teste T14 e a preservação rigorosa da integridade do corpus (`review_pending: true` e `ground_truth: null` para transcrições não confirmadas expressamente pelo operador).
+  - Em governança: o resampler linear anterior (`LinearBaseline`) permanece mandatado como padrão operacional temporário até a conclusão da validação física, mantendo o FIR disponível por seleção explícita via `YUKI_VOICE_RESAMPLER=fir`.
+- **Implementação Conclusiva (Etapa 2B.1)**:
+  1. **Arquitetura DSP com Equivalência Matemática Estrita:**
+     - `resample_oneshot(samples) == process_streaming(chunks) + flush()` provada e validada matematicamente como identidade bit a bit exata.
+     - `AudioResampler` agora mantém estado contínuo: `input_history`, `history_start_idx`, `total_in_samples`, `emitted_out_samples`, `first_sample` e `last_sample`.
+     - Tratamento simétrico e consistente de fronteiras temporais: replicação constante da borda esquerda (`first_sample`) e da borda direita (`last_sample`).
+     - Emissão centrada estrita: a amostra de saída $m$ (centro $m \cdot 3$) só é emitida durante o streaming quando a amostra de entrada $m \cdot 3 + 48$ já foi recebida; a operação `flush()` calcula os pontos finais restantes com o padding de cauda.
+     - Poda ativa de memória (`saturating_sub` e `drain`): o buffer interno retém apenas a janela ativa ($< 1\text{ kB}$ de footprint na RAM).
+  2. **Governança do Resampler Padronizada:**
+     - `ResamplerKind::default()` alterado para `LinearBaseline`.
+     - `WasapiAudioCaptureBackend::with_options` e `AudioResampler::default()` adotam `LinearBaseline` quando `YUKI_VOICE_RESAMPLER` está ausente ou vazio.
+     - `YUKI_VOICE_RESAMPLER=fir` ativa explicitamente o resampler FIR antialiasing.
+  3. **Investigação Conclusiva do Teste T14:**
+     - O arquivo de diagnóstico `raw_captured_diag_1a13645e57e_1.wav` e o canônico foram verificados e comprovam ser a elocução real de 5.0 segundos no Realtek a 48 kHz.
+     - O áudio contém o operador dizendo *"Yuki, abre a calculadora"*.
+     - O cadastro do corpus continha como ground truth `"Yuki, abrir calculadora."` (com verbo no infinitivo e sem artigo "a").
+     - Sem prompt inicial (`--prompt`), o Whisper transcreveu *"Yuki, abre a calculatura."* (substituindo /d/ por /t/).
+     - Com 3 palavras de referência, 1 substituição ("abrir" $\to$ "abre"), 1 inserção ("a") e 1 substituição ("calculadora" $\to$ "calculatura") somaram 3 erros sobre 3 palavras de referência, gerando $\text{WER} = 100\%$.
+     - Com prompt lexical ativado (`--prompt "Yuki, calculadora"`), o Whisper transcreve perfeitamente *"Yuki, abre a calculadora"*, comprovando que o áudio está intacto e que a discrepância decorre da formulação gramatical da referência e do prior do modelo de linguagem.
+  4. **Integridade Estrita do Corpus:**
+     - Mantido `review_pending: true` e `ground_truth: null` para todas as gravações pendentes de validação oficial pelo operador (incluindo T11 em japonês e gravações Bluetooth).
+  5. **Bateria de Testes DSP de Equivalência:**
+     - Novo teste `test_dsp_resampler_streaming_oneshot_strict_equivalence_all_chunks_and_signals` cobrindo blocos fixos de 1, 2, 3, 7, 64, 127, 480 e 1024 amostras, blocos de tamanho pseudo-aleatório variável e blocos vazios intercalados, sob impulsos (início, meio e fim), senoides, ruído determinístico LCG, silêncio e comprimentos não divisíveis por 3.
+     - Novo teste `test_dsp_resampler_reset_and_transient_preservation` cobrindo alinhamento de pico em $t=0$, alinhamento no final e repetibilidade pós-`reset()`.
+     - Total de 40 testes aprovados em `tests/voice_stt_tts.rs`.
+     - Total de 612 testes ativos aprovados em todo o workspace (0 falhas; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` e `cargo build --release`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Correção de Streaming, Finalização e Consistência do Resampler FIR (Etapa 2B.1) concluída com equivalência matemática estrita; LinearBaseline mantido como padrão operacional temporário; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador humano."`
+
+
 
 
 

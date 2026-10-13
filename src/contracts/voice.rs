@@ -158,10 +158,10 @@ pub struct SttDecodingConfigSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResamplerKind {
-    /// Reamostragem linear direta (baseline histórico do Marco 8.1.1).
-    LinearBaseline,
-    /// Reamostragem com filtro passa-baixa FIR antialiasing de fase linear (simétrico Type I).
+    /// Reamostragem linear direta (baseline histórico do Marco 8.1.1; padrão operacional temporário).
     #[default]
+    LinearBaseline,
+    /// Reamostragem com filtro passa-baixa FIR antialiasing de fase linear (simétrico Type I; opt-in experimental).
     FirAntialiasing,
 }
 

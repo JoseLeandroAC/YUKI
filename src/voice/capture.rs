@@ -245,13 +245,15 @@ impl WasapiAudioCaptureBackend {
     }
 
     pub fn with_options(device_id: Option<String>, diagnostics: bool) -> Self {
-        let resampler_kind = if std::env::var("YUKI_VOICE_RESAMPLER")
-            .map(|v| v.eq_ignore_ascii_case("linear") || v.eq_ignore_ascii_case("baseline"))
-            .unwrap_or(false)
-        {
-            ResamplerKind::LinearBaseline
-        } else {
-            ResamplerKind::FirAntialiasing
+        let resampler_kind = match std::env::var("YUKI_VOICE_RESAMPLER") {
+            Ok(ref v)
+                if v.eq_ignore_ascii_case("fir")
+                    || v.eq_ignore_ascii_case("antialiasing")
+                    || v.eq_ignore_ascii_case("kaiser") =>
+            {
+                ResamplerKind::FirAntialiasing
+            }
+            _ => ResamplerKind::LinearBaseline,
         };
 
         Self {

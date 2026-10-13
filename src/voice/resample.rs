@@ -87,14 +87,29 @@ pub fn evaluate_frequency_response_db(taps: &[f32], freq_hz: f64, sample_rate_hz
     }
 }
 
-/// Resampler de áudio PCM multi-estratégia com suporte a filtragem antialiasing e baseline linear.
+/// Resampler de áudio PCM com equivalência matemática estrita entre processamento em lote
+/// (`resample_oneshot`) e processamento contínuo em chunks (`process_streaming` + `flush`).
 #[derive(Debug, Clone)]
 pub struct AudioResampler {
     in_rate: u32,
     out_rate: u32,
     kind: ResamplerKind,
     filter_taps: Vec<f32>,
-    streaming_buffer: Vec<f32>,
+    half_taps: usize,
+
+    // Estado interno para streaming contínuo sem perda nem duplicação de amostras
+    input_history: Vec<i16>,
+    history_start_idx: usize,
+    total_in_samples: usize,
+    emitted_out_samples: usize,
+    first_sample: Option<i16>,
+    last_sample: Option<i16>,
+}
+
+impl Default for AudioResampler {
+    fn default() -> Self {
+        Self::new(48000, 16000, ResamplerKind::default())
+    }
 }
 
 impl AudioResampler {
@@ -107,28 +122,37 @@ impl AudioResampler {
 
     /// Cria uma nova instância de resampler configurada para as taxas especificadas.
     pub fn new(in_rate: u32, out_rate: u32, kind: ResamplerKind) -> Self {
-        let filter_taps = if kind == ResamplerKind::FirAntialiasing && in_rate != out_rate {
-            let cutoff = (out_rate as f64 * 0.45).min(Self::DEFAULT_CUTOFF_HZ);
-            design_kaiser_sinc_lpf(
-                Self::DEFAULT_FIR_TAPS,
-                cutoff,
-                in_rate as f64,
-                Self::DEFAULT_KAISER_BETA,
-            )
-        } else {
-            Vec::new()
-        };
+        let (filter_taps, half_taps) =
+            if kind == ResamplerKind::FirAntialiasing && in_rate != out_rate {
+                let cutoff = (out_rate as f64 * 0.45).min(Self::DEFAULT_CUTOFF_HZ);
+                let taps = design_kaiser_sinc_lpf(
+                    Self::DEFAULT_FIR_TAPS,
+                    cutoff,
+                    in_rate as f64,
+                    Self::DEFAULT_KAISER_BETA,
+                );
+                let half = (taps.len() - 1) / 2;
+                (taps, half)
+            } else {
+                (Vec::new(), 0)
+            };
 
         Self {
             in_rate,
             out_rate,
             kind,
             filter_taps,
-            streaming_buffer: Vec::new(),
+            half_taps,
+            input_history: Vec::new(),
+            history_start_idx: 0,
+            total_in_samples: 0,
+            emitted_out_samples: 0,
+            first_sample: None,
+            last_sample: None,
         }
     }
 
-    /// Cria um resampler otimizado especificamente para a conversão canônica de hardware 48 kHz -> 16 kHz.
+    /// Cria um resampler otimizado especificamente para a conversão canônica de hardware 48 kHz -> 16 kHz (FIR).
     pub fn fir_48k_to_16k() -> Self {
         Self::new(48000, 16000, ResamplerKind::FirAntialiasing)
     }
@@ -158,57 +182,253 @@ impl AudioResampler {
         &self.filter_taps
     }
 
-    /// Limpa o histórico do buffer de streaming interno.
-    pub fn reset(&mut self) {
-        self.streaming_buffer.clear();
+    /// Retorna o total de amostras de entrada alimentadas desde o início ou último reset.
+    pub fn total_in_samples(&self) -> usize {
+        self.total_in_samples
     }
 
-    /// Processa um bloco de áudio contínuo em streaming mantendo a continuidade do buffer
-    /// entre chamadas consecutivas para eliminar glitches/estalos nas junções de buffers WASAPI.
+    /// Retorna o total de amostras de saída já emitidas.
+    pub fn emitted_out_samples(&self) -> usize {
+        self.emitted_out_samples
+    }
+
+    /// Limpa o estado interno de streaming para reutilização limpa da instância.
+    pub fn reset(&mut self) {
+        self.input_history.clear();
+        self.history_start_idx = 0;
+        self.total_in_samples = 0;
+        self.emitted_out_samples = 0;
+        self.first_sample = None;
+        self.last_sample = None;
+    }
+
+    /// Política documentada de cálculo de comprimento de saída para uma dada quantidade de amostras de entrada.
+    ///
+    /// Para taxa 1:1, retorna `in_len`.
+    /// Para `in_len == 0`, retorna 0.
+    /// Para decimação com `in_len > 0`, calcula `round(in_len / ratio)`, garantindo pelo menos 1 amostra
+    /// para entradas unitárias (evitando perda de impulsos curtos).
+    pub fn calculate_out_len(in_len: usize, in_rate: u32, out_rate: u32) -> usize {
+        if in_rate == out_rate || in_len == 0 {
+            return in_len;
+        }
+        let ratio = in_rate as f64 / out_rate as f64;
+        let rounded = ((in_len as f64) / ratio).round() as usize;
+        if in_len > 0 && rounded == 0 {
+            1
+        } else {
+            rounded
+        }
+    }
+
+    /// Obtém uma amostra pelo índice absoluto `abs_idx`, aplicando padding constante consistente
+    /// nas fronteiras temporais:
+    /// - `abs_idx < 0`: replica `first_sample`
+    /// - `abs_idx >= total_in_samples`: replica `last_sample`
+    #[inline]
+    fn sample_at(&self, abs_idx: isize) -> i16 {
+        if abs_idx < 0 {
+            self.first_sample.unwrap_or(0)
+        } else if abs_idx >= self.total_in_samples as isize {
+            self.last_sample.unwrap_or(0)
+        } else {
+            let u_idx = abs_idx as usize;
+            if u_idx >= self.history_start_idx {
+                let offset = u_idx - self.history_start_idx;
+                if offset < self.input_history.len() {
+                    self.input_history[offset]
+                } else {
+                    self.last_sample.unwrap_or(0)
+                }
+            } else {
+                self.first_sample.unwrap_or(0)
+            }
+        }
+    }
+
+    /// Processa um bloco arbitrário de áudio em streaming.
+    ///
+    /// Emite apenas as amostras cuja janela de convolução centrada já está inteiramente disponível
+    /// dentro das amostras recebidas até o momento, retendo em buffer as amostras necessárias para
+    /// as janelas seguintes.
     pub fn process_streaming(&mut self, chunk: &[i16]) -> Vec<i16> {
-        if self.in_rate == self.out_rate || chunk.is_empty() {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+
+        if self.in_rate == self.out_rate {
+            self.total_in_samples += chunk.len();
+            self.emitted_out_samples += chunk.len();
             return chunk.to_vec();
         }
 
+        if self.first_sample.is_none() && !chunk.is_empty() {
+            self.first_sample = Some(chunk[0]);
+        }
+        self.last_sample = Some(chunk[chunk.len() - 1]);
+        self.input_history.extend_from_slice(chunk);
+        self.total_in_samples += chunk.len();
+
+        let mut out = Vec::new();
+
         match self.kind {
-            ResamplerKind::LinearBaseline => {
-                Self::resample_linear(chunk, self.in_rate, self.out_rate)
-            }
             ResamplerKind::FirAntialiasing => {
                 if self.in_rate == 48000 && self.out_rate == 16000 {
-                    // Decimação 3:1 polifásica com histórico contínuo
-                    let num_taps = self.filter_taps.len();
-                    self.streaming_buffer
-                        .extend(chunk.iter().map(|&s| s as f32));
-
-                    let mut out = Vec::new();
-                    while self.streaming_buffer.len() >= num_taps {
+                    // Decimação 3:1 centrada em m * 3.
+                    // Para emitir m, precisamos de amostras até (m * 3 + half_taps).
+                    while self.emitted_out_samples * 3 + self.half_taps < self.total_in_samples {
+                        let m = self.emitted_out_samples;
+                        let center = (m * 3) as isize;
                         let mut acc = 0.0f32;
-                        for i in 0..num_taps {
-                            acc += self.streaming_buffer[i] * self.filter_taps[i];
+                        for (j, &h) in self.filter_taps.iter().enumerate() {
+                            let abs_idx = center + (j as isize) - (self.half_taps as isize);
+                            let s = self.sample_at(abs_idx);
+                            acc += (s as f32) * h;
                         }
                         out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
+                        self.emitted_out_samples += 1;
+                    }
 
-                        // Avança 3 amostras na entrada (decimação 3:1)
-                        if self.streaming_buffer.len() >= 3 {
-                            self.streaming_buffer.drain(..3);
-                        } else {
+                    // Poda do histórico de amostras que já não serão mais acessadas por janelas futuras
+                    let min_needed_idx =
+                        (self.emitted_out_samples * 3).saturating_sub(self.half_taps);
+                    if min_needed_idx > self.history_start_idx {
+                        let to_drain =
+                            (min_needed_idx - self.history_start_idx).min(self.input_history.len());
+                        self.input_history.drain(..to_drain);
+                        self.history_start_idx += to_drain;
+                    }
+                } else {
+                    // Taxas arbitrárias com FIR
+                    let ratio = self.in_rate as f64 / self.out_rate as f64;
+                    loop {
+                        let m = self.emitted_out_samples;
+                        let center = ((m as f64) * ratio).round() as usize;
+                        if center + self.half_taps >= self.total_in_samples {
                             break;
                         }
+                        let mut acc = 0.0f32;
+                        for (j, &h) in self.filter_taps.iter().enumerate() {
+                            let abs_idx =
+                                (center as isize) + (j as isize) - (self.half_taps as isize);
+                            let s = self.sample_at(abs_idx);
+                            acc += (s as f32) * h;
+                        }
+                        out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
+                        self.emitted_out_samples += 1;
                     }
-                    out
-                } else {
-                    // Fallback para taxa não inteira em streaming
-                    Self::resample_oneshot(chunk, self.in_rate, self.out_rate, self.kind)
+                    let center_next = ((self.emitted_out_samples as f64) * ratio).round() as usize;
+                    let min_needed_idx = center_next.saturating_sub(self.half_taps);
+                    if min_needed_idx > self.history_start_idx {
+                        let to_drain =
+                            (min_needed_idx - self.history_start_idx).min(self.input_history.len());
+                        self.input_history.drain(..to_drain);
+                        self.history_start_idx += to_drain;
+                    }
+                }
+            }
+            ResamplerKind::LinearBaseline => {
+                let ratio = self.in_rate as f64 / self.out_rate as f64;
+                loop {
+                    let m = self.emitted_out_samples;
+                    let in_pos = (m as f64) * ratio;
+                    let idx = in_pos.floor() as usize;
+                    if idx + 1 >= self.total_in_samples {
+                        break;
+                    }
+                    let frac = in_pos - (idx as f64);
+                    let s0 = self.sample_at(idx as isize) as f64;
+                    let s1 = self.sample_at((idx + 1) as isize) as f64;
+                    let interpolated = (1.0 - frac) * s0 + frac * s1;
+                    out.push(interpolated.clamp(-32768.0, 32767.0).round() as i16);
+                    self.emitted_out_samples += 1;
+                }
+                let min_needed_idx = (self.emitted_out_samples as f64 * ratio).floor() as usize;
+                if min_needed_idx > self.history_start_idx {
+                    let to_drain =
+                        (min_needed_idx - self.history_start_idx).min(self.input_history.len());
+                    self.input_history.drain(..to_drain);
+                    self.history_start_idx += to_drain;
                 }
             }
         }
+
+        out
     }
 
-    /// Reamostragem completa one-shot de uma gravação fechada.
+    /// Operação de finalização do streaming.
     ///
-    /// Aplica zero-phase symmetric padding nas extremidades temporais para que os primeiros
-    /// e últimos fonemas da fala não sofram atenuação transitória ou atraso artificial.
+    /// Informa o término da transmissão física e descarrega todas as amostras restantes
+    /// necessárias para atingir a contagem exata `calculate_out_len(total_in_samples)`,
+    /// aplicando o padding constante da cauda para completar as janelas de convolução finais.
+    pub fn flush(&mut self) -> Vec<i16> {
+        if self.in_rate == self.out_rate || self.total_in_samples == 0 {
+            return Vec::new();
+        }
+
+        let target_out =
+            Self::calculate_out_len(self.total_in_samples, self.in_rate, self.out_rate);
+        if self.emitted_out_samples >= target_out {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+
+        match self.kind {
+            ResamplerKind::FirAntialiasing => {
+                if self.in_rate == 48000 && self.out_rate == 16000 {
+                    while self.emitted_out_samples < target_out {
+                        let m = self.emitted_out_samples;
+                        let center = (m * 3) as isize;
+                        let mut acc = 0.0f32;
+                        for (j, &h) in self.filter_taps.iter().enumerate() {
+                            let abs_idx = center + (j as isize) - (self.half_taps as isize);
+                            let s = self.sample_at(abs_idx);
+                            acc += (s as f32) * h;
+                        }
+                        out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
+                        self.emitted_out_samples += 1;
+                    }
+                } else {
+                    let ratio = self.in_rate as f64 / self.out_rate as f64;
+                    while self.emitted_out_samples < target_out {
+                        let m = self.emitted_out_samples;
+                        let center = ((m as f64) * ratio).round() as isize;
+                        let mut acc = 0.0f32;
+                        for (j, &h) in self.filter_taps.iter().enumerate() {
+                            let abs_idx = center + (j as isize) - (self.half_taps as isize);
+                            let s = self.sample_at(abs_idx);
+                            acc += (s as f32) * h;
+                        }
+                        out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
+                        self.emitted_out_samples += 1;
+                    }
+                }
+            }
+            ResamplerKind::LinearBaseline => {
+                let ratio = self.in_rate as f64 / self.out_rate as f64;
+                while self.emitted_out_samples < target_out {
+                    let m = self.emitted_out_samples;
+                    let in_pos = (m as f64) * ratio;
+                    let idx = in_pos.floor() as usize;
+                    let frac = in_pos - (idx as f64);
+                    let s0 = self.sample_at(idx as isize) as f64;
+                    let s1 = self.sample_at((idx + 1) as isize) as f64;
+                    let interpolated = (1.0 - frac) * s0 + frac * s1;
+                    out.push(interpolated.clamp(-32768.0, 32767.0).round() as i16);
+                    self.emitted_out_samples += 1;
+                }
+            }
+        }
+
+        self.input_history.clear();
+        out
+    }
+
+    /// Reamostragem completa de uma gravação fechada (modo lote).
+    ///
+    /// Implementada com equivalência matemática estrita ao pipeline de streaming:
+    /// `resample_oneshot(audio) == process_streaming(audio) + flush()`.
     pub fn resample_oneshot(
         samples: &[i16],
         in_rate: u32,
@@ -218,107 +438,15 @@ impl AudioResampler {
         if in_rate == out_rate || samples.is_empty() {
             return samples.to_vec();
         }
-
-        match kind {
-            ResamplerKind::LinearBaseline => Self::resample_linear(samples, in_rate, out_rate),
-            ResamplerKind::FirAntialiasing => {
-                if in_rate == 48000 && out_rate == 16000 {
-                    let taps = design_kaiser_sinc_lpf(
-                        Self::DEFAULT_FIR_TAPS,
-                        Self::DEFAULT_CUTOFF_HZ,
-                        48000.0,
-                        Self::DEFAULT_KAISER_BETA,
-                    );
-                    let num_taps = taps.len();
-                    let half_taps = (num_taps - 1) / 2;
-                    let out_len = samples.len() / 3;
-                    let mut out = Vec::with_capacity(out_len);
-
-                    let samples_len = samples.len() as isize;
-
-                    for m in 0..out_len {
-                        let center_idx = (m * 3) as isize;
-                        let mut acc = 0.0f32;
-
-                        for (j, &h) in taps.iter().enumerate() {
-                            let in_idx = center_idx + (j as isize) - (half_taps as isize);
-                            let s = if in_idx < 0 {
-                                samples[0] as f32
-                            } else if in_idx >= samples_len {
-                                samples[samples.len() - 1] as f32
-                            } else {
-                                samples[in_idx as usize] as f32
-                            };
-                            acc += s * h;
-                        }
-
-                        out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
-                    }
-
-                    out
-                } else {
-                    // Para outras taxas: pré-filtragem antialiasing seguida de interpolação
-                    let cutoff = (out_rate as f64 * 0.45).min(Self::DEFAULT_CUTOFF_HZ);
-                    let taps = design_kaiser_sinc_lpf(
-                        Self::DEFAULT_FIR_TAPS,
-                        cutoff,
-                        in_rate as f64,
-                        Self::DEFAULT_KAISER_BETA,
-                    );
-                    let filtered = Self::apply_fir_symmetric(samples, &taps);
-                    Self::resample_linear(&filtered, in_rate, out_rate)
-                }
-            }
-        }
-    }
-
-    /// Aplica convolução FIR simétrica com preservação das bordas (zero phase alignment).
-    fn apply_fir_symmetric(samples: &[i16], taps: &[f32]) -> Vec<i16> {
-        let num_taps = taps.len();
-        let half_taps = (num_taps - 1) / 2;
-        let mut out = Vec::with_capacity(samples.len());
-        let samples_len = samples.len() as isize;
-
-        for i in 0..samples.len() {
-            let center_idx = i as isize;
-            let mut acc = 0.0f32;
-            for (j, &h) in taps.iter().enumerate() {
-                let in_idx = center_idx + (j as isize) - (half_taps as isize);
-                let s = if in_idx < 0 {
-                    samples[0] as f32
-                } else if in_idx >= samples_len {
-                    samples[samples.len() - 1] as f32
-                } else {
-                    samples[in_idx as usize] as f32
-                };
-                acc += s * h;
-            }
-            out.push(acc.clamp(-32768.0, 32767.0).round() as i16);
-        }
+        let mut resampler = Self::new(in_rate, out_rate, kind);
+        let mut out = resampler.process_streaming(samples);
+        out.extend(resampler.flush());
         out
     }
 
     /// Reamostragem linear direta das amostras mono de entrada para a taxa alvo.
     /// Preservada integralmente como baseline matemático e funcional de referência.
     pub fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
-        if in_rate == out_rate || samples.is_empty() {
-            return samples.to_vec();
-        }
-        let ratio = in_rate as f64 / out_rate as f64;
-        let out_len = ((samples.len() as f64) / ratio).round() as usize;
-        let mut out = Vec::with_capacity(out_len);
-
-        for i in 0..out_len {
-            let in_pos = i as f64 * ratio;
-            let idx = in_pos.floor() as usize;
-            let frac = in_pos - (idx as f64);
-
-            let s0 = samples.get(idx).copied().unwrap_or(0) as f64;
-            let s1 = samples.get(idx + 1).copied().unwrap_or(s0 as i16) as f64;
-
-            let interpolated = (1.0 - frac) * s0 + frac * s1;
-            out.push(interpolated.clamp(-32768.0, 32767.0) as i16);
-        }
-        out
+        Self::resample_oneshot(samples, in_rate, out_rate, ResamplerKind::LinearBaseline)
     }
 }
