@@ -425,6 +425,21 @@ impl AudioResampler {
         out
     }
 
+    /// Reamostragem completa sobre a própria instância com limpeza estrita de estado antes e depois.
+    ///
+    /// Permite reutilizar instâncias pré-alocadas (preservando coeficientes de filtro pré-calculados)
+    /// garantindo que nenhum estado residual de processamentos anteriores contamine a nova saída.
+    pub fn resample(&mut self, samples: &[i16]) -> Vec<i16> {
+        if self.in_rate == self.out_rate || samples.is_empty() {
+            return samples.to_vec();
+        }
+        self.reset();
+        let mut out = self.process_streaming(samples);
+        out.extend(self.flush());
+        self.reset();
+        out
+    }
+
     /// Reamostragem completa de uma gravação fechada (modo lote).
     ///
     /// Implementada com equivalência matemática estrita ao pipeline de streaming:
@@ -439,9 +454,7 @@ impl AudioResampler {
             return samples.to_vec();
         }
         let mut resampler = Self::new(in_rate, out_rate, kind);
-        let mut out = resampler.process_streaming(samples);
-        out.extend(resampler.flush());
-        out
+        resampler.resample(samples)
     }
 
     /// Reamostragem linear direta das amostras mono de entrada para a taxa alvo.

@@ -270,6 +270,11 @@ impl WasapiAudioCaptureBackend {
         self
     }
 
+    /// Retorna a estratégia de reamostragem ativa no backend de captura.
+    pub fn resampler_kind(&self) -> ResamplerKind {
+        self.resampler_kind
+    }
+
     /// Resample linear de uma sequência mono de amostras `i16` para a taxa de amostragem alvo.
     /// Preservado como baseline de referência histórico e de testes.
     pub fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {

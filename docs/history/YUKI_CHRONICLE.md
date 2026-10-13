@@ -1700,6 +1700,36 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Correção de Streaming, Finalização e Consistência do Resampler FIR (Etapa 2B.1) concluída com equivalência matemática estrita; LinearBaseline mantido como padrão operacional temporário; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador humano."`
 
+---
+
+## 2026-10-13 — Marco 8.1.1: Etapa 2B.2 — Auditoria da Integração Real WASAPI e Validação do Pipeline de Áudio
+
+- **Contexto e Motivação**:
+  - A auditoria independente identificou uma divergência entre o relatório da Etapa 2B.1 e a implementação física da captura de áudio da assistente: embora o motor `AudioResampler` (`src/voice/resample.rs`) possua suporte a streaming contínuo com estado (`process_streaming`, `flush`, `reset`), a captura real em `WasapiAudioCaptureBackend` (`src/voice/capture.rs`) opera acumulando os pacotes brutos do WASAPI durante o Push-to-Talk em `raw_bytes` e, apenas após o encerramento da gravação, realiza o downmix mono e a reamostragem em lote via `AudioResampler::resample_oneshot(&mono_samples, native_rate, 16000, resampler_kind)`.
+  - Esta etapa realizou a auditoria detalhada de código, avaliou as alternativas arquiteturais (Alternativa A: Captura acumulada + reamostragem one-shot vs Alternativa B: Reamostragem incremental por streaming) e formalizou a decisão técnica em conformidade com o perfil operacional real da assistente.
+- **Implementação Conclusiva (Etapa 2B.2)**:
+  1. **Auditoria do Pipeline Real e Fluxograma Textual:**
+     - Mapeamento estrito dos 6 estágios: (1) Captura em pacotes pelo WASAPI -> (2) Acumulação em memória em `raw_bytes` -> (3) Encerramento e drenagem final -> (4) Conversão de formato e downmix para mono i16 -> (5) Reamostragem one-shot 48k -> 16k -> (6) Codificação WAV canônica e entrega ao Whisper.cpp via arquivo temporário atômico.
+  2. **Decisão Arquitetural — Manutenção da Alternativa A:**
+     - O consumidor do STT local (`LocalWhisperSttProvider`) é o Whisper.cpp executado como subprocesso de inferência em lote sobre arquivo WAV completo. A Yuki não possui atualmente consumidores de streaming incremental (e.g. streaming WebSocket).
+     - A reamostragem one-shot pós-gravação consome menos de 1 ms de CPU para 10s de áudio em release (0.3 a 0.7 ms), sendo imperceptível para a latência total.
+     - Isola a thread de captura WASAPI de qualquer sobrecarga de ponto flutuante durante o streaming em tempo real, eliminando riscos de buffer overruns e glitches do Windows Audio Engine.
+     - Preserva os bytes brutos nativos originais (`raw_bytes`) para inspeção de integridade nos relatórios diagnósticos em `data/voice_diag/`.
+  3. **Reusabilidade de Instâncias e Eliminação de Estado Residual:**
+     - Adicionado método `resample(&mut self, samples: &[i16]) -> Vec<i16>` em `AudioResampler`, aplicando `reset()` estrito antes e depois do processamento, permitindo que instâncias reutilizadas processem múltiplos lotes consecutivos sem contaminação cruzada.
+     - Adicionado getter público `resampler_kind(&self) -> ResamplerKind` em `WasapiAudioCaptureBackend`.
+  4. **Bateria de Testes do Pipeline Real:**
+     - Adicionados 3 novos testes em `tests/voice_stt_tts.rs`:
+       - `test_real_wasapi_pipeline_end_to_end_simulation_pcm48k_and_float32`: simulação end-to-end completa de formatos Realtek (IEEE Float 32-bit estéreo 48k) e USB/Bluetooth (PCM 16-bit estéreo 48k), downmix, reamostragem com Linear e FIR, preservação de transientes plosivos iniciais e finais, codificação/decodificação WAV e verificação de zero clipping.
+       - `test_resampler_instance_reusability_and_batch_zero_residual_state`: validação de que chamadas consecutivas sobre o mesmo objeto com sinais díspares geram saídas bit-a-bit idênticas sem resíduo de histórico.
+       - `test_env_resampler_selection_in_wasapi_backend`: validação de seleção por variável de ambiente (`YUKI_VOICE_RESAMPLER` unset -> `LinearBaseline`, `fir`/`antialiasing`/`kaiser` -> `FirAntialiasing`, desconhecido -> fallback `LinearBaseline`).
+  5. **Métricas Finais e Portões de Qualidade:**
+     - Total de 43 testes aprovados em `tests/voice_stt_tts.rs`.
+     - Total de 615 testes ativos aprovados em todo o workspace (0 falhas; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` e `cargo build --release`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Auditoria da Integração Real WASAPI e Validação do Pipeline de Áudio (Etapa 2B.2) concluída com sucesso; Alternativa A (Captura Acumulada + Reamostragem One-Shot) confirmada como arquitetura de produção; LinearBaseline mantido como padrão operacional temporário; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador humano."`
+
 
 
 

@@ -1866,3 +1866,221 @@ fn test_dsp_resampler_reset_and_transient_preservation() {
         "Impulso no fim deve ter pico na última amostra de saída"
     );
 }
+
+#[test]
+fn test_real_wasapi_pipeline_end_to_end_simulation_pcm48k_and_float32() {
+    use yuki::contracts::voice::{AudioFormat, ResamplerKind};
+    use yuki::voice::audio::{AudioCodec, AudioResampler};
+
+    // 1. Simulação do formato Realtek HD Audio: 48 kHz estéreo IEEE Float 32-bit
+    let num_frames = 4800; // 100 ms de áudio
+    let mut float32_raw_bytes = Vec::with_capacity(num_frames * 2 * 4);
+
+    for i in 0..num_frames {
+        let t = i as f64 / 48000.0;
+        let mut sample_l = (0.6 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()) as f32;
+        let mut sample_r = (0.6 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()) as f32;
+
+        // Impulso transiente na primeira e última amostras da decimação
+        if i == 0 {
+            sample_l = 0.95;
+            sample_r = 0.95;
+        } else if i >= num_frames - 3 {
+            sample_l = 0.90;
+            sample_r = 0.90;
+        }
+
+        float32_raw_bytes.extend_from_slice(&sample_l.to_le_bytes());
+        float32_raw_bytes.extend_from_slice(&sample_r.to_le_bytes());
+    }
+
+    // Conversão de formato idêntica ao WasapiAudioCaptureBackend (IEEE Float estéreo -> Mono i16)
+    let channels = 2usize;
+    let frame_size = channels * 4;
+    let mut mono_samples_float = Vec::with_capacity(num_frames);
+    for frame in float32_raw_bytes.chunks_exact(frame_size) {
+        let mut sum = 0.0f32;
+        for c in 0..channels {
+            let sample_bytes = [
+                frame[c * 4],
+                frame[c * 4 + 1],
+                frame[c * 4 + 2],
+                frame[c * 4 + 3],
+            ];
+            sum += f32::from_le_bytes(sample_bytes);
+        }
+        let avg = sum / (channels as f32);
+        mono_samples_float.push((avg.clamp(-1.0, 1.0) * 32767.0) as i16);
+    }
+    assert_eq!(mono_samples_float.len(), num_frames);
+
+    // Reamostragem one-shot (pipeline real) com Linear e FIR
+    for &kind in &[
+        ResamplerKind::LinearBaseline,
+        ResamplerKind::FirAntialiasing,
+    ] {
+        let canonical_samples =
+            AudioResampler::resample_oneshot(&mono_samples_float, 48000, 16000, kind);
+
+        // Comprimento esperado: 4800 / 3 = 1600 amostras
+        assert_eq!(canonical_samples.len(), 1600);
+
+        // Ausência de clipping introduzido pela conversão
+        let has_clipping = canonical_samples
+            .iter()
+            .any(|&s| s == i16::MAX || s == i16::MIN);
+        assert!(
+            !has_clipping,
+            "Pipeline não deve introduzir clipping digital"
+        );
+
+        // Transiente inicial em t=0 preservado
+        assert!(
+            canonical_samples[0].abs() > 10000,
+            "Transiente em t=0 deve ser preservado na primeira amostra de saída"
+        );
+
+        // Transiente final preservado na cauda
+        assert!(
+            canonical_samples[1599].abs() > 8000,
+            "Transiente final deve ser preservado na última amostra de saída"
+        );
+
+        // Codificação e decodificação canônica WAV (16 kHz mono 16-bit PCM)
+        let format = AudioFormat::default();
+        let wav_bytes = AudioCodec::encode_wav(&canonical_samples, &format).expect("encode wav ok");
+        let (decoded_fmt, decoded_samples) =
+            AudioCodec::decode_wav(&wav_bytes).expect("decode wav ok");
+
+        assert_eq!(decoded_fmt.sample_rate, 16000);
+        assert_eq!(decoded_fmt.channels, 1);
+        assert_eq!(decoded_fmt.bits_per_sample, 16);
+        assert_eq!(decoded_samples, canonical_samples);
+    }
+
+    // 2. Simulação de formato PCM 16-bit estéreo (ex.: dispositivos USB/Bluetooth)
+    let mut pcm16_raw_bytes = Vec::with_capacity(num_frames * 2 * 2);
+    for i in 0..num_frames {
+        let s =
+            (15000.0 * (2.0 * std::f64::consts::PI * 800.0 * (i as f64 / 48000.0)).sin()) as i16;
+        pcm16_raw_bytes.extend_from_slice(&s.to_le_bytes());
+        pcm16_raw_bytes.extend_from_slice(&s.to_le_bytes());
+    }
+
+    let pcm_frame_size = channels * 2;
+    let mut mono_samples_pcm = Vec::with_capacity(num_frames);
+    for frame in pcm16_raw_bytes.chunks_exact(pcm_frame_size) {
+        let mut sum = 0i32;
+        for c in 0..channels {
+            let sample_bytes = [frame[c * 2], frame[c * 2 + 1]];
+            sum += i16::from_le_bytes(sample_bytes) as i32;
+        }
+        let avg = sum / (channels as i32);
+        mono_samples_pcm.push(avg.clamp(-32768, 32767) as i16);
+    }
+    assert_eq!(mono_samples_pcm.len(), num_frames);
+
+    let resampled_pcm = AudioResampler::resample_oneshot(
+        &mono_samples_pcm,
+        48000,
+        16000,
+        ResamplerKind::LinearBaseline,
+    );
+    assert_eq!(resampled_pcm.len(), 1600);
+}
+
+#[test]
+fn test_resampler_instance_reusability_and_batch_zero_residual_state() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::resample::AudioResampler;
+
+    let mut resampler = AudioResampler::fir_48k_to_16k();
+
+    let sig_a: Vec<i16> = (0..960)
+        .map(|i| {
+            (18000.0 * (2.0 * std::f64::consts::PI * 440.0 * (i as f64 / 48000.0)).sin()) as i16
+        })
+        .collect();
+
+    let sig_b: Vec<i16> = (0..960)
+        .map(|i| {
+            (5000.0 * (2.0 * std::f64::consts::PI * 2500.0 * (i as f64 / 48000.0)).sin()) as i16
+        })
+        .collect();
+
+    // 1ª execução com sig_a
+    let out_a1 = resampler.resample(&sig_a);
+    assert_eq!(out_a1.len(), 320);
+    assert_eq!(resampler.total_in_samples(), 0);
+    assert_eq!(resampler.emitted_out_samples(), 0);
+
+    // Execução intermediária com sinal completamente diferente (sig_b)
+    let out_b = resampler.resample(&sig_b);
+    assert_eq!(out_b.len(), 320);
+    assert_ne!(out_a1, out_b);
+    assert_eq!(resampler.total_in_samples(), 0);
+
+    // 2ª execução com sig_a sobre o mesmo objeto já reutilizado
+    let out_a2 = resampler.resample(&sig_a);
+    assert_eq!(
+        out_a1, out_a2,
+        "Reutilização de instância não deve conter contaminação de estado residual"
+    );
+
+    // Equivalência estrita com a função associada estática
+    let out_static =
+        AudioResampler::resample_oneshot(&sig_a, 48000, 16000, ResamplerKind::FirAntialiasing);
+    assert_eq!(out_a1, out_static);
+}
+
+#[test]
+fn test_env_resampler_selection_in_wasapi_backend() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::capture::WasapiAudioCaptureBackend;
+    use yuki::voice::resample::AudioResampler;
+
+    // Caso 1: Sem variável definida -> Padrão deve ser LinearBaseline
+    std::env::remove_var("YUKI_VOICE_RESAMPLER");
+    let backend_default = WasapiAudioCaptureBackend::with_options(None, false);
+    assert_eq!(
+        backend_default.resampler_kind(),
+        ResamplerKind::LinearBaseline
+    );
+    let dummy = vec![100i16; 48];
+    let out_def = WasapiAudioCaptureBackend::resample_linear(&dummy, 48000, 16000);
+    assert_eq!(out_def.len(), 16);
+
+    // Caso 2: Definido como "fir"
+    std::env::set_var("YUKI_VOICE_RESAMPLER", "fir");
+    let backend_fir = WasapiAudioCaptureBackend::with_options(None, false);
+    assert_eq!(backend_fir.resampler_kind(), ResamplerKind::FirAntialiasing);
+    let r_fir = AudioResampler::fir_48k_to_16k();
+    assert_eq!(r_fir.kind(), ResamplerKind::FirAntialiasing);
+
+    // Caso 3: Definido como "antialiasing"
+    std::env::set_var("YUKI_VOICE_RESAMPLER", "antialiasing");
+    let backend_alias = WasapiAudioCaptureBackend::with_options(None, false);
+    assert_eq!(
+        backend_alias.resampler_kind(),
+        ResamplerKind::FirAntialiasing
+    );
+
+    // Caso 4: Definido como "kaiser"
+    std::env::set_var("YUKI_VOICE_RESAMPLER", "kaiser");
+    let backend_kaiser = WasapiAudioCaptureBackend::with_options(None, false);
+    assert_eq!(
+        backend_kaiser.resampler_kind(),
+        ResamplerKind::FirAntialiasing
+    );
+
+    // Caso 5: Valor desconhecido -> fallback para LinearBaseline
+    std::env::set_var("YUKI_VOICE_RESAMPLER", "invalido");
+    let backend_fallback = WasapiAudioCaptureBackend::with_options(None, false);
+    assert_eq!(
+        backend_fallback.resampler_kind(),
+        ResamplerKind::LinearBaseline
+    );
+
+    // Limpa variável ao final
+    std::env::remove_var("YUKI_VOICE_RESAMPLER");
+}
