@@ -507,3 +507,180 @@ async fn test_stt_silence_checked_before_normalization_resilience() {
     let output = res.unwrap();
     assert_eq!(output.text, "");
 }
+
+#[test]
+fn test_audio_codec_encode_raw_wav_formats() {
+    use yuki::voice::audio::AudioCodec;
+
+    // 1. Testa PCM 16-bit
+    let raw_pcm16 = vec![0u8; 32000]; // 1s a 16kHz mono (16-bit = 2 bytes)
+    let wav_pcm16 =
+        AudioCodec::encode_raw_wav(&raw_pcm16, 1, 16000, 16, false).expect("encode pcm16");
+    assert_eq!(&wav_pcm16[0..4], b"RIFF");
+    assert_eq!(&wav_pcm16[8..12], b"WAVE");
+    assert_eq!(&wav_pcm16[12..16], b"fmt ");
+    let fmt_size = u32::from_le_bytes([wav_pcm16[16], wav_pcm16[17], wav_pcm16[18], wav_pcm16[19]]);
+    assert_eq!(fmt_size, 16);
+    let tag = u16::from_le_bytes([wav_pcm16[20], wav_pcm16[21]]);
+    assert_eq!(tag, 1); // PCM
+
+    // 2. Testa IEEE Float 32-bit (formato Realtek/Windows moderno)
+    let raw_float32 = vec![0u8; 48000 * 2 * 4]; // 1s a 48kHz stereo 32-bit float
+    let wav_float =
+        AudioCodec::encode_raw_wav(&raw_float32, 2, 48000, 32, true).expect("encode float32");
+    assert_eq!(&wav_float[0..4], b"RIFF");
+    assert_eq!(&wav_float[8..12], b"WAVE");
+    assert_eq!(&wav_float[12..16], b"fmt ");
+    let fmt_size_float =
+        u32::from_le_bytes([wav_float[16], wav_float[17], wav_float[18], wav_float[19]]);
+    assert_eq!(fmt_size_float, 18);
+    let tag_float = u16::from_le_bytes([wav_float[20], wav_float[21]]);
+    assert_eq!(tag_float, 3); // IEEE Float
+    let cb_size = u16::from_le_bytes([wav_float[36], wav_float[37]]);
+    assert_eq!(cb_size, 0);
+
+    // 3. Testa PCM 24-bit
+    let raw_pcm24 = vec![0u8; 44100 * 3]; // 1s a 44.1kHz mono 24-bit
+    let wav_pcm24 =
+        AudioCodec::encode_raw_wav(&raw_pcm24, 1, 44100, 24, false).expect("encode pcm24");
+    assert_eq!(&wav_pcm24[0..4], b"RIFF");
+    let tag_pcm24 = u16::from_le_bytes([wav_pcm24[20], wav_pcm24[21]]);
+    assert_eq!(tag_pcm24, 1); // PCM
+}
+
+#[test]
+fn test_acoustic_metrics_computation() {
+    use yuki::voice::diag::compute_acoustic_metrics;
+
+    // 1. Silêncio absoluto
+    let silence = vec![0i16; 16000];
+    let metrics_silence = compute_acoustic_metrics(&silence, 16000);
+    assert_eq!(metrics_silence.sample_count, 16000);
+    assert_eq!(metrics_silence.peak, 0);
+    assert_eq!(metrics_silence.rms, 0.0);
+    assert_eq!(metrics_silence.clipping_samples, 0);
+    assert_eq!(metrics_silence.silence_ratio_pct, 100.0);
+
+    // 2. Sinal com clipping (saturação digital intencional)
+    let mut clipped_signal = vec![1000i16; 16000];
+    clipped_signal[100] = 32767;
+    clipped_signal[101] = -32768;
+    clipped_signal[102] = 32765;
+    let metrics_clipped = compute_acoustic_metrics(&clipped_signal, 16000);
+    assert_eq!(metrics_clipped.peak, 32767);
+    assert_eq!(metrics_clipped.clipping_samples, 3);
+    assert!(metrics_clipped.clipping_ratio_pct > 0.0);
+    assert_eq!(metrics_clipped.silence_ratio_pct, 0.0);
+
+    // 3. Sinal de fala simulada (amplitude moderada sem clipping)
+    let speech_sim: Vec<i16> = (0..16000)
+        .map(|i| ((i as f64 * 0.1).sin() * 8000.0) as i16)
+        .collect();
+    let metrics_speech = compute_acoustic_metrics(&speech_sim, 16000);
+    assert!(metrics_speech.peak > 7000 && metrics_speech.peak <= 8000);
+    assert!(metrics_speech.rms > 5000.0 && metrics_speech.rms < 6000.0);
+    assert_eq!(metrics_clipped.clipping_samples, 3);
+    assert_eq!(metrics_speech.clipping_samples, 0);
+}
+
+#[test]
+fn test_voice_diagnostics_session_artifacts_and_cleanup() {
+    use std::path::Path;
+    use yuki::contracts::voice::{BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo};
+    use yuki::voice::audio::AudioCodec;
+    use yuki::voice::diag::{
+        save_diagnostic_session, update_diagnostic_with_normalized, DIAGNOSTICS_DIR,
+    };
+
+    let session_id = format!(
+        "test_diag_{}",
+        yuki::contracts::identifiers::generate_unique_id("unit")
+    );
+    let native_format = NativeAudioFormatInfo {
+        format_tag: 0xFFFE,
+        format_tag_hex: "0xFFFE".to_string(),
+        format_tag_name: "WAVE_FORMAT_EXTENSIBLE (IEEE Float)".to_string(),
+        is_extensible: true,
+        is_float: true,
+        channels: 2,
+        sample_rate: 48000,
+        bits_per_sample: 32,
+        block_align: 8,
+        avg_bytes_per_sec: 384000,
+        sub_format_guid: Some("00000003-0000-0010-8000-00aa00389b71".to_string()),
+    };
+
+    let timings = CaptureTimingMetrics {
+        requested_duration_ms: 1000,
+        init_duration_ms: 120,
+        effective_capture_ms: 1005,
+        samples_duration_ms: 1000,
+    };
+
+    let buffer_metrics = BufferMetrics {
+        total_packets: 60,
+        total_raw_frames: 48000,
+        total_raw_bytes: 384000,
+        silent_buffer_events: 0,
+        discontinuity_glitches: 0,
+    };
+
+    let raw_bytes = vec![0u8; 384000];
+    let canonical_samples = vec![150i16; 16000];
+
+    // Salva sessão de diagnóstico
+    let mut report = save_diagnostic_session(
+        &session_id,
+        Some("test-mic-id".to_string()),
+        Some("Microfone Realtek Teste".to_string()),
+        &native_format,
+        timings,
+        buffer_metrics,
+        &raw_bytes,
+        &canonical_samples,
+    )
+    .expect("save_diagnostic_session deve ter sucesso");
+
+    let raw_path = Path::new(DIAGNOSTICS_DIR).join(format!("raw_captured_{}.wav", session_id));
+    let canon_path = Path::new(DIAGNOSTICS_DIR).join(format!("canonical_16k_{}.wav", session_id));
+    let json_path = Path::new(DIAGNOSTICS_DIR).join(format!("diag_{}.json", session_id));
+
+    assert!(
+        raw_path.exists(),
+        "raw_captured_{}.wav deve existir",
+        session_id
+    );
+    assert!(
+        canon_path.exists(),
+        "canonical_16k_{}.wav deve existir",
+        session_id
+    );
+    assert!(json_path.exists(), "diag_{}.json deve existir", session_id);
+
+    // Valida que o áudio canônico gravado é um WAV válido decodificável
+    let canon_bytes = std::fs::read(&canon_path).expect("read canon ok");
+    let (fmt, samples) = AudioCodec::decode_wav(&canon_bytes).expect("decode canon ok");
+    assert_eq!(fmt.sample_rate, 16000);
+    assert_eq!(fmt.channels, 1);
+    assert_eq!(samples.len(), 16000);
+
+    // Atualiza com versão normalizada
+    let normalized_samples = vec![300i16; 16000];
+    let normalized_wav = AudioCodec::encode_wav(&normalized_samples, &fmt).expect("encode norm ok");
+    update_diagnostic_with_normalized(&mut report, &normalized_samples, &normalized_wav)
+        .expect("update_diagnostic_with_normalized ok");
+
+    let norm_path = Path::new(DIAGNOSTICS_DIR).join(format!("normalized_16k_{}.wav", session_id));
+    assert!(
+        norm_path.exists(),
+        "normalized_16k_{}.wav deve existir",
+        session_id
+    );
+    assert!(report.acoustic_normalized.is_some());
+
+    // Limpeza higiênica dos arquivos temporários de teste
+    let _ = std::fs::remove_file(&raw_path);
+    let _ = std::fs::remove_file(&canon_path);
+    let _ = std::fs::remove_file(&norm_path);
+    let _ = std::fs::remove_file(&json_path);
+}

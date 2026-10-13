@@ -61,6 +61,72 @@ impl AudioFrame {
     }
 }
 
+/// Detalhes do formato de áudio nativo reportado pelo driver do dispositivo no Windows/WASAPI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeAudioFormatInfo {
+    pub format_tag: u16,
+    pub format_tag_hex: String,
+    pub format_tag_name: String,
+    pub is_extensible: bool,
+    pub is_float: bool,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub bits_per_sample: u16,
+    pub block_align: u16,
+    pub avg_bytes_per_sec: u32,
+    pub sub_format_guid: Option<String>,
+}
+
+/// Métricas de ciclo de vida e temporização da captura de áudio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureTimingMetrics {
+    pub requested_duration_ms: u64,
+    pub init_duration_ms: u64,
+    pub effective_capture_ms: u64,
+    pub samples_duration_ms: u64,
+}
+
+/// Métricas de pacotes e buffers recebidos do subsistema WASAPI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferMetrics {
+    pub total_packets: usize,
+    pub total_raw_frames: usize,
+    pub total_raw_bytes: usize,
+    pub silent_buffer_events: usize,
+    pub discontinuity_glitches: usize,
+}
+
+/// Métricas acústicas calculadas sobre o buffer de amostras.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcousticMetrics {
+    pub sample_count: usize,
+    pub rms: f32,
+    pub rms_dbfs: f32,
+    pub peak: i16,
+    pub peak_dbfs: f32,
+    pub clipping_samples: usize,
+    pub clipping_ratio_pct: f32,
+    pub silence_ratio_pct: f32,
+}
+
+/// Relatório estruturado de diagnóstico de áudio físico e inferência.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioDiagnosticsReport {
+    pub session_id: String,
+    pub timestamp: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub native_format: NativeAudioFormatInfo,
+    pub timings: CaptureTimingMetrics,
+    pub buffer_metrics: BufferMetrics,
+    pub acoustic_canonical: AcousticMetrics,
+    pub acoustic_normalized: Option<AcousticMetrics>,
+    pub raw_wav_path: Option<String>,
+    pub canonical_wav_path: Option<String>,
+    pub normalized_wav_path: Option<String>,
+    pub report_path: Option<String>,
+}
+
 /// Áudio de entrada para reconhecimento (STT).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioInput {
@@ -69,6 +135,8 @@ pub struct AudioInput {
     pub duration_ms: u64,
     pub source: String,
     pub captured_at: DateTime<Utc>,
+    #[serde(default)]
+    pub diagnostics: Option<AudioDiagnosticsReport>,
 }
 
 impl AudioInput {
@@ -84,7 +152,13 @@ impl AudioInput {
             duration_ms,
             source: source.into(),
             captured_at: now_utc(),
+            diagnostics: None,
         }
+    }
+
+    pub fn with_diagnostics(mut self, diag: AudioDiagnosticsReport) -> Self {
+        self.diagnostics = Some(diag);
+        self
     }
 
     pub fn byte_size(&self) -> usize {

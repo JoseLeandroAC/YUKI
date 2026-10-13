@@ -299,6 +299,8 @@ pub struct LocalTranscriptionResult {
     pub whisper_total_time_ms: Option<f32>,
     /// Caminho do modelo Whisper utilizado.
     pub model_path: PathBuf,
+    /// Relatório diagnóstico detalhado de áudio (se presente na entrada).
+    pub diagnostics: Option<crate::contracts::voice::AudioDiagnosticsReport>,
 }
 
 fn which_whisper() -> Option<PathBuf> {
@@ -460,6 +462,7 @@ impl LocalWhisperSttProvider {
                 elapsed: start_instant.elapsed(),
                 whisper_total_time_ms: None,
                 model_path: model_path.clone(),
+                diagnostics: audio.diagnostics.clone(),
             });
         }
 
@@ -473,6 +476,15 @@ impl LocalWhisperSttProvider {
             bits_per_sample: 16,
         };
         let normalized_wav = AudioCodec::encode_wav(&mono_samples, &norm_format)?;
+
+        let mut diag_opt = audio.diagnostics.clone();
+        if let Some(ref mut diag) = diag_opt {
+            let _ = crate::voice::diag::update_diagnostic_with_normalized(
+                diag,
+                &mono_samples,
+                &normalized_wav,
+            );
+        }
 
         // 7. Cria arquivo temporário atômico para o áudio com alta entropia
         let temp_dir = std::env::temp_dir();
@@ -579,6 +591,7 @@ impl LocalWhisperSttProvider {
             elapsed,
             whisper_total_time_ms: detection_meta.total_time_ms,
             model_path: model_path.clone(),
+            diagnostics: diag_opt,
         })
     }
 }

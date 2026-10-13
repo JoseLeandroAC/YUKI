@@ -150,6 +150,9 @@ pub enum VoiceCommands {
         /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
         #[arg(short, long)]
         language: Option<String>,
+        /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
+        #[arg(long, visible_alias = "diag", default_value_t = false)]
+        diagnostics: bool,
     },
     /// Executa um turno conversacional completo via Push-to-Talk conectado ao VoiceConversationCoordinator
     Turn {
@@ -168,6 +171,9 @@ pub enum VoiceCommands {
         /// Idioma falado para o reconhecimento ('pt', 'en', 'es', 'ja', ou 'auto')
         #[arg(short, long)]
         language: Option<String>,
+        /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
+        #[arg(long, visible_alias = "diag", default_value_t = false)]
+        diagnostics: bool,
     },
     /// Lista os modelos de voz suportados (catálogo oficial pt-BR e modelos locais detectados)
     Voices,
@@ -823,6 +829,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             seconds,
             input_device,
             language,
+            diagnostics,
         } => {
             use yuki::voice::stt::{
                 normalize_language_code, LocalWhisperConfig, LocalWhisperSttProvider,
@@ -832,6 +839,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
             let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
             let effective_lang = normalize_language_code(raw_lang);
+            let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
 
             let audio_input = if let (Some(path), false) = (file, mic) {
                 let data = match std::fs::read(&path) {
@@ -850,6 +858,36 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 };
                 let duration_ms =
                     (samples.len() as f64 / format.sample_rate as f64 * 1000.0) as u64;
+
+                if is_diag_active {
+                    let acoustic =
+                        yuki::voice::diag::compute_acoustic_metrics(&samples, format.sample_rate);
+                    println!(
+                        "\n=== Métricas Acústicas do Arquivo de Áudio ('{}') ===",
+                        path
+                    );
+                    println!(
+                        "• Amostras:    {} | Formato: {}Hz, {} canal(is), {}-bit PCM",
+                        samples.len(),
+                        format.sample_rate,
+                        format.channels,
+                        format.bits_per_sample
+                    );
+                    println!(
+                        "• RMS:         {:.1} ({:.2} dBFS)",
+                        acoustic.rms, acoustic.rms_dbfs
+                    );
+                    println!(
+                        "• Pico:        {} ({:.2} dBFS)",
+                        acoustic.peak, acoustic.peak_dbfs
+                    );
+                    println!(
+                        "• Clipping:    {} amostras ({:.2}%)",
+                        acoustic.clipping_samples, acoustic.clipping_ratio_pct
+                    );
+                    println!("• Silêncio:    {:.1}%", acoustic.silence_ratio_pct);
+                }
+
                 AudioInput::new(data, format, duration_ms, path)
             } else {
                 use std::sync::Arc;
@@ -896,6 +934,9 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 };
 
                 println!("Formato de captura negociado: 16000Hz, 1 canal (mono), 16-bit PCM");
+                if is_diag_active {
+                    println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
+                }
 
                 let duration_sec = seconds.clamp(1, 30);
                 println!(
@@ -906,7 +947,10 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 let backend: Arc<dyn AudioCaptureBackend> = {
                     #[cfg(windows)]
                     {
-                        let win = WindowsAudioCaptureBackend::with_device(target_device);
+                        let win = WindowsAudioCaptureBackend::with_diagnostics(
+                            target_device,
+                            is_diag_active,
+                        );
                         if !win.is_device_available() {
                             eprintln!(
                                 "Erro: O dispositivo de captura selecionado não está disponível."
@@ -982,6 +1026,12 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     if let Some(inference_ms) = result.whisper_total_time_ms {
                         println!("Tempo inferência:   {:.2}s", inference_ms / 1000.0);
                     }
+
+                    if let Some(ref diag) = result.diagnostics {
+                        yuki::voice::diag::print_diagnostic_summary(diag);
+                    } else if let Some(ref diag) = audio_input.diagnostics {
+                        yuki::voice::diag::print_diagnostic_summary(diag);
+                    }
                 }
                 Err(e) => eprintln!("Falha na transcrição: {}", e),
             }
@@ -992,6 +1042,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             output_device,
             play,
             language,
+            diagnostics,
         } => {
             use std::sync::Arc;
             use std::time::Duration;
@@ -1000,6 +1051,8 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             };
             use yuki::voice::conversation::VoiceConversationCoordinator;
             use yuki::voice::playback::AudioPlaybackController;
+
+            let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
 
             // 1. Resolução do microfone de entrada (fail-closed se indisponível)
             let target_input_id = if let Some(ref dev_query) = input_device {
@@ -1066,6 +1119,9 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             };
 
             println!("Formato de áudio negociado: 16000Hz mono 16-bit PCM (WASAPI streaming)");
+            if is_diag_active {
+                println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
+            }
 
             let duration_sec = seconds.clamp(1, 30);
             println!(
@@ -1076,7 +1132,10 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             let capture_backend: Arc<dyn AudioCaptureBackend> = {
                 #[cfg(windows)]
                 {
-                    let win = WindowsAudioCaptureBackend::with_device(target_input_id);
+                    let win = WindowsAudioCaptureBackend::with_diagnostics(
+                        target_input_id,
+                        is_diag_active,
+                    );
                     if !win.is_device_available() {
                         eprintln!(
                             "Erro: O microfone selecionado não está acessível no Windows WASAPI."
@@ -1111,6 +1170,9 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         input.payload.len(),
                         input.duration_ms
                     );
+                    if let Some(ref diag) = input.diagnostics {
+                        yuki::voice::diag::print_diagnostic_summary(diag);
+                    }
                     input
                 }
                 Err(e) => {

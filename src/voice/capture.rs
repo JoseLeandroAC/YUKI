@@ -1,5 +1,7 @@
 use crate::contracts::identifiers::generate_unique_id;
-use crate::contracts::voice::{AudioFormat, AudioInput, VoiceError};
+use crate::contracts::voice::{
+    AudioFormat, AudioInput, BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo, VoiceError,
+};
 use crate::voice::audio::AudioCodec;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -85,7 +87,7 @@ mod wasapi_ffi {
         data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
     };
 
-    #[repr(C)]
+    #[repr(C, packed(2))]
     #[derive(Clone, Copy, Debug)]
     pub struct WAVEFORMATEX {
         pub wFormatTag: u16,
@@ -97,7 +99,7 @@ mod wasapi_ffi {
         pub cbSize: u16,
     }
 
-    #[repr(C)]
+    #[repr(C, packed(2))]
     #[derive(Clone, Copy, Debug)]
     pub struct WAVEFORMATEXTENSIBLE {
         pub format: WAVEFORMATEX,
@@ -221,6 +223,7 @@ type CaptureWorkerHandle =
 pub struct WasapiAudioCaptureBackend {
     device_id: Option<String>,
     is_recording: Arc<AtomicBool>,
+    diagnostics_enabled: bool,
     worker_handle: CaptureWorkerHandle,
 }
 
@@ -232,9 +235,18 @@ impl Default for WasapiAudioCaptureBackend {
 
 impl WasapiAudioCaptureBackend {
     pub fn new(device_id: Option<String>) -> Self {
+        Self::with_options(device_id, false)
+    }
+
+    pub fn with_diagnostics(device_id: Option<String>, diagnostics: bool) -> Self {
+        Self::with_options(device_id, diagnostics)
+    }
+
+    pub fn with_options(device_id: Option<String>, diagnostics: bool) -> Self {
         Self {
             device_id,
             is_recording: Arc::new(AtomicBool::new(false)),
+            diagnostics_enabled: diagnostics,
             worker_handle: Arc::new(Mutex::new(None)),
         }
     }
@@ -284,16 +296,23 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
 
             let is_recording_flag = self.is_recording.clone();
             let target_device_id = self.device_id.clone();
+            let is_diag = self.diagnostics_enabled || crate::voice::diag::is_diagnostics_enabled();
+
+            let (tx_ready, rx_ready) =
+                std::sync::mpsc::channel::<Result<NativeAudioFormatInfo, VoiceError>>();
 
             let handle = std::thread::spawn(move || -> Result<AudioInput, VoiceError> {
+                let t_thread_start = Instant::now();
                 unsafe {
                     let hr = CoInitializeEx(std::ptr::null_mut(), 0);
                     if hr != 0 && hr != 1 {
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao inicializar COM na thread de captura (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let mut p_enum: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -307,10 +326,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                     if hr != 0 || p_enum.is_null() {
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao instanciar MMDeviceEnumerator (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let enum_vtbl = *(p_enum as *mut *const IMMDeviceEnumeratorVtbl);
@@ -324,10 +345,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             ((*enum_vtbl).Release)(p_enum);
                             CoUninitialize();
                             is_recording_flag.store(false, Ordering::SeqCst);
-                            return Err(VoiceError::DeviceUnavailable(format!(
+                            let err = VoiceError::DeviceUnavailable(format!(
                                 "Dispositivo de captura especificado '{}' não encontrado (0x{:08X})",
                                 dev_id, hr
-                            )));
+                            ));
+                            let _ = tx_ready.send(Err(err.clone()));
+                            return Err(err);
                         }
                     } else {
                         let hr = ((*enum_vtbl).GetDefaultAudioEndpoint)(
@@ -339,10 +362,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             ((*enum_vtbl).Release)(p_enum);
                             CoUninitialize();
                             is_recording_flag.store(false, Ordering::SeqCst);
-                            return Err(VoiceError::DeviceUnavailable(format!(
+                            let err = VoiceError::DeviceUnavailable(format!(
                                 "Nenhum endpoint padrão de captura disponível no Windows (0x{:08X})",
                                 hr
-                            )));
+                            ));
+                            let _ = tx_ready.send(Err(err.clone()));
+                            return Err(err);
                         }
                     }
 
@@ -354,10 +379,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::DeviceUnavailable(format!(
+                        let err = VoiceError::DeviceUnavailable(format!(
                             "O microfone selecionado não está no estado ativo (estado do dispositivo: {})",
                             dev_state
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let mut p_client: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -373,10 +400,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao ativar IAudioClient no endpoint (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let client_vtbl = *(p_client as *mut *const IAudioClientVtbl);
@@ -388,19 +417,68 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao obter formato nativo do dispositivo (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let fmt_copy = *p_format;
                     let is_extensible = fmt_copy.wFormatTag == 0xFFFE;
+                    let mut sub_guid_str = None;
                     let is_float = if is_extensible && fmt_copy.cbSize >= 22 {
-                        let ext = *(p_format as *const WAVEFORMATEXTENSIBLE);
-                        ext.sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                        let ext: WAVEFORMATEXTENSIBLE =
+                            std::ptr::read_unaligned(p_format as *const WAVEFORMATEXTENSIBLE);
+                        let sub_format: GUID =
+                            std::ptr::read_unaligned(std::ptr::addr_of!(ext.sub_format));
+                        sub_guid_str = Some(format!(
+                            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            sub_format.data1,
+                            sub_format.data2,
+                            sub_format.data3,
+                            sub_format.data4[0],
+                            sub_format.data4[1],
+                            sub_format.data4[2],
+                            sub_format.data4[3],
+                            sub_format.data4[4],
+                            sub_format.data4[5],
+                            sub_format.data4[6],
+                            sub_format.data4[7],
+                        ));
+                        sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
                     } else {
                         fmt_copy.wFormatTag == 3
+                    };
+
+                    let format_tag_name = if is_extensible {
+                        if is_float {
+                            "WAVE_FORMAT_EXTENSIBLE (IEEE Float)"
+                        } else {
+                            "WAVE_FORMAT_EXTENSIBLE (PCM)"
+                        }
+                    } else if fmt_copy.wFormatTag == 3 {
+                        "WAVE_FORMAT_IEEE_FLOAT"
+                    } else if fmt_copy.wFormatTag == 1 {
+                        "WAVE_FORMAT_PCM"
+                    } else {
+                        "WAVE_FORMAT_UNKNOWN"
+                    }
+                    .to_string();
+
+                    let native_info = NativeAudioFormatInfo {
+                        format_tag: fmt_copy.wFormatTag,
+                        format_tag_hex: format!("0x{:04X}", fmt_copy.wFormatTag),
+                        format_tag_name,
+                        is_extensible,
+                        is_float,
+                        channels: fmt_copy.nChannels,
+                        sample_rate: fmt_copy.nSamplesPerSec,
+                        bits_per_sample: fmt_copy.wBitsPerSample,
+                        block_align: fmt_copy.nBlockAlign,
+                        avg_bytes_per_sec: fmt_copy.nAvgBytesPerSec,
+                        sub_format_guid: sub_guid_str,
                     };
 
                     // AUDCLNT_SHAREMODE_SHARED = 0. Buffer = 1 segundo (10_000_000 * 100ns)
@@ -420,10 +498,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao inicializar IAudioClient em modo compartilhado (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let mut p_capture: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -439,10 +519,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao obter IAudioCaptureClient (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
 
                     let cap_vtbl = *(p_capture as *mut *const IAudioCaptureClientVtbl);
@@ -455,15 +537,25 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         ((*enum_vtbl).Release)(p_enum);
                         CoUninitialize();
                         is_recording_flag.store(false, Ordering::SeqCst);
-                        return Err(VoiceError::CaptureFailed(format!(
+                        let err = VoiceError::CaptureFailed(format!(
                             "Falha ao iniciar stream de captura de áudio (0x{:08X})",
                             hr
-                        )));
+                        ));
+                        let _ = tx_ready.send(Err(err.clone()));
+                        return Err(err);
                     }
+
+                    let t_stream_start = Instant::now();
+                    // Notifica a thread principal que o hardware está efetivamente capturando frames
+                    let _ = tx_ready.send(Ok(native_info.clone()));
 
                     let mut raw_bytes: Vec<u8> =
                         Vec::with_capacity(fmt_copy.nAvgBytesPerSec as usize * 5);
                     let block_align = fmt_copy.nBlockAlign as usize;
+                    let mut total_packets = 0usize;
+                    let mut total_raw_frames = 0usize;
+                    let mut silent_buffer_events = 0usize;
+                    let mut discontinuity_glitches = 0usize;
 
                     while is_recording_flag.load(Ordering::SeqCst) {
                         let mut packet_size = 0u32;
@@ -483,9 +575,15 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                                 &mut qpc_pos,
                             );
                             if hr == 0 && num_frames > 0 && !p_data.is_null() {
+                                total_packets += 1;
+                                total_raw_frames += num_frames as usize;
+                                if flags & 1 != 0 {
+                                    discontinuity_glitches += 1;
+                                }
                                 let byte_count = (num_frames as usize) * block_align;
                                 if flags & 2 != 0 {
                                     // AUDCLNT_BUFFERFLAGS_SILENT
+                                    silent_buffer_events += 1;
                                     raw_bytes.resize(raw_bytes.len() + byte_count, 0);
                                 } else {
                                     let slice = std::slice::from_raw_parts(p_data, byte_count);
@@ -501,6 +599,8 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
 
                     // Encerramento limpo e drenagem de buffers finais
                     let _ = ((*client_vtbl).Stop)(p_client);
+                    let t_stream_stop = Instant::now();
+
                     let mut packet_size = 0u32;
                     let _ = ((*cap_vtbl).GetNextPacketSize)(p_capture, &mut packet_size);
                     while packet_size > 0 {
@@ -518,9 +618,19 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             &mut qpc_pos,
                         );
                         if hr == 0 && num_frames > 0 && !p_data.is_null() {
+                            total_packets += 1;
+                            total_raw_frames += num_frames as usize;
+                            if flags & 1 != 0 {
+                                discontinuity_glitches += 1;
+                            }
                             let byte_count = (num_frames as usize) * block_align;
-                            let slice = std::slice::from_raw_parts(p_data, byte_count);
-                            raw_bytes.extend_from_slice(slice);
+                            if flags & 2 != 0 {
+                                silent_buffer_events += 1;
+                                raw_bytes.resize(raw_bytes.len() + byte_count, 0);
+                            } else {
+                                let slice = std::slice::from_raw_parts(p_data, byte_count);
+                                raw_bytes.extend_from_slice(slice);
+                            }
                             let _ = ((*cap_vtbl).ReleaseBuffer)(p_capture, num_frames);
                         }
                         packet_size = 0;
@@ -574,10 +684,8 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             let mut sum = 0i32;
                             for c in 0..channels {
                                 let b = &frame[c * 3..c * 3 + 3];
-                                let val = ((b[0] as i32)
-                                    | ((b[1] as i32) << 8)
-                                    | ((b[2] as i8 as i32) << 16))
-                                    >> 8;
+                                let sign_ext = if b[2] & 0x80 != 0 { 0xFF } else { 0x00 };
+                                let val = i32::from_le_bytes([b[0], b[1], b[2], sign_ext]) >> 8;
                                 sum += val;
                             }
                             let avg = sum / (channels as i32);
@@ -612,20 +720,72 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                     let canonical_format = AudioFormat::default();
                     let wav_payload =
                         AudioCodec::encode_wav(&canonical_samples, &canonical_format)?;
-                    let duration_ms = (canonical_samples.len() as u64 * 1000) / 16000;
+                    let samples_duration_ms = (canonical_samples.len() as u64 * 1000) / 16000;
+
+                    let init_duration_ms =
+                        t_stream_start.duration_since(t_thread_start).as_millis() as u64;
+                    let effective_capture_ms =
+                        t_stream_stop.duration_since(t_stream_start).as_millis() as u64;
+
+                    let buffer_metrics = BufferMetrics {
+                        total_packets,
+                        total_raw_frames,
+                        total_raw_bytes: raw_bytes.len(),
+                        silent_buffer_events,
+                        discontinuity_glitches,
+                    };
 
                     let source_label = format!("wasapi-mic-{}", native_rate);
-                    Ok(AudioInput::new(
+                    let mut audio_input = AudioInput::new(
                         wav_payload,
                         canonical_format,
-                        duration_ms,
+                        samples_duration_ms,
                         source_label,
-                    ))
+                    );
+
+                    if is_diag {
+                        let session_id = generate_unique_id("diag");
+                        let timings = CaptureTimingMetrics {
+                            requested_duration_ms: effective_capture_ms,
+                            init_duration_ms,
+                            effective_capture_ms,
+                            samples_duration_ms,
+                        };
+                        let diag_report = crate::voice::diag::save_diagnostic_session(
+                            &session_id,
+                            target_device_id.clone(),
+                            None,
+                            &native_info,
+                            timings,
+                            buffer_metrics,
+                            &raw_bytes,
+                            &canonical_samples,
+                        )?;
+                        audio_input = audio_input.with_diagnostics(diag_report);
+                    }
+
+                    Ok(audio_input)
                 }
             });
 
-            *self.worker_handle.lock().unwrap() = Some(handle);
-            Ok(())
+            match rx_ready.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(_info)) => {
+                    *self.worker_handle.lock().unwrap() = Some(handle);
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    self.is_recording.store(false, Ordering::SeqCst);
+                    let _ = handle.join();
+                    Err(e)
+                }
+                Err(_) => {
+                    self.is_recording.store(false, Ordering::SeqCst);
+                    Err(VoiceError::CaptureFailed(
+                        "Timeout ao aguardar inicialização do dispositivo de áudio WASAPI (5s)"
+                            .to_string(),
+                    ))
+                }
+            }
         }
         #[cfg(not(windows))]
         {
@@ -719,6 +879,12 @@ impl WindowsAudioCaptureBackend {
     pub fn with_device(device_id: Option<String>) -> Self {
         Self {
             inner: WasapiAudioCaptureBackend::new(device_id),
+        }
+    }
+
+    pub fn with_diagnostics(device_id: Option<String>, diagnostics: bool) -> Self {
+        Self {
+            inner: WasapiAudioCaptureBackend::with_diagnostics(device_id, diagnostics),
         }
     }
 }
@@ -1173,7 +1339,16 @@ impl PushToTalkController {
         let started = self.started_at.lock().unwrap().take();
         let elapsed = started.map(|t| t.elapsed()).unwrap_or_default();
 
-        let audio_input = self.backend.stop_capture()?;
+        let mut audio_input = self.backend.stop_capture()?;
+
+        if let Some(ref mut diag) = audio_input.diagnostics {
+            diag.timings.requested_duration_ms = elapsed.as_millis() as u64;
+            if let Some(ref path_str) = diag.report_path {
+                if let Ok(json_bytes) = serde_json::to_vec_pretty(&diag) {
+                    let _ = std::fs::write(path_str, json_bytes);
+                }
+            }
+        }
 
         // Validação de limite estrito de tamanho
         if audio_input.payload.len() > self.max_bytes {

@@ -143,6 +143,63 @@ impl AudioCodec {
         Ok(buffer)
     }
 
+    /// Codifica um buffer de bytes brutos em um arquivo WAV RIFF no formato nativo do dispositivo
+    /// (suporta PCM 16/24/32 bits e IEEE Float 32 bits).
+    pub fn encode_raw_wav(
+        raw_bytes: &[u8],
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        is_float: bool,
+    ) -> Result<Vec<u8>, VoiceError> {
+        if channels == 0 || sample_rate == 0 || bits_per_sample == 0 {
+            return Err(VoiceError::InvalidAudioFormat(
+                "Parâmetros de formato nativo inválidos para codificação WAV".to_string(),
+            ));
+        }
+
+        let bytes_per_sample = (bits_per_sample / 8) as u32;
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate * (channels as u32) * bytes_per_sample;
+        let data_size = raw_bytes.len() as u32;
+
+        let fmt_chunk_size = if is_float { 18u32 } else { 16u32 };
+        let file_size = 12 + (8 + fmt_chunk_size) + (8 + data_size) - 8;
+
+        let mut buffer = Vec::with_capacity(file_size as usize + 8);
+
+        // Header RIFF
+        buffer.extend_from_slice(b"RIFF");
+        buffer.extend_from_slice(&file_size.to_le_bytes());
+        buffer.extend_from_slice(b"WAVE");
+
+        // Chunk fmt
+        buffer.extend_from_slice(b"fmt ");
+        buffer.extend_from_slice(&fmt_chunk_size.to_le_bytes());
+
+        let format_tag: u16 = if is_float {
+            3 /* IEEE FLOAT */
+        } else {
+            1 /* PCM */
+        };
+        buffer.extend_from_slice(&format_tag.to_le_bytes());
+        buffer.extend_from_slice(&channels.to_le_bytes());
+        buffer.extend_from_slice(&sample_rate.to_le_bytes());
+        buffer.extend_from_slice(&byte_rate.to_le_bytes());
+        buffer.extend_from_slice(&block_align.to_le_bytes());
+        buffer.extend_from_slice(&bits_per_sample.to_le_bytes());
+        if is_float {
+            buffer.extend_from_slice(&0u16.to_le_bytes()); // cbSize = 0
+        }
+
+        // Chunk data
+        buffer.extend_from_slice(b"data");
+        buffer.extend_from_slice(&data_size.to_le_bytes());
+        buffer.extend_from_slice(raw_bytes);
+
+        Ok(buffer)
+    }
+
     /// Converte áudio estéreo (2 canais) para mono (1 canal) calculando a média das amostras.
     pub fn to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
         if channels <= 1 {

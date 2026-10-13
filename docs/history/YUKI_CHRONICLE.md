@@ -1513,6 +1513,36 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Auditoria e aperfeiçoamento do STT local multilíngue Whisper concluídos com sucesso e 100% dos portões de qualidade aprovados."`
 
+---
+
+## 2026-10-13 — Marco 8.1.1: Auditoria Diagnóstica do Áudio Físico e Fidelidade do STT
+
+- **Contexto e Missão**:
+  - Durante os testes de validação humana física no Windows, foram constatadas distorções acentuadas no reconhecimento de fala utilizando tanto o Microfone Realtek(R) Audio interno quanto o headset Bluetooth Redmi Buds 6 Play. Gravações de 10s resultavam em 9,17s e sílabas iniciais eram deglutidas.
+  - Conforme os princípios soberanos da Yuki, o STT **NÃO foi considerado homologado fisicamente**, instaurando-se uma auditoria diagnóstica matemática e empírica com implementação de telemetria opt-in.
+- **Implementação Conclusiva**:
+  1. **Sincronização de Início de Stream WASAPI e Eliminação de Truncamento:**
+     - Comprovado empiricamente que o setup COM/WASAPI consumia entre 680ms e 835ms no Realtek (e até 1300ms no Bluetooth).
+     - Criado canal de sincronização `std::sync::mpsc::channel` com timeout de 5 segundos em `WasapiAudioCaptureBackend::start_capture`, garantindo que a contagem regressiva só se inicie após `IAudioClient::Start()` confirmar início físico.
+  2. **Correção de FFI Struct Packing em `WAVEFORMATEXTENSIBLE` (Fix do Ruído Digital Realtek):**
+     - Identificado desalinhamento de memória devido à ausência de `#[repr(C, packed(2))]` em `WAVEFORMATEX` e `WAVEFORMATEXTENSIBLE` em `src/voice/capture.rs`, que causava desvio de 4 bytes na leitura de `sub_format` GUID.
+     - O áudio float nativo de 32 bits (48kHz estéreo) era decodificado erroneamente como PCM inteiro de 32 bits, gerando ruído digital massivo com RMS de -6.66 dBFS e 24.38% de clipping em silêncio.
+     - Aplicado `#[repr(C, packed(2))]` e `std::ptr::read_unaligned`, reduzindo o piso de ruído em silêncio para -44.15 dBFS (203 RMS) e 0% clipping, eliminando alucinações de ruído.
+  3. **Módulo Analítico e Diagnóstico Opt-in (`src/voice/diag.rs`):**
+     - Flags CLI `--diagnostics` / `--diag` em `voice listen` e `voice turn`, com fallback para `YUKI_VOICE_DIAGNOSTICS=1`.
+     - Padrão estritamente `false` (zero arquivos gerados em produção).
+     - Quando ativo, grava em `data/voice_diag/` o áudio bruto nativo (`raw_captured`), canônico (`canonical_16k`), pós-normalização (`normalized_16k`) e relatório JSON (`diag.json`).
+     - Tabela formatada no terminal com métricas de formato nativo, tempos de ciclo, pacotes/glitches e acústica (RMS, pico, clipping, silêncio).
+  4. **Testes Automatizados e Portões de Qualidade:**
+     - 3 novos testes analíticos em `tests/voice_stt_tts.rs` (totalizando 19 testes na suíte).
+     - 592 testes ativos aprovados no workspace (0 falhas; 71/71 testes adversariais).
+     - `cargo fmt`, `cargo clippy` e `cargo build --release` 100% aprovados.
+- **Relatório Oficial de Auditoria:**
+  - `docs/audits/MARCO_8_1_1_PHYSICAL_AUDIO_STT_DIAGNOSTIC.md`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Auditoria diagnóstica do áudio físico concluída, sincronização WASAPI e FFI Float 32-bit corrigidos; STT aguardando homologação física humana controlada com o operador."`
+
+
 
 
 
