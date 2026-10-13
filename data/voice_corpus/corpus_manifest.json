@@ -1,0 +1,151 @@
+{
+  "version": "1.0.0",
+  "description": "Corpus de Referência e Homologação Física de Voz da Yuki — Marco 8.1.1 (Etapa 2A)",
+  "test_cases": [
+    {
+      "id": "T14_curto_calculadora",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a13645e57e_1.wav",
+      "ground_truth": "Yuki, abrir calculadora.",
+      "review_pending": false,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "command",
+      "important_terms": [
+        "Yuki",
+        "calculadora"
+      ],
+      "duration_ms": 5000,
+      "notes": "Comando de controle de sistema curto e objetivo gravado no Realtek a 48kHz."
+    },
+    {
+      "id": "T15_longo_fuvest",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a1364764e3_1.wav",
+      "ground_truth": "Yuki, hoje eu preciso revisar matemática para a FUVEST, resolver exercícios de física, estudar química orgânica e depois organizar minhas anotações para a prova de amanhã.",
+      "review_pending": false,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "long_phrase",
+      "important_terms": [
+        "Yuki",
+        "FUVEST",
+        "matemática",
+        "física",
+        "química orgânica"
+      ],
+      "duration_ms": 20010,
+      "notes": "Frase longa e complexa contendo acrônimo acadêmico (FUVEST) e vocabulário técnico multidisciplinar."
+    },
+    {
+      "id": "T8_bluetooth_redmi",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a136335961_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Redmi Buds 6 Play (16kHz mono)",
+      "category": "spontaneous",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 9990,
+      "notes": "Captura Bluetooth HFP a 16kHz nativo. Transcrição exata pendente de revisão pelo operador."
+    },
+    {
+      "id": "T20_bluetooth_redmi",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a13652138e_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Redmi Buds 6 Play (16kHz mono)",
+      "category": "spontaneous",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 9990,
+      "notes": "Teste T20 com headset Bluetooth Redmi Buds 6 Play. Descontinuidades registradas sem clipping. Pendente de validação."
+    },
+    {
+      "id": "T19_rep1_realtek",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a1364e1b35_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "short_phrase",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 8000,
+      "notes": "Teste de repetibilidade T19 (iteração 1 de 3). Transcrição de referência aguardando anotação oficial."
+    },
+    {
+      "id": "T19_rep2_realtek",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a1364f1787_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "short_phrase",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 8000,
+      "notes": "Teste de repetibilidade T19 (iteração 2 de 3). Transcrição de referência aguardando anotação oficial."
+    },
+    {
+      "id": "T19_rep3_realtek",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a136503173_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "short_phrase",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 8000,
+      "notes": "Teste de repetibilidade T19 (iteração 3 de 3). Transcrição de referência aguardando anotação oficial."
+    },
+    {
+      "id": "T11_realtek_saudacao",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a1363e9cbd_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "short_phrase",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 10000,
+      "notes": "Gravação diagnóstica Realtek 48kHz. Pendente de validação de referência."
+    },
+    {
+      "id": "T12_realtek_pergunta",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a13641086f_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "short_phrase",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 10000,
+      "notes": "Gravação diagnóstica Realtek 48kHz. Pendente de validação de referência."
+    },
+    {
+      "id": "T13_realtek_comando",
+      "audio_path": "data/voice_diag/canonical_16k_diag_1a136439a4f_1.wav",
+      "ground_truth": null,
+      "review_pending": true,
+      "language": "pt",
+      "device_name": "Microfone Realtek(R) Audio (48kHz Float)",
+      "category": "command",
+      "important_terms": [
+        "Yuki"
+      ],
+      "duration_ms": 12000,
+      "notes": "Gravação diagnóstica Realtek 48kHz (12s). Pendente de validação de referência."
+    }
+  ]
+}

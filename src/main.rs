@@ -234,6 +234,48 @@ pub enum VoiceCommands {
         #[arg(long, visible_alias = "diag", default_value_t = false)]
         diagnostics: bool,
     },
+    /// Avalia objetivamente a qualidade do STT (WER, CER, Termos Críticos e Latência) no Laboratório de Voz
+    EvalStt {
+        /// Caminho de um arquivo WAV individual ou omitir para avaliar o corpus
+        #[arg(short, long)]
+        audio: Option<String>,
+        /// Transcrição de referência esperada (ground truth) ao avaliar um arquivo individual
+        #[arg(short, long)]
+        reference: Option<String>,
+        /// Termos importantes separados por vírgula (ex: "Yuki,FUVEST,OBMEP")
+        #[arg(long)]
+        terms: Option<String>,
+        /// Idioma alvo do reconhecimento ('pt', 'en', 'es', 'ja', 'auto')
+        #[arg(short, long)]
+        language: Option<String>,
+        /// Caminho do arquivo de manifesto do corpus JSON
+        #[arg(long, default_value = "data/voice_corpus/corpus_manifest.json")]
+        manifest: String,
+        /// Filtrar casos de teste por categoria (command, short_phrase, long_phrase, spontaneous, multilingual, phonetic_challenge)
+        #[arg(long)]
+        category: Option<String>,
+        /// ID específico do caso de teste no manifesto (ex: "T14_curto_calculadora")
+        #[arg(long)]
+        case_id: Option<String>,
+        /// Número de repetições por teste para estabilidade estatística de latência (padrão: 1, recomendado: 3)
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+        /// Exportar relatório completo de avaliação em formato JSON
+        #[arg(long)]
+        export_json: Option<String>,
+        /// Prompt lexical inicial opcional para condicionamento fonético do Whisper
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Número de threads do Whisper (-t)
+        #[arg(short, long)]
+        threads: Option<u32>,
+        /// Beam size para o Whisper (-bs)
+        #[arg(long)]
+        beam_size: Option<u32>,
+        /// Ativa modo de decodificação rápida (beam=1, best_of=1, no-fallback)
+        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        fast: bool,
+    },
     /// Lista os modelos de voz suportados (catálogo oficial pt-BR e modelos locais detectados)
     Voices,
     /// Gera uma amostra de teste no Laboratório Vocal para calibração e análise auditiva
@@ -1666,6 +1708,460 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 );
             }
             println!("════════════════════════════════════════════════════════════════════════════════\n");
+        }
+        VoiceCommands::EvalStt {
+            audio,
+            reference,
+            terms,
+            language,
+            manifest,
+            category,
+            case_id,
+            runs,
+            export_json,
+            prompt,
+            threads,
+            beam_size,
+            fast,
+        } => {
+            use std::str::FromStr;
+            use yuki::voice::stt::eval::{
+                evaluate_single_test_case, CorpusCategory, CorpusEvaluationReport, CorpusTestCase,
+                VoiceCorpusManifest,
+            };
+            use yuki::voice::stt::{normalize_language_code, LocalWhisperConfig};
+
+            let runs_count = runs.max(1);
+            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+            let effective_lang = normalize_language_code(raw_lang);
+
+            let mut config = LocalWhisperConfig::default().with_language(&effective_lang);
+            if let Some(ref p) = prompt {
+                config = config.with_initial_prompt(p);
+            }
+            if let Some(t) = threads {
+                if let Err(e) = config.set_threads(t) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if let Some(b) = beam_size {
+                if let Err(e) = config.set_beam_size(b) {
+                    eprintln!("Aviso: {}", e);
+                }
+            }
+            if fast {
+                let _ = config.set_beam_size(1);
+                let _ = config.set_best_of(1);
+                config.no_fallback = true;
+            }
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗");
+            println!("║                  LABORATÓRIO DE HOMOLOGAÇÃO E QUALIDADE DE VOZ — STT LOCAL (MARCO 8.1.1)               ║");
+            println!("╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝");
+            println!("• Idioma Base:         {}", effective_lang);
+            println!(
+                "• Repetições p/ Áudio: {} (estatística robusta: mediana, min/max e dispersão)",
+                runs_count
+            );
+            if let Some(ref p) = config.initial_prompt {
+                println!("• Prompt Lexical:      \"{}\"", p);
+            } else {
+                println!("• Prompt Lexical:      [Desativado / Neutro]");
+            }
+            let th_str = config
+                .threads
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "4 (default)".into());
+            let bm_str = config
+                .beam_size
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "5 (default)".into());
+            let nf_str = if config.no_fallback {
+                "Ativo (modo rápido)"
+            } else {
+                "Desativado (0.2, 0.4, 0.6)"
+            };
+            println!(
+                "• Parâmetros Whisper:  Threads: {} | Beam: {} | No-Fallback: {}",
+                th_str, bm_str, nf_str
+            );
+
+            let important_terms_list: Vec<String> = terms
+                .map(|t| {
+                    t.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Ramo 1: Avaliação de arquivo individual avulso
+            if let Some(ref audio_path) = audio {
+                println!(
+                    "• Modo de Execução:    Arquivo individual ('{}')",
+                    audio_path
+                );
+                println!("────────────────────────────────────────────────────────────────────────────────────────────────────────");
+
+                let manual_case = CorpusTestCase {
+                    id: "audio_individual".to_string(),
+                    audio_path: audio_path.clone(),
+                    ground_truth: reference.clone(),
+                    review_pending: reference.is_none(),
+                    language: effective_lang.clone(),
+                    device_name: None,
+                    category: CorpusCategory::ShortPhrase,
+                    important_terms: important_terms_list,
+                    duration_ms: None,
+                    notes: Some("Avaliação manual de arquivo individual via CLI".into()),
+                };
+
+                match evaluate_single_test_case(&manual_case, &config, runs_count).await {
+                    Ok(rep) => {
+                        println!("\n[Resultado da Transcrição]");
+                        if let Some(ref gt) = rep.ground_truth {
+                            println!("• Referência (GT):   \"{}\"", gt);
+                        } else {
+                            println!("• Referência (GT):   [Não fornecida — Review Pending]");
+                        }
+                        println!("• Hipótese (STT):    \"{}\"", rep.hypothesis);
+
+                        if let Some(ref wer) = rep.wer {
+                            println!("\n[Métricas de Precisão]");
+                            println!("• WER (Word Error Rate):       {:.2}% (Subs: {}, Del: {}, Ins: {}, Hits: {} / Total: {})",
+                                wer.wer_rate * 100.0, wer.substitutions, wer.deletions, wer.insertions, wer.hits, wer.reference_words
+                            );
+                        }
+                        if let Some(ref cer) = rep.cer {
+                            println!("• CER (Character Error Rate):  {:.2}% (Subs: {}, Del: {}, Ins: {}, Hits: {} / Total: {})",
+                                cer.cer_rate * 100.0, cer.substitutions, cer.deletions, cer.insertions, cer.hits, cer.reference_chars
+                            );
+                        }
+                        if let Some(ref kt) = rep.key_terms {
+                            println!(
+                                "• Termos Críticos (Acurácia):  {:.1}% (TP: {}, FN: {}, FP: {})",
+                                kt.accuracy * 100.0,
+                                kt.true_positives,
+                                kt.false_negatives,
+                                kt.false_positives
+                            );
+                            for d in &kt.details {
+                                println!("  - \"{}\": {}", d.term, d.status);
+                            }
+                        }
+
+                        println!("\n[Estatística de Latência]");
+                        println!("• Mediana:            {:.1} ms", rep.latency.median_ms);
+                        println!(
+                            "• Média:              {:.1} ms (± {:.1} ms)",
+                            rep.latency.mean_ms, rep.latency.std_dev_ms
+                        );
+                        println!(
+                            "• Mínimo / Máximo:    {:.1} ms / {:.1} ms",
+                            rep.latency.min_ms, rep.latency.max_ms
+                        );
+                        if rep.latency.runs_count > 1 {
+                            println!("• Leituras brutas:    {:?}", rep.latency.raw_runs_ms);
+                        }
+
+                        if let Some(ref export_path) = export_json {
+                            let report = CorpusEvaluationReport {
+                                generated_at: yuki::contracts::identifiers::now_utc().to_rfc3339(),
+                                manifest_path: None,
+                                total_cases: 1,
+                                evaluated_cases: if rep.ground_truth.is_some() { 1 } else { 0 },
+                                review_pending_cases: if rep.review_pending { 1 } else { 0 },
+                                average_wer: rep.wer.as_ref().map(|w| w.wer_rate),
+                                average_cer: rep.cer.as_ref().map(|c| c.cer_rate),
+                                overall_key_terms_accuracy: rep
+                                    .key_terms
+                                    .as_ref()
+                                    .map(|k| k.accuracy),
+                                average_latency_ms: rep.latency.median_ms,
+                                reports: vec![rep],
+                            };
+                            if let Err(e) = report.export_to_json(export_path) {
+                                eprintln!("Erro ao exportar JSON: {}", e);
+                            } else {
+                                println!(
+                                    "\nRelatório exportado com sucesso para '{}'",
+                                    export_path
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\nFalha na avaliação do áudio: {}", e);
+                    }
+                }
+                println!("════════════════════════════════════════════════════════════════════════════════════════════════════════\n");
+                return;
+            }
+
+            // Ramo 2: Avaliação baseada no Manifesto do Corpus
+            println!("• Modo de Execução:    Corpus Manifest ('{}')", manifest);
+            let corpus_manifest = match VoiceCorpusManifest::load_from_file(&manifest) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!(
+                        "\nErro ao carregar manifesto do corpus '{}': {}",
+                        manifest, e
+                    );
+                    return;
+                }
+            };
+
+            let parsed_category = if let Some(ref cat_str) = category {
+                match CorpusCategory::from_str(cat_str) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("Aviso: {}. Avaliando todas as categorias.", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let mut target_cases: Vec<&CorpusTestCase> =
+                corpus_manifest.test_cases.iter().collect();
+            if let Some(ref cid) = case_id {
+                target_cases.retain(|c| c.id.eq_ignore_ascii_case(cid));
+            }
+            if let Some(cat) = parsed_category {
+                target_cases.retain(|c| c.category == cat);
+            }
+
+            println!(
+                "• Casos Selecionados:  {} de {}",
+                target_cases.len(),
+                corpus_manifest.test_cases.len()
+            );
+            println!("────────────────────────────────────────────────────────────────────────────────────────────────────────");
+
+            if target_cases.is_empty() {
+                println!("Nenhum caso de teste correspondeu aos filtros aplicados.");
+                return;
+            }
+
+            let mut reports = Vec::new();
+
+            for (idx, case) in target_cases.iter().enumerate() {
+                print!(
+                    "• [{}/{}] Avaliando '{}' ({})... ",
+                    idx + 1,
+                    target_cases.len(),
+                    case.id,
+                    case.category
+                );
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+
+                match evaluate_single_test_case(case, &config, runs_count).await {
+                    Ok(rep) => {
+                        let status_str = if rep.review_pending {
+                            "PENDENTE (sem GT)".to_string()
+                        } else if let Some(ref w) = rep.wer {
+                            format!("WER: {:.1}%", w.wer_rate * 100.0)
+                        } else {
+                            "OK".to_string()
+                        };
+                        println!(
+                            "Concluído ({}, Lat: {:.0}ms)",
+                            status_str, rep.latency.median_ms
+                        );
+                        reports.push(rep);
+                    }
+                    Err(e) => {
+                        println!("FALHOU ({})", e);
+                    }
+                }
+            }
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗");
+            println!("║                             TABELA CONSOLIDADA DE RESULTADOS DO CORPUS                                 ║");
+            println!("╠══════════════════════════════╦══════════╦══════════╦════════════════════╦══════════════╦══════════════════╣");
+            println!("║ Caso de Teste / ID           ║ WER (%)  ║ CER (%)  ║ Termos Críticos    ║ Latência Med ║ Status           ║");
+            println!("╠══════════════════════════════╬══════════╬══════════╬════════════════════╬══════════════╬══════════════════╣");
+
+            let mut evaluated_count = 0;
+            let mut review_pending_count = 0;
+            let mut sum_wer = 0.0;
+            let mut count_wer = 0;
+            let mut sum_cer = 0.0;
+            let mut count_cer = 0;
+            let mut sum_terms_acc = 0.0;
+            let mut count_terms = 0;
+            let mut sum_latency = 0.0;
+
+            for r in &reports {
+                sum_latency += r.latency.median_ms;
+                let wer_str = r
+                    .wer
+                    .as_ref()
+                    .map(|w| format!("{:.1}%", w.wer_rate * 100.0))
+                    .unwrap_or_else(|| "N/D".into());
+                let cer_str = r
+                    .cer
+                    .as_ref()
+                    .map(|c| format!("{:.1}%", c.cer_rate * 100.0))
+                    .unwrap_or_else(|| "N/D".into());
+                let terms_str = r
+                    .key_terms
+                    .as_ref()
+                    .map(|kt| format!("{:.0}% (TP:{})", kt.accuracy * 100.0, kt.true_positives))
+                    .unwrap_or_else(|| "N/D".into());
+                let status_str = if r.review_pending {
+                    review_pending_count += 1;
+                    "Review Pending"
+                } else {
+                    evaluated_count += 1;
+                    if let Some(ref w) = r.wer {
+                        sum_wer += w.wer_rate;
+                        count_wer += 1;
+                    }
+                    if let Some(ref c) = r.cer {
+                        sum_cer += c.cer_rate;
+                        count_cer += 1;
+                    }
+                    if let Some(ref kt) = r.key_terms {
+                        sum_terms_acc += kt.accuracy;
+                        count_terms += 1;
+                    }
+                    "Avaliador OK"
+                };
+
+                println!(
+                    "║ {:<28} ║ {:<8} ║ {:<8} ║ {:<18} ║ {:>9.1} ms ║ {:<16} ║",
+                    if r.test_case_id.len() > 28 {
+                        &r.test_case_id[..28]
+                    } else {
+                        &r.test_case_id
+                    },
+                    wer_str,
+                    cer_str,
+                    terms_str,
+                    r.latency.median_ms,
+                    status_str
+                );
+            }
+            println!("╚══════════════════════════════╩══════════╩══════════╩════════════════════╩══════════════╩══════════════════╝");
+
+            println!("\n--- Detalhes Textuais das Transcrições ---");
+            for r in &reports {
+                println!("\n• [{}]", r.test_case_id);
+                if let Some(ref gt) = r.ground_truth {
+                    println!("  Referência: \"{}\"", gt);
+                } else {
+                    println!("  Referência: [Pendente de Revisão / Documentação Oficial]");
+                }
+                println!("  Hipótese:   \"{}\"", r.hypothesis);
+                if let Some(ref w) = r.wer {
+                    println!(
+                        "  WER:        {:.1}% (S: {}, D: {}, I: {}, C: {})",
+                        w.wer_rate * 100.0,
+                        w.substitutions,
+                        w.deletions,
+                        w.insertions,
+                        w.hits
+                    );
+                }
+                if let Some(ref c) = r.cer {
+                    println!(
+                        "  CER:        {:.1}% (S: {}, D: {}, I: {}, C: {})",
+                        c.cer_rate * 100.0,
+                        c.substitutions,
+                        c.deletions,
+                        c.insertions,
+                        c.hits
+                    );
+                }
+                if let Some(ref kt) = r.key_terms {
+                    let details_str = kt
+                        .details
+                        .iter()
+                        .map(|d| format!("{}: {:?}", d.term, d.status))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "  Termos:     {:.0}% ({})",
+                        kt.accuracy * 100.0,
+                        details_str
+                    );
+                }
+                println!("  Latência:   Mediana: {:.1} ms | Média: {:.1} ms (± {:.1} ms) | Min: {:.1} ms | Max: {:.1} ms",
+                    r.latency.median_ms, r.latency.mean_ms, r.latency.std_dev_ms, r.latency.min_ms, r.latency.max_ms
+                );
+            }
+
+            let avg_wer = if count_wer > 0 {
+                Some(sum_wer / count_wer as f64)
+            } else {
+                None
+            };
+            let avg_cer = if count_cer > 0 {
+                Some(sum_cer / count_cer as f64)
+            } else {
+                None
+            };
+            let avg_terms = if count_terms > 0 {
+                Some(sum_terms_acc / count_terms as f64)
+            } else {
+                None
+            };
+            let avg_lat = if !reports.is_empty() {
+                sum_latency / reports.len() as f64
+            } else {
+                0.0
+            };
+
+            println!("\n════════════════════════════════════════════════════════════════════════════════════════════════════════");
+            println!("RESUMO CONSOLIDADO DA ETAPA 2A:");
+            println!("• Total de Casos no Relatório:    {}", reports.len());
+            println!("• Casos com Referência Avaliada:  {}", evaluated_count);
+            println!(
+                "• Casos com Revisão Pendente:     {} (preservados sem referências fictícias)",
+                review_pending_count
+            );
+            if let Some(w) = avg_wer {
+                println!("• WER Médio:                      {:.2}%", w * 100.0);
+            } else {
+                println!("• WER Médio:                      N/D (nenhuma referência validada)");
+            }
+            if let Some(c) = avg_cer {
+                println!("• CER Médio:                      {:.2}%", c * 100.0);
+            } else {
+                println!("• CER Médio:                      N/D (nenhuma referência validada)");
+            }
+            if let Some(t) = avg_terms {
+                println!("• Acurácia de Termos Críticos:   {:.2}%", t * 100.0);
+            }
+            println!("• Latência Mediana Média:         {:.1} ms", avg_lat);
+            println!("════════════════════════════════════════════════════════════════════════════════════════════════════════");
+
+            if let Some(ref export_path) = export_json {
+                let report = CorpusEvaluationReport {
+                    generated_at: yuki::contracts::identifiers::now_utc().to_rfc3339(),
+                    manifest_path: Some(manifest.clone()),
+                    total_cases: reports.len(),
+                    evaluated_cases: evaluated_count,
+                    review_pending_cases: review_pending_count,
+                    average_wer: avg_wer,
+                    average_cer: avg_cer,
+                    overall_key_terms_accuracy: avg_terms,
+                    average_latency_ms: avg_lat,
+                    reports,
+                };
+                if let Err(e) = report.export_to_json(export_path) {
+                    eprintln!("Erro ao exportar JSON: {}", e);
+                } else {
+                    println!(
+                        "\nRelatório do corpus exportado com sucesso para '{}'",
+                        export_path
+                    );
+                }
+            }
+            println!();
         }
         VoiceCommands::Voices => {
             use yuki::voice::stt::{list_local_whisper_models, LocalWhisperSttProvider};

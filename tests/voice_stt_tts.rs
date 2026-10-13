@@ -935,3 +935,312 @@ fn test_diagnostic_report_stt_integration_and_serialization() {
     let deserialized: AudioDiagnosticsReport = serde_json::from_str(&json).expect("deserialize ok");
     assert_eq!(report, deserialized);
 }
+
+#[test]
+fn test_stt_eval_normalization() {
+    use yuki::voice::stt::eval::normalize_for_evaluation;
+
+    // 1. Maiúsculas e pontuações
+    assert_eq!(
+        normalize_for_evaluation("Olá, Yuki! Tudo bem?"),
+        "olá yuki tudo bem"
+    );
+
+    // 2. Preservação de acentos e diacríticos em português
+    assert_eq!(
+        normalize_for_evaluation("Atenção, não esqueça o coração e a bênção."),
+        "atenção não esqueça o coração e a bênção"
+    );
+    assert_eq!(
+        normalize_for_evaluation("é, à, ó, ú, í, â, ê, ô, ç"),
+        "é à ó ú í â ê ô ç"
+    );
+
+    // 3. Colapso de múltiplos espaços e traços
+    assert_eq!(
+        normalize_for_evaluation("   Yuki    ---   abrir   calculadora...   "),
+        "yuki abrir calculadora"
+    );
+
+    // 4. Caracteres japoneses (Kanji e Kana)
+    assert_eq!(
+        normalize_for_evaluation("Yuki、こんにちは！人工知能。"),
+        "yuki こんにちは 人工知能"
+    );
+}
+
+#[test]
+fn test_stt_eval_wer_exact_calculations() {
+    use yuki::voice::stt::eval::calculate_wer;
+
+    // 1. Frases idênticas -> WER = 0.0, Hits = 4, S=0, D=0, I=0
+    let res_ident = calculate_wer("Yuki abrir a calculadora", "Yuki abrir a calculadora");
+    assert_eq!(res_ident.wer_rate, 0.0);
+    assert_eq!(res_ident.hits, 4);
+    assert_eq!(res_ident.substitutions, 0);
+    assert_eq!(res_ident.deletions, 0);
+    assert_eq!(res_ident.insertions, 0);
+    assert_eq!(res_ident.reference_words, 4);
+
+    // 2. Substituição pura: 1 de 4 palavras trocada -> WER = 0.25 (25%)
+    let res_sub = calculate_wer("o gato bebe leite", "o cachorro bebe leite");
+    assert_eq!(res_sub.wer_rate, 0.25);
+    assert_eq!(res_sub.substitutions, 1);
+    assert_eq!(res_sub.deletions, 0);
+    assert_eq!(res_sub.insertions, 0);
+    assert_eq!(res_sub.hits, 3);
+    assert_eq!(res_sub.reference_words, 4);
+
+    // 3. Deleção pura: 1 palavra omitida de 4 -> WER = 0.25 (25%)
+    let res_del = calculate_wer("o gato bebe leite", "o gato bebe");
+    assert_eq!(res_del.wer_rate, 0.25);
+    assert_eq!(res_del.substitutions, 0);
+    assert_eq!(res_del.deletions, 1);
+    assert_eq!(res_del.insertions, 0);
+    assert_eq!(res_del.hits, 3);
+    assert_eq!(res_del.reference_words, 4);
+
+    // 4. Inserção pura: 2 palavras a mais em 3 -> WER = 2/3 (~0.6667)
+    let res_ins = calculate_wer("o gato bebe", "o gato bebe muito leite");
+    assert!((res_ins.wer_rate - 2.0 / 3.0).abs() < 1e-6);
+    assert_eq!(res_ins.substitutions, 0);
+    assert_eq!(res_ins.deletions, 0);
+    assert_eq!(res_ins.insertions, 2);
+    assert_eq!(res_ins.hits, 3);
+    assert_eq!(res_ins.reference_words, 3);
+
+    // 5. Casos vazios e limites
+    let res_empty_both = calculate_wer("", "");
+    assert_eq!(res_empty_both.wer_rate, 0.0);
+    assert_eq!(res_empty_both.reference_words, 0);
+
+    let res_empty_ref = calculate_wer("", "palavra inserida");
+    assert_eq!(res_empty_ref.wer_rate, 1.0);
+    assert_eq!(res_empty_ref.insertions, 2);
+
+    let res_empty_hyp = calculate_wer("palavra na referencia", "");
+    assert_eq!(res_empty_hyp.wer_rate, 1.0);
+    assert_eq!(res_empty_hyp.deletions, 3);
+}
+
+#[test]
+fn test_stt_eval_cer_latin_and_japanese() {
+    use yuki::voice::stt::eval::calculate_cer;
+
+    // 1. Textos latinos idênticos com pontuação ignorada
+    let res_ident = calculate_cer("Olá, Yuki!", "olá yuki");
+    assert_eq!(res_ident.cer_rate, 0.0);
+    assert_eq!(res_ident.hits, 7); // 'o', 'l', 'á', 'y', 'u', 'k', 'i'
+
+    // 2. Erro de um caractere no nome próprio ("Yuki" vs "Iuki")
+    let res_name = calculate_cer("Yuki", "Iuki");
+    assert_eq!(res_name.substitutions, 1);
+    assert_eq!(res_name.hits, 3);
+    assert_eq!(res_name.reference_chars, 4);
+    assert_eq!(res_name.cer_rate, 0.25);
+
+    // 3. Japonês: "こんにちは" (5 chars) vs "こんばんは" (5 chars)
+    // 'に' e 'ち' substituídos por 'ば' -> 2 substituições
+    let res_ja = calculate_cer("こんにちは", "こんばんは");
+    assert_eq!(res_ja.reference_chars, 5);
+    assert_eq!(res_ja.substitutions, 2);
+    assert_eq!(res_ja.cer_rate, 0.4);
+}
+
+#[test]
+fn test_stt_eval_key_terms_spotting() {
+    use yuki::voice::stt::eval::{evaluate_key_terms, KeyTermStatus};
+
+    let reference = "Yuki, hoje eu preciso revisar matemática para a FUVEST e a OBMEP.";
+    let hypothesis = "Hoje eu preciso revisar matemática para a FUVEST e o ENEM.";
+    let terms = vec![
+        "Yuki".to_string(),
+        "FUVEST".to_string(),
+        "OBMEP".to_string(),
+        "matemática".to_string(),
+        "ENEM".to_string(),
+    ];
+
+    let result = evaluate_key_terms(reference, hypothesis, &terms);
+    assert_eq!(result.total_terms, 5);
+
+    // FUVEST e matemática: presentes na ref e na hyp -> TruePositive
+    assert_eq!(result.true_positives, 2);
+    // Yuki e OBMEP: presentes na ref mas ausentes na hyp -> FalseNegative
+    assert_eq!(result.false_negatives, 2);
+    // ENEM: ausente na ref mas inserido na hyp -> FalsePositive
+    assert_eq!(result.false_positives, 1);
+    assert_eq!(result.true_negatives, 0);
+
+    // Acurácia dos termos esperados: 2 / (2 + 2) = 50%
+    assert_eq!(result.accuracy, 0.5);
+
+    let fuvest = result.details.iter().find(|d| d.term == "FUVEST").unwrap();
+    assert_eq!(fuvest.status, KeyTermStatus::TruePositive);
+
+    let yuki = result.details.iter().find(|d| d.term == "Yuki").unwrap();
+    assert_eq!(yuki.status, KeyTermStatus::FalseNegative);
+
+    let enem = result.details.iter().find(|d| d.term == "ENEM").unwrap();
+    assert_eq!(enem.status, KeyTermStatus::FalsePositive);
+}
+
+#[test]
+fn test_stt_eval_latency_robust_stats() {
+    use yuki::voice::stt::eval::compute_latency_stats;
+
+    // 1. Array vazio
+    let empty = compute_latency_stats(&[]);
+    assert_eq!(empty.runs_count, 0);
+    assert_eq!(empty.median_ms, 0.0);
+
+    // 2. Execução única
+    let single = compute_latency_stats(&[1500.0]);
+    assert_eq!(single.runs_count, 1);
+    assert_eq!(single.median_ms, 1500.0);
+    assert_eq!(single.mean_ms, 1500.0);
+    assert_eq!(single.std_dev_ms, 0.0);
+    assert_eq!(single.min_ms, 1500.0);
+    assert_eq!(single.max_ms, 1500.0);
+
+    // 3. 3 execuções (ímpar)
+    let runs_odd = compute_latency_stats(&[1200.0, 1000.0, 1100.0]);
+    assert_eq!(runs_odd.runs_count, 3);
+    assert_eq!(runs_odd.median_ms, 1100.0);
+    assert_eq!(runs_odd.mean_ms, 1100.0);
+    assert_eq!(runs_odd.min_ms, 1000.0);
+    assert_eq!(runs_odd.max_ms, 1200.0);
+    assert_eq!(runs_odd.std_dev_ms, 100.0);
+
+    // 4. 2 execuções (par)
+    let runs_even = compute_latency_stats(&[100.0, 200.0]);
+    assert_eq!(runs_even.runs_count, 2);
+    assert_eq!(runs_even.median_ms, 150.0);
+    assert_eq!(runs_even.mean_ms, 150.0);
+}
+
+#[test]
+fn test_stt_eval_corpus_manifest_serialization_and_filters() {
+    use yuki::voice::stt::eval::{CorpusCategory, CorpusTestCase, VoiceCorpusManifest};
+
+    let manifest = VoiceCorpusManifest {
+        version: "1.0.0".to_string(),
+        description: "Test manifest".to_string(),
+        test_cases: vec![
+            CorpusTestCase {
+                id: "test_cmd".to_string(),
+                audio_path: "data/test.wav".to_string(),
+                ground_truth: Some("abrir calculadora".to_string()),
+                review_pending: false,
+                language: "pt".to_string(),
+                device_name: Some("Realtek".to_string()),
+                category: CorpusCategory::Command,
+                important_terms: vec!["calculadora".to_string()],
+                duration_ms: Some(3000),
+                notes: None,
+            },
+            CorpusTestCase {
+                id: "test_mult".to_string(),
+                audio_path: "data/test_en.wav".to_string(),
+                ground_truth: None,
+                review_pending: true,
+                language: "en".to_string(),
+                device_name: None,
+                category: CorpusCategory::Multilingual,
+                important_terms: vec![],
+                duration_ms: None,
+                notes: None,
+            },
+        ],
+    };
+
+    // Filtros
+    let cmds = manifest.filter_by_category(CorpusCategory::Command);
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].id, "test_cmd");
+
+    let pt_cases = manifest.filter_by_language("pt");
+    assert_eq!(pt_cases.len(), 1);
+    assert_eq!(pt_cases[0].id, "test_cmd");
+
+    // Serialização JSON
+    let temp_file = std::env::temp_dir().join(format!(
+        "yuki_test_manifest_{}.json",
+        yuki::contracts::identifiers::generate_unique_id("manifest")
+    ));
+    manifest.save_to_file(&temp_file).expect("save manifest ok");
+
+    let loaded = VoiceCorpusManifest::load_from_file(&temp_file).expect("load manifest ok");
+    assert_eq!(loaded.version, "1.0.0");
+    assert_eq!(loaded.test_cases.len(), 2);
+    assert_eq!(loaded.test_cases[0].id, "test_cmd");
+    assert_eq!(loaded.test_cases[1].category, CorpusCategory::Multilingual);
+
+    let _ = std::fs::remove_file(temp_file);
+}
+
+#[test]
+fn test_stt_eval_report_export_json_and_roundtrip() {
+    use yuki::contracts::voice::{SttDecodingConfigSummary, SttTimingMetrics};
+    use yuki::voice::stt::eval::{
+        compute_latency_stats, CorpusEvaluationReport, SingleEvaluationReport,
+    };
+
+    let rep = SingleEvaluationReport {
+        test_case_id: "T14_unit".to_string(),
+        audio_path: "test.wav".to_string(),
+        ground_truth: Some("Yuki, abrir calculadora.".to_string()),
+        hypothesis: "Yuki abrir calculadora".to_string(),
+        review_pending: false,
+        wer: Some(yuki::voice::stt::eval::calculate_wer(
+            "Yuki, abrir calculadora.",
+            "Yuki abrir calculadora",
+        )),
+        cer: Some(yuki::voice::stt::eval::calculate_cer(
+            "Yuki, abrir calculadora.",
+            "Yuki abrir calculadora",
+        )),
+        key_terms: None,
+        latency: compute_latency_stats(&[500.0, 520.0]),
+        timings: SttTimingMetrics::default(),
+        decoding_config: SttDecodingConfigSummary {
+            language_requested: "pt".to_string(),
+            prompt_configured: false,
+            prompt_preview: None,
+            threads: None,
+            beam_size: None,
+            best_of: None,
+            no_fallback: false,
+        },
+    };
+
+    let corpus_report = CorpusEvaluationReport {
+        generated_at: "2026-10-13T16:00:00Z".to_string(),
+        manifest_path: Some("manifest.json".to_string()),
+        total_cases: 1,
+        evaluated_cases: 1,
+        review_pending_cases: 0,
+        average_wer: Some(0.0),
+        average_cer: Some(0.0),
+        overall_key_terms_accuracy: None,
+        average_latency_ms: 510.0,
+        reports: vec![rep],
+    };
+
+    let temp_export = std::env::temp_dir().join(format!(
+        "yuki_test_report_{}.json",
+        yuki::contracts::identifiers::generate_unique_id("eval_rep")
+    ));
+
+    corpus_report
+        .export_to_json(&temp_export)
+        .expect("export ok");
+
+    let content = std::fs::read_to_string(&temp_export).expect("read export ok");
+    let loaded: CorpusEvaluationReport = serde_json::from_str(&content).expect("parse export ok");
+    assert_eq!(loaded.total_cases, 1);
+    assert_eq!(loaded.reports[0].test_case_id, "T14_unit");
+    assert_eq!(loaded.reports[0].wer.as_ref().unwrap().wer_rate, 0.0);
+
+    let _ = std::fs::remove_file(temp_export);
+}

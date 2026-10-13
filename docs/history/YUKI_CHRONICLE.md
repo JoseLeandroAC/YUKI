@@ -1579,6 +1579,43 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Implementação controlada da Etapa 1 do STT concluída (precisão lexical, observabilidade de latência, decodificação configurável e ferramenta A/B); STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação do operador humano."`
 
+---
+
+## 2026-10-13 — Marco 8.1.1: Conclusão da Etapa 2A — Laboratório de Homologação e Qualidade de Voz
+
+- **Contexto e Missão**:
+  - Para permitir que qualquer modificação acústica futura no pipeline de reconhecimento (filtros antialiasing, ajustes de decimação, calibração de VAD e otimizações de decodificação) seja comparada objetivamente com versões anteriores, foi construído um laboratório local, automatizado e reproduzível de avaliação de qualidade de fala.
+  - O laboratório fundamenta-se em métricas matemáticas formais da literatura (WER e CER com alinhamento dinâmico e decomposição exata de operações), Keyword Spotting para termos vitais da assistente, medição estatística robusta de latência com repetições e um manifesto estruturado de gravações físicas reais.
+  - Conforme as restrições estritas da etapa: **zero alterações no hardware ou driver WASAPI**, **zero versionamento de arquivos WAV pessoais** e **zero invenção de transcrições de referência** (casos sem documentação explícita nos autos foram estritamente marcados com `review_pending: true`).
+- **Implementação Conclusiva (Etapa 2A)**:
+  1. **Métricas Matemáticas de Precisão (`src/voice/stt/eval.rs`):**
+     - **Word Error Rate (WER):** Algoritmo clássico de Programação Dinâmica (Levenshtein sobre tokens de palavras) com backtracking exato para decomposição analítica em Substituições ($S$), Exclusões ($D$), Inserções ($I$) e Acertos ($C$). Taxa calculada formalmente como $\frac{S + D + I}{N}$.
+     - **Character Error Rate (CER):** Alinhamento dinâmico sobre sequências de caracteres escalares Unicode (`char`). Vital para avaliação de nomes próprios ("Yuki" vs "Iuki") e idiomas sem separadores por espaço (como japonês).
+     - **Normalização Textual para Avaliação (`normalize_for_evaluation`):** Minúsculas, remoção de delimitadores sintáticos e pontuação, colapso de espaços múltiplos e **preservação rigorosa de acentos e diacríticos em português** (á, é, í, ó, ú, à, ã, õ, ç, â, ê, ô) e caracteres alfanuméricos CJK (kanji, hiragana, katakana).
+     - **Keyword Spotting (Acurácia de Termos Críticos):** Detecção automatizada de termos vitais cadastrados no corpus (ex: "Yuki", "FUVEST", "OBMEP", "calculadora") com classificação estrita em $TP$ (True Positive), $FN$ (False Negative), $FP$ (False Positive) e cálculo de acurácia dos termos esperados.
+     - **Estatística Robusta de Latência com Repetições (`compute_latency_stats`):** Suporte a múltiplas repetições (`--runs N`), calculando mediana (para imunidade a spikes do SO), média, desvio padrão amostral ($s$), mínimo e máximo.
+  2. **Manifesto do Corpus de Voz (`data/voice_corpus/corpus_manifest.json`):**
+     - Schema JSON versionável catalogando gravações reais da homologação física em `data/voice_diag/`: ID do teste, caminho relativo do WAV local, transcrição de referência (`ground_truth`), idioma, dispositivo, categoria (`Command`, `ShortPhrase`, `LongPhrase`, `Spontaneous`, `Multilingual`, `PhoneticChallenge`), termos críticos (`important_terms`) e observações.
+     - Casos de teste homologados documentados com referências exatas: T14 (comando curto: `"Yuki, abrir calculadora."`) e T15 (frase longa multidisciplinar: `"Yuki, hoje eu preciso revisar matemática para a FUVEST, resolver exercícios de física, estudar química orgânica e depois organizar minhas anotações para a prova de amanhã."`).
+     - Demais gravações físicas (T8 e T20 Bluetooth Redmi Buds 6 Play, baterias de repetibilidade T19) registradas com integridade científica e marcadas com `review_pending: true` e `ground_truth: null` (aguardando anotação oficial do operador humano).
+     - Regras de `.gitignore` atualizadas (`!data/voice_corpus/`, `!data/voice_corpus/*.json`) mantendo o arquivo de catálogo versionado enquanto todos os WAVs e relatórios de diagnóstico permanecem 100% protegidos e não-versionados.
+  3. **Comando Integrado de Linha de Comando (`yuki voice eval-stt`):**
+     - Avaliação de arquivos WAV avulsos (`--audio <path> --reference <texto> [--terms <lista>]`).
+     - Avaliação em lote do corpus completo via manifesto (`--manifest <path>`), com filtros por ID (`--case-id`) e por categoria (`--category`).
+     - Parametrização completa do Whisper para testes experimentais (`--prompt`, `--threads` / `-t`, `--beam-size`, `--fast`).
+     - Exportação de relatório completo e estruturado em formato JSON (`--export-json <path>`).
+     - Renderização de quadro tabular consolidado no terminal com WER (%), CER (%), Acurácia de Termos, Latência Mediana e Status de Avaliação, além de resumo consolidado com médias agregadas.
+  4. **Evidência Operacional Real:**
+     - **Teste T14 (comando curto):** Referência `"Yuki, abrir calculadora."` vs Hipótese real `"Yuki, abre a calculadora."` $\rightarrow$ WER: 66.67%, CER: 10.00%, Termos Críticos: 100% (Yuki: TP, calculadora: TP), Latência: 9.5s.
+     - **Teste T15 (frase longa FUVEST):** Referência completa de 26 palavras vs Hipótese real $\rightarrow$ WER: **15.4%** (23 acertos de 26 palavras), CER: **4.2%** (138 acertos de 142 caracteres), Termos Críticos: 80% (Yuki: TP, FUVEST: TP, matemática: TP, química orgânica: TP, física: FN com "fisca"), Latência: 10.5s.
+  5. **Testes Automatizados e Portões de Qualidade:**
+     - 7 novos testes unitários e de integração adicionados a `tests/voice_stt_tts.rs` (31/31 aprovados).
+     - Total de 603 testes ativos aprovados em todo o workspace (0 falhas; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` e `cargo build --release`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Laboratório de Homologação e Qualidade de Voz (Etapa 2A) concluído com sucesso; métricas objetivas (WER, CER, Keywords, Latência) integradas e validadas; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador."`
+
+
 
 
 

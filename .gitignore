@@ -12,7 +12,10 @@ config/yuki.toml
 !config/yuki.example.toml
 
 # Local SQLite databases & WAL logs
-data/
+data/*
+!data/voice_corpus/
+data/voice_corpus/*
+!data/voice_corpus/*.json
 *.db
 *.db-wal
 *.db-shm
