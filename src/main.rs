@@ -276,6 +276,24 @@ pub enum VoiceCommands {
         #[arg(long, visible_alias = "fast", default_value_t = false)]
         fast: bool,
     },
+    /// Executa comparação A/B entre os algoritmos de reamostragem (Linear Baseline vs FIR Antialiasing)
+    CompareResamplers {
+        /// Caminho de arquivo WAV bruto nativo (ex: data/voice_diag/raw_captured_diag_1a13645e57e_1.wav)
+        #[arg(long)]
+        raw_audio: Option<String>,
+        /// ID do caso de teste no manifesto (ex: "T14_curto_calculadora")
+        #[arg(long)]
+        case_id: Option<String>,
+        /// Caminho do arquivo de manifesto do corpus JSON
+        #[arg(long, default_value = "data/voice_corpus/corpus_manifest.json")]
+        manifest: String,
+        /// Idioma alvo do Whisper ('pt', 'en', 'es', 'ja', 'auto')
+        #[arg(short, long)]
+        language: Option<String>,
+        /// Transcrição de referência esperada
+        #[arg(long)]
+        reference: Option<String>,
+    },
     /// Lista os modelos de voz suportados (catálogo oficial pt-BR e modelos locais detectados)
     Voices,
     /// Gera uma amostra de teste no Laboratório Vocal para calibração e análise auditiva
@@ -2162,6 +2180,186 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
             }
             println!();
+        }
+        VoiceCommands::CompareResamplers {
+            raw_audio,
+            case_id,
+            manifest,
+            language,
+            reference,
+        } => {
+            use yuki::voice::stt::eval::{run_resampler_ab_comparison, VoiceCorpusManifest};
+            use yuki::voice::stt::{normalize_language_code, LocalWhisperConfig};
+
+            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+            let effective_lang = normalize_language_code(raw_lang);
+            let config = LocalWhisperConfig::default().with_language(&effective_lang);
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════════╗");
+            println!("║          COMPARAÇÃO A/B DE REAMOSTRAGEM — LINEAR (BASELINE) VS FIR ANTIALIASING (MARCO 8.1.1)          ║");
+            println!("╚════════════════════════════════════════════════════════════════════════════════════════════════════════╝");
+
+            if let Some(ref raw_path) = raw_audio {
+                let id = case_id.as_deref().unwrap_or("raw_custom");
+                println!("• Áudio Bruto:         {}", raw_path);
+                println!("• Idioma Whisper:      {}", effective_lang);
+                if let Some(ref r) = reference {
+                    println!("• Referência:          \"{}\"", r);
+                }
+
+                match run_resampler_ab_comparison(id, raw_path, reference.as_deref(), &[], &config)
+                    .await
+                {
+                    Ok(rep) => {
+                        println!("\n════════════════════════════════════════════════════════════════════════════════");
+                        println!("                    RESULTADOS COMPARATIVOS A/B (ÁUDIO BRUTO)");
+                        println!("════════════════════════════════════════════════════════════════════════════════");
+                        println!(
+                            "{:<26} | {:<25} | {:<25}",
+                            "Métrica / Parâmetro",
+                            "Método A (Linear)",
+                            "Método B (FIR Antialiasing)"
+                        );
+                        println!("{:-<26}-+-{:-<25}-+-{:-<25}", "", "", "");
+                        println!(
+                            "{:<26} | {:<25} | {:<25}",
+                            "Energia RMS",
+                            format!("{:.1}", rep.rms_linear),
+                            format!("{:.1}", rep.rms_fir)
+                        );
+                        println!(
+                            "{:<26} | {:<25} | {:<25}",
+                            "Latência Inferência",
+                            format!("{:.1} ms", rep.latency_linear_ms),
+                            format!("{:.1} ms", rep.latency_fir_ms)
+                        );
+                        if let (Some(wl), Some(wf)) = (rep.wer_linear, rep.wer_fir) {
+                            println!(
+                                "{:<26} | {:<25} | {:<25}",
+                                "WER",
+                                format!("{:.1}%", wl * 100.0),
+                                format!(
+                                    "{:.1}% (Delta: {:+.1}%)",
+                                    wf * 100.0,
+                                    rep.wer_delta.unwrap() * 100.0
+                                )
+                            );
+                        }
+                        if let (Some(cl), Some(cf)) = (rep.cer_linear, rep.cer_fir) {
+                            println!(
+                                "{:<26} | {:<25} | {:<25}",
+                                "CER",
+                                format!("{:.1}%", cl * 100.0),
+                                format!(
+                                    "{:.1}% (Delta: {:+.1}%)",
+                                    cf * 100.0,
+                                    rep.cer_delta.unwrap() * 100.0
+                                )
+                            );
+                        }
+                        println!("{:-<26}-+-{:-<25}-+-{:-<25}", "", "", "");
+                        println!("• Hipótese A (Linear):");
+                        println!("  \"{}\"", rep.hypothesis_linear);
+                        println!("• Hipótese B (FIR Antialiasing):");
+                        println!("  \"{}\"", rep.hypothesis_fir);
+                        if rep.hypothesis_linear == rep.hypothesis_fir {
+                            println!("\n• Análise: Hipóteses IDÊNTICAS.");
+                        } else {
+                            println!("\n• Análise: DIFERENÇA DETECTADA entre as hipóteses.");
+                        }
+                    }
+                    Err(e) => eprintln!("Erro ao executar comparação A/B: {}", e),
+                }
+                println!("════════════════════════════════════════════════════════════════════════════════\n");
+                return;
+            }
+
+            // Modo Manifesto: avalia casos com gravações brutas existentes
+            let corpus_manifest = match VoiceCorpusManifest::load_from_file(&manifest) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Erro ao carregar manifesto '{}': {}", manifest, e);
+                    return;
+                }
+            };
+
+            let target_cases: Vec<&yuki::voice::stt::eval::CorpusTestCase> =
+                if let Some(ref cid) = case_id {
+                    corpus_manifest
+                        .test_cases
+                        .iter()
+                        .filter(|c| &c.id == cid)
+                        .collect()
+                } else {
+                    corpus_manifest.test_cases.iter().collect()
+                };
+
+            let mut compared_count = 0;
+            println!("Procurando capturas brutas (raw_captured_*.wav) correspondentes...\n");
+
+            for case in &target_cases {
+                let canonical_path = std::path::Path::new(&case.audio_path);
+                let file_name = canonical_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let raw_file_name = file_name.replace("canonical_16k_", "raw_captured_");
+                let raw_path = canonical_path.with_file_name(raw_file_name);
+
+                if !raw_path.exists() {
+                    continue;
+                }
+
+                compared_count += 1;
+                let case_config = config.clone().with_language(&case.language);
+                println!("▶ [{}] {}", case.id, raw_path.display());
+                if let Some(ref gt) = case.ground_truth {
+                    println!("  Ref:    \"{}\"", gt);
+                }
+
+                match run_resampler_ab_comparison(
+                    &case.id,
+                    &raw_path,
+                    case.ground_truth.as_deref(),
+                    &case.important_terms,
+                    &case_config,
+                )
+                .await
+                {
+                    Ok(rep) => {
+                        println!("  Linear: \"{}\"", rep.hypothesis_linear);
+                        println!("  FIR:    \"{}\"", rep.hypothesis_fir);
+                        if let (Some(wl), Some(wf)) = (rep.wer_linear, rep.wer_fir) {
+                            println!(
+                                "  WER:    Linear: {:.1}% | FIR: {:.1}% | Delta: {:+.1}%",
+                                wl * 100.0,
+                                wf * 100.0,
+                                rep.wer_delta.unwrap() * 100.0
+                            );
+                        }
+                        if let (Some(cl), Some(cf)) = (rep.cer_linear, rep.cer_fir) {
+                            println!(
+                                "  CER:    Linear: {:.1}% | FIR: {:.1}% | Delta: {:+.1}%",
+                                cl * 100.0,
+                                cf * 100.0,
+                                rep.cer_delta.unwrap() * 100.0
+                            );
+                        }
+                        println!(
+                            "  Tempo:  Linear: {:.1} ms | FIR: {:.1} ms\n",
+                            rep.latency_linear_ms, rep.latency_fir_ms
+                        );
+                    }
+                    Err(e) => eprintln!("  Falha: {}\n", e),
+                }
+            }
+
+            println!(
+                "════════════════════════════════════════════════════════════════════════════════"
+            );
+            println!("Total de casos físicos comparados: {}", compared_count);
+            println!("════════════════════════════════════════════════════════════════════════════════\n");
         }
         VoiceCommands::Voices => {
             use yuki::voice::stt::{list_local_whisper_models, LocalWhisperSttProvider};

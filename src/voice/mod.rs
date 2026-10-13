@@ -5,6 +5,7 @@ pub mod devices;
 pub mod diag;
 pub mod lab;
 pub mod playback;
+pub mod resample;
 pub mod router;
 pub mod session;
 pub mod stt;
@@ -18,6 +19,7 @@ pub use devices::*;
 pub use diag::*;
 pub use lab::*;
 pub use playback::*;
+pub use resample::*;
 pub use router::*;
 pub use session::*;
 pub use stt::{

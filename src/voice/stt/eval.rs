@@ -906,3 +906,148 @@ pub async fn evaluate_corpus(
         reports,
     })
 }
+
+/// Relatório de comparação A/B entre as estratégias de reamostragem Linear (Baseline) e FIR Antialiasing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResamplerAbComparisonReport {
+    pub test_case_id: String,
+    pub raw_audio_path: String,
+    pub ground_truth: Option<String>,
+    pub hypothesis_linear: String,
+    pub hypothesis_fir: String,
+    pub wer_linear: Option<f64>,
+    pub wer_fir: Option<f64>,
+    /// Variação de WER: wer_fir - wer_linear. Valor negativo indica melhora do FIR Antialiasing.
+    pub wer_delta: Option<f64>,
+    pub cer_linear: Option<f64>,
+    pub cer_fir: Option<f64>,
+    /// Variação de CER: cer_fir - cer_linear. Valor negativo indica melhora do FIR Antialiasing.
+    pub cer_delta: Option<f64>,
+    pub key_terms_accuracy_linear: Option<f64>,
+    pub key_terms_accuracy_fir: Option<f64>,
+    pub latency_linear_ms: f64,
+    pub latency_fir_ms: f64,
+    pub rms_linear: f32,
+    pub rms_fir: f32,
+}
+
+/// Executa a comparação A/B entre reamostragem Linear e FIR Antialiasing a partir de um arquivo WAV bruto nativo.
+pub async fn run_resampler_ab_comparison(
+    case_id: &str,
+    raw_path: impl AsRef<Path>,
+    ground_truth: Option<&str>,
+    important_terms: &[String],
+    config: &LocalWhisperConfig,
+) -> Result<ResamplerAbComparisonReport, VoiceError> {
+    use crate::contracts::voice::{AudioFormat, ResamplerKind};
+    use crate::voice::audio::AudioResampler;
+
+    let path_ref = raw_path.as_ref();
+    let raw_bytes = std::fs::read(path_ref).map_err(|e| {
+        VoiceError::Io(format!(
+            "Não foi possível ler o arquivo de áudio bruto '{}': {}",
+            path_ref.display(),
+            e
+        ))
+    })?;
+
+    // 1. Decodifica e converte para mono i16 na taxa nativa (ex: 48 kHz float stereo -> 48 kHz mono i16)
+    let (native_rate, mono_samples) = AudioCodec::decode_wav_to_mono_i16(&raw_bytes)?;
+
+    // 2. Reamostragem Método A: Linear Baseline
+    let samples_linear = AudioResampler::resample_oneshot(
+        &mono_samples,
+        native_rate,
+        16000,
+        ResamplerKind::LinearBaseline,
+    );
+    let rms_linear = AudioCodec::calculate_rms(&samples_linear);
+    let wav_linear = AudioCodec::encode_wav(&samples_linear, &AudioFormat::default())?;
+    let duration_ms = (samples_linear.len() as u64 * 1000) / 16000;
+    let input_linear = AudioInput::new(
+        wav_linear,
+        AudioFormat::default(),
+        duration_ms,
+        format!("{}-linear", case_id),
+    );
+
+    // 3. Reamostragem Método B: FIR Antialiasing
+    let samples_fir = AudioResampler::resample_oneshot(
+        &mono_samples,
+        native_rate,
+        16000,
+        ResamplerKind::FirAntialiasing,
+    );
+    let rms_fir = AudioCodec::calculate_rms(&samples_fir);
+    let wav_fir = AudioCodec::encode_wav(&samples_fir, &AudioFormat::default())?;
+    let input_fir = AudioInput::new(
+        wav_fir,
+        AudioFormat::default(),
+        duration_ms,
+        format!("{}-fir", case_id),
+    );
+
+    // 4. Inferência Whisper
+    let provider = LocalWhisperSttProvider::new(config.clone());
+
+    let t_start_linear = std::time::Instant::now();
+    let res_linear = provider.transcribe_with_metadata(&input_linear).await?;
+    let lat_linear = t_start_linear.elapsed().as_secs_f64() * 1000.0;
+
+    let t_start_fir = std::time::Instant::now();
+    let res_fir = provider.transcribe_with_metadata(&input_fir).await?;
+    let lat_fir = t_start_fir.elapsed().as_secs_f64() * 1000.0;
+
+    // 5. Métricas de qualidade
+    let (wer_l, wer_f, wer_d, cer_l, cer_f, cer_d, kt_l, kt_f) = if let Some(gt) = ground_truth {
+        let wl = calculate_wer(gt, &res_linear.text).wer_rate;
+        let wf = calculate_wer(gt, &res_fir.text).wer_rate;
+        let wd = wf - wl;
+
+        let cl = calculate_cer(gt, &res_linear.text).cer_rate;
+        let cf = calculate_cer(gt, &res_fir.text).cer_rate;
+        let cd = cf - cl;
+
+        let (kl, kf) = if !important_terms.is_empty() {
+            (
+                Some(evaluate_key_terms(gt, &res_linear.text, important_terms).accuracy),
+                Some(evaluate_key_terms(gt, &res_fir.text, important_terms).accuracy),
+            )
+        } else {
+            (None, None)
+        };
+
+        (
+            Some(wl),
+            Some(wf),
+            Some(wd),
+            Some(cl),
+            Some(cf),
+            Some(cd),
+            kl,
+            kf,
+        )
+    } else {
+        (None, None, None, None, None, None, None, None)
+    };
+
+    Ok(ResamplerAbComparisonReport {
+        test_case_id: case_id.to_string(),
+        raw_audio_path: path_ref.to_string_lossy().to_string(),
+        ground_truth: ground_truth.map(|s| s.to_string()),
+        hypothesis_linear: res_linear.text,
+        hypothesis_fir: res_fir.text,
+        wer_linear: wer_l,
+        wer_fir: wer_f,
+        wer_delta: wer_d,
+        cer_linear: cer_l,
+        cer_fir: cer_f,
+        cer_delta: cer_d,
+        key_terms_accuracy_linear: kt_l,
+        key_terms_accuracy_fir: kt_f,
+        latency_linear_ms: lat_linear,
+        latency_fir_ms: lat_fir,
+        rms_linear,
+        rms_fir,
+    })
+}

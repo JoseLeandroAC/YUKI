@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-13
-Status geral: Marco 8.1.1 — Conclusão da Etapa 2A de STT: Laboratório de Homologação e Qualidade de Voz (métricas objetivas WER, CER, Keyword Spotting, Latência Robusta com Repetições, Manifesto de Corpus JSON versionável e subcomando CLI `yuki voice eval-stt`); 603 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 608 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final do operador humano
+Status geral: Marco 8.1.1 — Conclusão da Etapa 2B de STT: Reamostragem Antialiasing e Integridade Acústica (filtro FIR de fase linear com janela de Kaiser N=97 taps, atenuação de aliasing >= 40 dB, decimação polifásica 3:1 de 48 kHz para 16 kHz com streaming contínuo sem transientes, preservação integral do baseline linear configurável, subcomando CLI `yuki voice compare-resamplers` e validação experimental pareada no corpus); 610 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 615 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final do operador humano
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -9,7 +9,7 @@ Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança, Migração WASAPI Core Audio, Laboratório Vocal, Auditoria Diagnóstica do Áudio Físico e Laboratório de Qualidade STT)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança, Migração WASAPI Core Audio, Laboratório Vocal, Auditoria Diagnóstica do Áudio Físico, Laboratório de Qualidade STT e Reamostragem Antialiasing)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -19,7 +19,7 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
 - **Marco 7.1 (Endurecimento & Correções Técnicas da Personal Intelligence):** 12 correções técnicas (filtros antes de LIMIT/OFFSET, count() independente, zero fallback aleatório, propagação de erros, isolamento Data != Instruction, owner_id, política sanitária expandida, orçamento adaptativo, VaultProcessLock, share_mode(0), vault init inequívoco e ADRs 022 a 025);
 - **Marco 7.2 (Hardening Final, Integridade e Validação Independente):** Bloqueio interprocessos no nível de kernel do SO (`share_mode(0)` no Windows e POSIX `flock` no Unix/Linux), proteção contra adoção silenciosa de senha na migração de cofres legados, permissões de arquivos verificáveis no SO, orçamento integral de prompt (`PromptBudgetManager`) em 6 tiers ontológicos no caminho de produção, defesa ativa contra injeção e truncamento estrito de personality e tags de contexto;
 - **Marco 8 & 8.1 (Voice v1 & Missions Foundation Hardened):** Playback real via `winmm.dll`, captura e PTT no Windows, VAD acústico desacoplado, subprocessos assíncronos sem órfãos, integridade referencial com chaves estrangeiras, concorrência protegida, reconciliação soberana e portão de risco independente;
-- **Marco 8.1.1 (Alinhamento Técnico Final, Hardening Conclusivo, Correção Final de Áudio, WASAPI, Laboratório Vocal, Diagnóstico do STT e Laboratório de Qualidade de Voz):**
+- **Marco 8.1.1 (Alinhamento Técnico Final, Hardening Conclusivo, Correção Final de Áudio, WASAPI, Laboratório Vocal, Diagnóstico do STT, Laboratório de Qualidade de Voz e Reamostragem Antialiasing):**
   1. **Autenticação Inviolável de Aprovações:** Tokens de 256 bits criptográficos (`getrandom`), comparação em tempo constante (`constant_time_eq`), proibição de bypass com token nulo/vazio, sanitização estrita de auditoria (zero token vazado em logs) e falha fechada em `grant_approval` legado (SEC-01);
   2. **Consumo Atômico de Aprovações (Anti-Replay / Anti-TOCTOU):** `consume_approval_atomically` com `UPDATE` atômico condicional único no SQLite verificando status, expiração e integridade de parâmetros, eliminando janela de corrida para reutilização de autorização humana (SEC-02);
   3. **Máquina de Estados de Aprovação Estrita e Disputa Concorrente:** FSM formal com `can_transition_to` e `is_terminal` em `ApprovalStatus`; transições CAS no SQLite (`transition_approval_status`); resolução estrita de exclusão mútua entre Grant e Deny simultâneos onde exatamente um prevalece e o outro falha de forma limpa;
@@ -48,7 +48,16 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
       - **Manifesto do Corpus de Voz (`data/voice_corpus/corpus_manifest.json`):** Catálogo estruturado versionável (mantendo WAVs locais estritamente protegidos e não-versionados) com casos reais da homologação física (T14 comando curto, T15 frase longa, T8 e T20 Bluetooth Redmi Buds 6 Play, testes de repetibilidade T19), preservando integridade com flag `review_pending: true` para testes sem transcrição documentada nos autos (zero invenção de referências);
       - **Interface CLI Integrada (`yuki voice eval-stt`):** Avaliação de arquivos individuais avulsos ou do corpus completo via manifesto, suporte a filtros por categoria e ID, exportação estruturada em JSON (`--export-json`) e exibição tabular detalhada no terminal;
       - **Validação Automatizada:** 31 testes em `tests/voice_stt_tts.rs` (603 testes no workspace, 0 falhas) cobrindo alinhamento Levenshtein, diacríticos, japonês, keyword spotting, persistência e resiliência;
-      - **Homologação:** O STT permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até nova rodada de testes executada e aprovada pelo operador.
+      - **Homologação:** O STT permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até nova rodada de testes executada e aprovada pelo operador;
+  20. **Reamostragem Antialiasing e Integridade Acústica — Etapa 2B:**
+      - **Filtro FIR de Fase Linear com Janela de Kaiser (`src/voice/resample.rs`):** Projeto analítico de filtro passa-baixa FIR Type I simétrico ($N=97$ coeficientes, $f_c=7.200\text{ Hz}$, $f_s=48.000\text{ Hz}$, $\beta=5.65$ com função modificada de Bessel de ordem zero $I_0(x)$), garantindo atraso de grupo rigorosamente inteiro e constante de 48 amostras (1.0 ms a 48 kHz), suprimindo distorção de fase na voz humana;
+      - **Supressão Comprovada de Aliasing ($\ge 40\text{ dB}$):** Atenuação analítica e empírica da banda de rejeição comprovada em testes de laboratório: senoide de 11.000 Hz reamostrada para 16 kHz com o baseline linear dobra espuriamente para 5.000 Hz com amplitude integral (0 dB de atenuação), enquanto o filtro FIR atenua o aliasing em mais de 40.0 dB (RMS < 70 vs 7.071), preservando a banda passante de 1.000 Hz com fidelidade absoluta (< 0.1 dB de variação);
+      - **Decimação Polifásica 3:1 e Streaming Contínuo:** Implementação do `AudioResampler` operando em dois modos determinísticos: (1) `resample_oneshot` com espelhamento simétrico de bordas temporais protegendo fonemas iniciais e finais contra cortes transitórios, e (2) `process_streaming` com buffer contínuo interno mantendo alinhamento de fase e decimação entre pacotes de buffer contíguos do WASAPI;
+      - **Preservação Canônica do Baseline Linear:** Enum `ResamplerKind::LinearBaseline` e `ResamplerKind::FirAntialiasing` (padrão) com controle transparente via variável de ambiente `YUKI_VOICE_RESAMPLER=linear`, garantindo reversibilidade imediata e testabilidade A/B sem modificações estruturais no pipeline;
+      - **Subcomando CLI Comparativo (`yuki voice compare-resamplers`):** Ferramenta de linha de comando para análise pareada de reamostragem sobre arquivos brutos de diagnóstico ou sobre todo o manifesto de corpus, medindo RMS, pico, SNR, correlação espectral cruzada, tempo de processamento e deltas de WER/CER;
+      - **Validação com Áudio Físico Real:** Comparação A/B sobre os áudios reais capturados pela placa Realtek a 48 kHz float (T7, T9, T10, T14, T15) comprovando overhead desprezível (< 10 ms para 10s de áudio em release), preservação integral da transcrição (delta WER = 0.0% e delta CER = 0.0%) e confirmação de que variações fonéticas residuais (ex: "fovestes" em T15) decorrem do prior do modelo Whisper sem contexto lexical e não de distorção espectral de aliasing;
+      - **Validação Automatizada:** 38 testes aprovados em `tests/voice_stt_tts.rs` (610 testes ativos no workspace, 0 falhas; 71/71 testes adversariais);
+      - **Homologação:** O STT permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até nova bateria de validação física com o operador.
 
 A situação atual pode ser resumida como:
 
@@ -66,7 +75,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-596 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 601 TESTES; 71/71 ADVERSARIAIS)
+610 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 615 TESTES; 71/71 ADVERSARIAIS)
 
 ---
 

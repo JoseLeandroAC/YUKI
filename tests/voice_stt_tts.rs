@@ -892,6 +892,7 @@ fn test_diagnostic_report_stt_integration_and_serialization() {
         acoustic_normalized: None,
         stt_timings: None,
         stt_config: None,
+        resampler_kind: None,
         raw_wav_path: None,
         canonical_wav_path: None,
         normalized_wav_path: None,
@@ -1243,4 +1244,413 @@ fn test_stt_eval_report_export_json_and_roundtrip() {
     assert_eq!(loaded.reports[0].wer.as_ref().unwrap().wer_rate, 0.0);
 
     let _ = std::fs::remove_file(temp_export);
+}
+
+#[test]
+fn test_stt_eval_corpus_manifest_structural_integrity() {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use yuki::voice::stt::eval::VoiceCorpusManifest;
+
+    let manifest_path = Path::new("data/voice_corpus/corpus_manifest.json");
+    if !manifest_path.exists() {
+        // Se o teste rodar fora do workspace raiz, pula
+        return;
+    }
+
+    let manifest = VoiceCorpusManifest::load_from_file(manifest_path)
+        .expect("Manifesto de corpus deve carregar sem erros");
+
+    assert!(
+        manifest.test_cases.len() >= 16,
+        "Manifesto deve conter ao menos os 16 testes físicos (T7 a T20), encontrados {}",
+        manifest.test_cases.len()
+    );
+
+    let mut seen_ids = HashSet::new();
+    let valid_languages = ["pt", "en", "es", "ja"];
+
+    for tc in &manifest.test_cases {
+        // 1. Unicidade estrita de IDs
+        assert!(
+            seen_ids.insert(tc.id.clone()),
+            "ID duplicado detectado no manifesto: '{}'",
+            tc.id
+        );
+
+        // 2. Coerência de review_pending e ground_truth
+        if !tc.review_pending {
+            assert!(
+                tc.ground_truth
+                    .as_ref()
+                    .is_some_and(|gt| !gt.trim().is_empty()),
+                "Caso '{}' com review_pending=false deve conter ground_truth não-vazio",
+                tc.id
+            );
+        }
+
+        // 3. Formatação do caminho de áudio
+        assert!(
+            tc.audio_path.ends_with(".wav"),
+            "Caso '{}' deve apontar para arquivo .wav: '{}'",
+            tc.id,
+            tc.audio_path
+        );
+
+        let audio_file = Path::new(&tc.audio_path);
+        assert!(
+            audio_file.exists(),
+            "Arquivo de áudio físico referenciado em '{}' deve existir no disco: '{}'",
+            tc.id,
+            tc.audio_path
+        );
+
+        // 4. Idioma válido
+        assert!(
+            valid_languages.contains(&tc.language.as_str()),
+            "Caso '{}' possui idioma inválido ou não suportado: '{}'",
+            tc.id,
+            tc.language
+        );
+
+        // 5. Duração positiva se presente
+        if let Some(dur) = tc.duration_ms {
+            assert!(dur > 0, "Caso '{}' tem duração não positiva", tc.id);
+        }
+    }
+
+    // Validação específica da correção comprovada de T11 (japonês) e multilíngues
+    let t11 = manifest
+        .test_cases
+        .iter()
+        .find(|c| c.id == "T11_realtek_saudacao_ja")
+        .expect("T11_realtek_saudacao_ja deve existir no manifesto");
+    assert_eq!(t11.language, "ja");
+    assert!(t11.review_pending);
+
+    let t9 = manifest
+        .test_cases
+        .iter()
+        .find(|c| c.id == "T09_realtek_saudacao_en")
+        .expect("T09_realtek_saudacao_en deve existir");
+    assert_eq!(t9.language, "en");
+
+    let t10 = manifest
+        .test_cases
+        .iter()
+        .find(|c| c.id == "T10_realtek_saudacao_es")
+        .expect("T10_realtek_saudacao_es deve existir");
+    assert_eq!(t10.language, "es");
+}
+
+#[test]
+fn test_dsp_resampler_fir_frequency_response_analytical() {
+    use yuki::voice::resample::{
+        design_kaiser_sinc_lpf, evaluate_frequency_response_db, AudioResampler,
+    };
+
+    let taps = design_kaiser_sinc_lpf(
+        AudioResampler::DEFAULT_FIR_TAPS,
+        AudioResampler::DEFAULT_CUTOFF_HZ,
+        48000.0,
+        AudioResampler::DEFAULT_KAISER_BETA,
+    );
+    assert_eq!(taps.len(), 97);
+
+    // 1. Ganho DC (0 Hz): 0 dB exato (+- 0.01 dB)
+    let resp_dc = evaluate_frequency_response_db(&taps, 0.0, 48000.0);
+    assert!(
+        resp_dc.abs() < 0.01,
+        "Ganho DC deve ser 0 dB, obtido: {:.3} dB",
+        resp_dc
+    );
+
+    // 2. Banda passante de voz humana (1 kHz, 3 kHz, 5 kHz): atenuação mínima (< 0.3 dB)
+    let resp_1k = evaluate_frequency_response_db(&taps, 1000.0, 48000.0);
+    assert!(
+        resp_1k.abs() < 0.1,
+        "Atenuação em 1 kHz deve ser < 0.1 dB, obtido: {:.3} dB",
+        resp_1k
+    );
+
+    let resp_3k = evaluate_frequency_response_db(&taps, 3000.0, 48000.0);
+    assert!(
+        resp_3k.abs() < 0.15,
+        "Atenuação em 3 kHz deve ser < 0.15 dB, obtido: {:.3} dB",
+        resp_3k
+    );
+
+    let resp_5k = evaluate_frequency_response_db(&taps, 5000.0, 48000.0);
+    assert!(
+        resp_5k.abs() < 0.3,
+        "Atenuação em 5 kHz deve ser < 0.3 dB, obtido: {:.3} dB",
+        resp_5k
+    );
+
+    // 3. Frequência de corte (7.200 Hz): transição controlada
+    let resp_cutoff = evaluate_frequency_response_db(&taps, 7200.0, 48000.0);
+    assert!(
+        resp_cutoff < -3.0 && resp_cutoff > -12.0,
+        "Corte em 7.200 Hz deve estar entre -3 e -12 dB, obtido: {:.3} dB",
+        resp_cutoff
+    );
+
+    // 4. Nyquist de saída (8.000 Hz): atenuação relevante
+    let resp_8k = evaluate_frequency_response_db(&taps, 8000.0, 48000.0);
+    assert!(
+        resp_8k <= -20.0,
+        "Nyquist em 8.000 Hz deve ter atenuação >= 20 dB, obtido: {:.3} dB",
+        resp_8k
+    );
+
+    // 5. Banda de rejeição (aliasing) >= 9.000 Hz: atenuação >= 38 dB
+    let resp_9k = evaluate_frequency_response_db(&taps, 9000.0, 48000.0);
+    assert!(
+        resp_9k <= -38.0,
+        "Frequência de 9.000 Hz deve ser atenuada em >= 38 dB, obtido: {:.3} dB",
+        resp_9k
+    );
+
+    let resp_11k = evaluate_frequency_response_db(&taps, 11000.0, 48000.0);
+    assert!(
+        resp_11k <= -45.0,
+        "Frequência de 11.000 Hz deve ser atenuada em >= 45 dB, obtido: {:.3} dB",
+        resp_11k
+    );
+
+    let resp_15k = evaluate_frequency_response_db(&taps, 15000.0, 48000.0);
+    assert!(
+        resp_15k <= -50.0,
+        "Frequência de 15.000 Hz deve ser atenuada em >= 50 dB, obtido: {:.3} dB",
+        resp_15k
+    );
+}
+
+#[test]
+fn test_dsp_resampler_sinusoidal_end_to_end_aliasing_suppression() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::audio::AudioCodec;
+    use yuki::voice::resample::AudioResampler;
+
+    let sample_rate = 48000;
+    let duration_secs = 1.0;
+    let n_samples = (sample_rate as f64 * duration_secs) as usize;
+
+    // Gerador de tom senoidal mono de 48 kHz
+    let generate_sine = |freq_hz: f64, amplitude: f64| -> Vec<i16> {
+        let mut samples = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = (i as f64) / (sample_rate as f64);
+            let val = amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
+            samples.push(val.round().clamp(-32768.0, 32767.0) as i16);
+        }
+        samples
+    };
+
+    // 1. Tom de 1.000 Hz (dentro da banda vocal passante)
+    let sine_1k = generate_sine(1000.0, 10000.0);
+    let out_1k_linear =
+        AudioResampler::resample_oneshot(&sine_1k, 48000, 16000, ResamplerKind::LinearBaseline);
+    let out_1k_fir =
+        AudioResampler::resample_oneshot(&sine_1k, 48000, 16000, ResamplerKind::FirAntialiasing);
+
+    let rms_in_1k = AudioCodec::calculate_rms(&sine_1k);
+    let rms_linear_1k = AudioCodec::calculate_rms(&out_1k_linear);
+    let rms_fir_1k = AudioCodec::calculate_rms(&out_1k_fir);
+
+    // Ambas preservam energia em 1 kHz com desvio < 0.5 dB
+    let db_diff = 20.0 * (rms_fir_1k / rms_linear_1k).log10();
+    assert!(
+        db_diff.abs() < 0.5,
+        "Em 1 kHz, FIR e Linear devem ter energia equivalente. Diff: {:.3} dB",
+        db_diff
+    );
+    assert!((rms_fir_1k - rms_in_1k).abs() / rms_in_1k < 0.05);
+
+    // 2. Tom de 11.000 Hz (frequência acima do Nyquist de 16 kHz: causa aliasing dobrando para 5.000 Hz)
+    let sine_11k = generate_sine(11000.0, 10000.0);
+    let out_11k_linear =
+        AudioResampler::resample_oneshot(&sine_11k, 48000, 16000, ResamplerKind::LinearBaseline);
+    let out_11k_fir =
+        AudioResampler::resample_oneshot(&sine_11k, 48000, 16000, ResamplerKind::FirAntialiasing);
+
+    let rms_linear_11k = AudioCodec::calculate_rms(&out_11k_linear);
+    let rms_fir_11k = AudioCodec::calculate_rms(&out_11k_fir);
+
+    // No resampler linear, o tom de 11 kHz sobrevive quase integralmente por subamostragem direta!
+    assert!(
+        rms_linear_11k > 6000.0,
+        "No resampler linear, 11 kHz sofre aliasing para 5 kHz mantendo amplitude alta: {:.1}",
+        rms_linear_11k
+    );
+
+    // No resampler FIR Antialiasing, o tom de 11 kHz é suprimido em mais de 40 dB!
+    let suppression_db = 20.0 * (rms_fir_11k / rms_linear_11k).log10();
+    assert!(
+        suppression_db <= -40.0,
+        "FIR deve atenuar aliasing de 11 kHz em >= 40 dB. Obtido: {:.2} dB (RMS fir: {:.1}, linear: {:.1})",
+        suppression_db,
+        rms_fir_11k,
+        rms_linear_11k
+    );
+}
+
+#[test]
+fn test_dsp_resampler_stability_and_edge_cases() {
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::resample::AudioResampler;
+
+    // 1. Buffer vazio
+    let empty: Vec<i16> = Vec::new();
+    let res_empty =
+        AudioResampler::resample_oneshot(&empty, 48000, 16000, ResamplerKind::FirAntialiasing);
+    assert!(res_empty.is_empty());
+
+    // 2. Passthrough 1:1 (16 kHz -> 16 kHz)
+    let samples = vec![100, 200, -300, 400, -500];
+    let passthrough =
+        AudioResampler::resample_oneshot(&samples, 16000, 16000, ResamplerKind::FirAntialiasing);
+    assert_eq!(samples, passthrough);
+
+    // 3. Bloco muito curto (menor que o número de taps, ex: 10 amostras)
+    let short_block = vec![1000i16; 10];
+    let res_short = AudioResampler::resample_oneshot(
+        &short_block,
+        48000,
+        16000,
+        ResamplerKind::FirAntialiasing,
+    );
+    assert_eq!(res_short.len(), 3);
+    for &s in &res_short {
+        assert!(s > 0);
+    }
+
+    // 4. Amplitude máxima e mínima sem clipping induzido ou overflow
+    let extreme_samples = vec![i16::MAX, i16::MIN, i16::MAX, i16::MIN];
+    let res_extreme = AudioResampler::resample_oneshot(
+        &extreme_samples,
+        48000,
+        16000,
+        ResamplerKind::FirAntialiasing,
+    );
+    assert_eq!(res_extreme.len(), 1);
+    assert!(res_extreme[0] != 0);
+}
+
+#[test]
+fn test_dsp_resampler_streaming_continuity_and_reset() {
+    use yuki::voice::resample::AudioResampler;
+
+    let mut resampler = AudioResampler::fir_48k_to_16k();
+
+    // Simula 10 pacotes WASAPI consecutivos de 480 amostras cada (10ms a 48 kHz)
+    let chunk_size = 480;
+    let mut total_output = Vec::new();
+
+    for p in 0..10 {
+        let chunk: Vec<i16> = (0..chunk_size)
+            .map(|i| {
+                let t = (p * chunk_size + i) as f64 / 48000.0;
+                (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin()) as i16
+            })
+            .collect();
+        let out = resampler.process_streaming(&chunk);
+        total_output.extend(out);
+    }
+
+    // Deve produzir aproximadamente 160 amostras por pacote de 480 (3:1)
+    assert!(total_output.len() > 1500 && total_output.len() <= 1600);
+
+    // Testa reset do estado
+    resampler.reset();
+    let after_reset = resampler.process_streaming(&vec![0i16; 480]);
+    assert!(!after_reset.is_empty());
+}
+
+#[test]
+fn test_dsp_resampler_cpu_performance_benchmark() {
+    use std::time::Instant;
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::resample::AudioResampler;
+
+    // 10 segundos de áudio a 48 kHz = 480.000 amostras
+    let samples_10s = vec![500i16; 480_000];
+
+    let t0 = Instant::now();
+    let out = AudioResampler::resample_oneshot(
+        &samples_10s,
+        48000,
+        16000,
+        ResamplerKind::FirAntialiasing,
+    );
+    let elapsed = t0.elapsed();
+
+    assert_eq!(out.len(), 160_000);
+    // 10 segundos de áudio devem ser processados em bem menos de 1000ms mesmo no perfil de teste debug não-otimizado (aceleração > 10x em tempo real)
+    assert!(
+        elapsed.as_millis() < 1000,
+        "Reamostragem de 10s deve levar < 1000ms em debug, levou: {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn test_ab_resampler_real_audio_dsp_comparison() {
+    use std::path::Path;
+    use yuki::contracts::voice::ResamplerKind;
+    use yuki::voice::audio::{AudioCodec, AudioResampler};
+    use yuki::voice::stt::eval::run_resampler_ab_comparison;
+    use yuki::voice::stt::LocalWhisperConfig;
+
+    let raw_t14 = Path::new("data/voice_diag/raw_captured_diag_1a13645e57e_1.wav");
+    if !raw_t14.exists() {
+        return;
+    }
+
+    // 1. Verificação DSP de Reamostragem sobre o áudio físico T14 (Realtek 48 kHz float stereo)
+    let raw_bytes = std::fs::read(raw_t14).expect("read raw t14 ok");
+    let (rate, mono) = AudioCodec::decode_wav_to_mono_i16(&raw_bytes).expect("decode raw ok");
+    assert_eq!(rate, 48000);
+    assert!(!mono.is_empty());
+
+    let out_linear =
+        AudioResampler::resample_oneshot(&mono, rate, 16000, ResamplerKind::LinearBaseline);
+    let out_fir =
+        AudioResampler::resample_oneshot(&mono, rate, 16000, ResamplerKind::FirAntialiasing);
+
+    assert_eq!(out_linear.len(), mono.len() / 3);
+    assert_eq!(out_fir.len(), mono.len() / 3);
+
+    let rms_linear = AudioCodec::calculate_rms(&out_linear);
+    let rms_fir = AudioCodec::calculate_rms(&out_fir);
+
+    // RMS entre Linear e FIR no sinal vocal real deve diferir por menos de 1 dB
+    let db_diff = 20.0 * (rms_fir / rms_linear).log10();
+    assert!(
+        db_diff.abs() < 1.0,
+        "Diferença RMS entre resamplers no sinal real deve ser < 1 dB: {:.3} dB",
+        db_diff
+    );
+
+    // 2. Execução A/B com o Whisper se o ambiente local possuir executável e modelo
+    let config = LocalWhisperConfig::default().with_language("pt");
+    let whisper_ready = config.binary_path.as_ref().is_some_and(|p| p.exists())
+        && config.model_path.as_ref().is_some_and(|p| p.exists());
+
+    if whisper_ready {
+        let ab_rep = run_resampler_ab_comparison(
+            "T14_curto_calculadora",
+            raw_t14,
+            Some("Yuki, abrir calculadora."),
+            &["Yuki".to_string(), "calculadora".to_string()],
+            &config,
+        )
+        .await
+        .expect("run ab comparison ok");
+
+        assert!(!ab_rep.hypothesis_linear.is_empty());
+        assert!(!ab_rep.hypothesis_fir.is_empty());
+        assert!(ab_rep.wer_linear.is_some());
+        assert!(ab_rep.wer_fir.is_some());
+    }
 }

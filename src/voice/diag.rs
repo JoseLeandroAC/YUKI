@@ -127,6 +127,32 @@ pub fn save_diagnostic_session(
     raw_bytes: &[u8],
     canonical_samples: &[i16],
 ) -> Result<AudioDiagnosticsReport, VoiceError> {
+    save_diagnostic_session_ex(
+        session_id,
+        device_id,
+        device_name,
+        native_format,
+        timings,
+        buffer_metrics,
+        raw_bytes,
+        canonical_samples,
+        None,
+    )
+}
+
+/// Salva todos os artefatos de diagnóstico de áudio em `data/voice_diag/` com especificação da estratégia de reamostragem.
+#[allow(clippy::too_many_arguments)]
+pub fn save_diagnostic_session_ex(
+    session_id: &str,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    native_format: &NativeAudioFormatInfo,
+    timings: CaptureTimingMetrics,
+    buffer_metrics: BufferMetrics,
+    raw_bytes: &[u8],
+    canonical_samples: &[i16],
+    resampler_kind: Option<crate::contracts::voice::ResamplerKind>,
+) -> Result<AudioDiagnosticsReport, VoiceError> {
     let diag_dir = Path::new(DIAGNOSTICS_DIR);
     if let Err(e) = std::fs::create_dir_all(diag_dir) {
         return Err(VoiceError::Io(format!(
@@ -188,6 +214,7 @@ pub fn save_diagnostic_session(
         acoustic_normalized: None,
         stt_timings: None,
         stt_config: None,
+        resampler_kind,
         raw_wav_path: Some(raw_wav_path.to_string_lossy().to_string()),
         canonical_wav_path: Some(canonical_wav_path.to_string_lossy().to_string()),
         normalized_wav_path: None,

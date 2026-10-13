@@ -1,8 +1,9 @@
 use crate::contracts::identifiers::generate_unique_id;
 use crate::contracts::voice::{
-    AudioFormat, AudioInput, BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo, VoiceError,
+    AudioFormat, AudioInput, BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo,
+    ResamplerKind, VoiceError,
 };
-use crate::voice::audio::AudioCodec;
+use crate::voice::audio::{AudioCodec, AudioResampler};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -225,6 +226,7 @@ pub struct WasapiAudioCaptureBackend {
     is_recording: Arc<AtomicBool>,
     diagnostics_enabled: bool,
     worker_handle: CaptureWorkerHandle,
+    resampler_kind: ResamplerKind,
 }
 
 impl Default for WasapiAudioCaptureBackend {
@@ -243,35 +245,33 @@ impl WasapiAudioCaptureBackend {
     }
 
     pub fn with_options(device_id: Option<String>, diagnostics: bool) -> Self {
+        let resampler_kind = if std::env::var("YUKI_VOICE_RESAMPLER")
+            .map(|v| v.eq_ignore_ascii_case("linear") || v.eq_ignore_ascii_case("baseline"))
+            .unwrap_or(false)
+        {
+            ResamplerKind::LinearBaseline
+        } else {
+            ResamplerKind::FirAntialiasing
+        };
+
         Self {
             device_id,
             is_recording: Arc::new(AtomicBool::new(false)),
             diagnostics_enabled: diagnostics,
             worker_handle: Arc::new(Mutex::new(None)),
+            resampler_kind,
         }
     }
 
+    pub fn with_resampler(mut self, kind: ResamplerKind) -> Self {
+        self.resampler_kind = kind;
+        self
+    }
+
     /// Resample linear de uma sequência mono de amostras `i16` para a taxa de amostragem alvo.
-    fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
-        if in_rate == out_rate || samples.is_empty() {
-            return samples.to_vec();
-        }
-        let ratio = in_rate as f64 / out_rate as f64;
-        let out_len = ((samples.len() as f64) / ratio).round() as usize;
-        let mut out = Vec::with_capacity(out_len);
-
-        for i in 0..out_len {
-            let in_pos = i as f64 * ratio;
-            let idx = in_pos.floor() as usize;
-            let frac = in_pos - (idx as f64);
-
-            let s0 = samples.get(idx).copied().unwrap_or(0) as f64;
-            let s1 = samples.get(idx + 1).copied().unwrap_or(s0 as i16) as f64;
-
-            let interpolated = (1.0 - frac) * s0 + frac * s1;
-            out.push(interpolated.clamp(-32768.0, 32767.0) as i16);
-        }
-        out
+    /// Preservado como baseline de referência histórico e de testes.
+    pub fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
+        AudioResampler::resample_linear(samples, in_rate, out_rate)
     }
 }
 
@@ -297,6 +297,7 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
             let is_recording_flag = self.is_recording.clone();
             let target_device_id = self.device_id.clone();
             let is_diag = self.diagnostics_enabled || crate::voice::diag::is_diagnostics_enabled();
+            let resampler_kind = self.resampler_kind;
 
             let (tx_ready, rx_ready) =
                 std::sync::mpsc::channel::<Result<NativeAudioFormatInfo, VoiceError>>();
@@ -715,8 +716,12 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                     }
 
                     // Reamostragem para a taxa canônica de 16 kHz mono da Yuki
-                    let canonical_samples =
-                        Self::resample_linear(&mono_samples, native_rate, 16000);
+                    let canonical_samples = AudioResampler::resample_oneshot(
+                        &mono_samples,
+                        native_rate,
+                        16000,
+                        resampler_kind,
+                    );
                     let canonical_format = AudioFormat::default();
                     let wav_payload =
                         AudioCodec::encode_wav(&canonical_samples, &canonical_format)?;
@@ -751,7 +756,7 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             effective_capture_ms,
                             samples_duration_ms,
                         };
-                        let diag_report = crate::voice::diag::save_diagnostic_session(
+                        let diag_report = crate::voice::diag::save_diagnostic_session_ex(
                             &session_id,
                             target_device_id.clone(),
                             None,
@@ -760,6 +765,7 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             buffer_metrics,
                             &raw_bytes,
                             &canonical_samples,
+                            Some(resampler_kind),
                         )?;
                         audio_input = audio_input.with_diagnostics(diag_report);
                     }

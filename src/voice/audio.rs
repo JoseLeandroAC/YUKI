@@ -1,4 +1,5 @@
 use crate::contracts::voice::{AudioFormat, VoiceError};
+pub use crate::voice::resample::{AudioResampler, ResamplerKind};
 
 /// Utilitários de codificação, decodificação, validação e processamento de áudio PCM/WAV.
 pub struct AudioCodec;
@@ -100,6 +101,149 @@ impl AudioCodec {
         })?;
 
         Ok((format, samples))
+    }
+
+    /// Decodifica qualquer arquivo WAV (PCM 16/24/32 bits ou IEEE Float 32 bits, mono ou estéreo)
+    /// e retorna a taxa de amostragem nativa e as amostras downmixed para mono i16.
+    pub fn decode_wav_to_mono_i16(bytes: &[u8]) -> Result<(u32, Vec<i16>), VoiceError> {
+        if bytes.len() < 44 {
+            return Err(VoiceError::InvalidAudioFormat(
+                "Payload menor que o cabeçalho mínimo WAV de 44 bytes".to_string(),
+            ));
+        }
+
+        if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+            return Err(VoiceError::InvalidAudioFormat(
+                "Assinatura RIFF/WAVE ausente ou inválida".to_string(),
+            ));
+        }
+
+        let mut offset = 12;
+        let mut sample_rate = 0u32;
+        let mut channels = 0u16;
+        let mut bits_per_sample = 0u16;
+        let mut audio_format = 0u16;
+        let mut raw_data: Option<&[u8]> = None;
+
+        while offset + 8 <= bytes.len() {
+            let chunk_id = &bytes[offset..offset + 4];
+            let chunk_size = u32::from_le_bytes([
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
+            ]) as usize;
+            offset += 8;
+
+            if chunk_id == b"fmt " {
+                if chunk_size < 16 || offset + chunk_size > bytes.len() {
+                    return Err(VoiceError::InvalidAudioFormat(
+                        "Chunk 'fmt ' truncado".to_string(),
+                    ));
+                }
+                audio_format = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+                channels = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+                sample_rate = u32::from_le_bytes([
+                    bytes[offset + 4],
+                    bytes[offset + 5],
+                    bytes[offset + 6],
+                    bytes[offset + 7],
+                ]);
+                bits_per_sample = u16::from_le_bytes([bytes[offset + 14], bytes[offset + 15]]);
+                offset += chunk_size;
+            } else if chunk_id == b"data" {
+                if offset + chunk_size > bytes.len() {
+                    return Err(VoiceError::InvalidAudioFormat(
+                        "Chunk 'data' truncado".to_string(),
+                    ));
+                }
+                raw_data = Some(&bytes[offset..offset + chunk_size]);
+                offset += chunk_size;
+            } else {
+                offset += chunk_size;
+            }
+        }
+
+        let data = raw_data
+            .ok_or_else(|| VoiceError::InvalidAudioFormat("Chunk 'data' ausente".to_string()))?;
+
+        if channels == 0 || sample_rate == 0 {
+            return Err(VoiceError::InvalidAudioFormat(
+                "Metadados de áudio inválidos no cabeçalho fmt".to_string(),
+            ));
+        }
+
+        let ch = channels as usize;
+        let mut mono_samples = Vec::new();
+
+        if audio_format == 3 && bits_per_sample == 32 {
+            // IEEE Float 32-bit
+            let frame_size = ch * 4;
+            for frame in data.chunks_exact(frame_size) {
+                let mut sum = 0.0f32;
+                for c in 0..ch {
+                    let sb = [
+                        frame[c * 4],
+                        frame[c * 4 + 1],
+                        frame[c * 4 + 2],
+                        frame[c * 4 + 3],
+                    ];
+                    sum += f32::from_le_bytes(sb);
+                }
+                let avg = sum / (ch as f32);
+                mono_samples.push((avg.clamp(-1.0, 1.0) * 32767.0).round() as i16);
+            }
+        } else if audio_format == 1 && bits_per_sample == 16 {
+            // PCM 16-bit
+            let frame_size = ch * 2;
+            for frame in data.chunks_exact(frame_size) {
+                let mut sum = 0i32;
+                for c in 0..ch {
+                    let sb = [frame[c * 2], frame[c * 2 + 1]];
+                    sum += i16::from_le_bytes(sb) as i32;
+                }
+                let avg = sum / (ch as i32);
+                mono_samples.push(avg.clamp(-32768, 32767) as i16);
+            }
+        } else if audio_format == 1 && bits_per_sample == 24 {
+            // PCM 24-bit
+            let frame_size = ch * 3;
+            for frame in data.chunks_exact(frame_size) {
+                let mut sum = 0i32;
+                for c in 0..ch {
+                    let b = &frame[c * 3..c * 3 + 3];
+                    let sign_ext = if b[2] & 0x80 != 0 { 0xFF } else { 0x00 };
+                    let val = i32::from_le_bytes([b[0], b[1], b[2], sign_ext]) >> 8;
+                    sum += val;
+                }
+                let avg = sum / (ch as i32);
+                mono_samples.push(avg.clamp(-32768, 32767) as i16);
+            }
+        } else if audio_format == 1 && bits_per_sample == 32 {
+            // PCM 32-bit
+            let frame_size = ch * 4;
+            for frame in data.chunks_exact(frame_size) {
+                let mut sum = 0i64;
+                for c in 0..ch {
+                    let sb = [
+                        frame[c * 4],
+                        frame[c * 4 + 1],
+                        frame[c * 4 + 2],
+                        frame[c * 4 + 3],
+                    ];
+                    sum += (i32::from_le_bytes(sb) >> 16) as i64;
+                }
+                let avg = sum / (ch as i64);
+                mono_samples.push(avg.clamp(-32768, 32767) as i16);
+            }
+        } else {
+            return Err(VoiceError::InvalidAudioFormat(format!(
+                "Combinação não suportada de formato ({}) e profundidade de bits ({})",
+                audio_format, bits_per_sample
+            )));
+        }
+
+        Ok((sample_rate, mono_samples))
     }
 
     /// Codifica uma sequência de amostras i16 em um contêiner WAV PCM canônico de 44 bytes.
@@ -282,5 +426,10 @@ impl AudioCodec {
         }
 
         Ok(duration_ms)
+    }
+
+    /// Reamostra uma sequência de amostras PCM i16 mono entre taxas de amostragem especificadas.
+    pub fn resample(samples: &[i16], in_rate: u32, out_rate: u32, kind: ResamplerKind) -> Vec<i16> {
+        AudioResampler::resample_oneshot(samples, in_rate, out_rate, kind)
     }
 }

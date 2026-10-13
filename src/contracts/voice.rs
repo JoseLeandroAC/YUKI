@@ -154,6 +154,41 @@ pub struct SttDecodingConfigSummary {
     pub no_fallback: bool,
 }
 
+/// Estratégia de reamostragem de áudio aplicada na cadeia de captura e conversão.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResamplerKind {
+    /// Reamostragem linear direta (baseline histórico do Marco 8.1.1).
+    LinearBaseline,
+    /// Reamostragem com filtro passa-baixa FIR antialiasing de fase linear (simétrico Type I).
+    #[default]
+    FirAntialiasing,
+}
+
+impl fmt::Display for ResamplerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LinearBaseline => write!(f, "linear_baseline"),
+            Self::FirAntialiasing => write!(f, "fir_antialiasing"),
+        }
+    }
+}
+
+impl std::str::FromStr for ResamplerKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "linear" | "baseline" | "linear_baseline" => Ok(Self::LinearBaseline),
+            "fir" | "antialiasing" | "fir_antialiasing" => Ok(Self::FirAntialiasing),
+            other => Err(format!(
+                "Estratégia de reamostragem desconhecida: '{}'. Válidas: 'linear_baseline', 'fir_antialiasing'",
+                other
+            )),
+        }
+    }
+}
+
 /// Relatório estruturado de diagnóstico de áudio físico e inferência.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioDiagnosticsReport {
@@ -170,6 +205,8 @@ pub struct AudioDiagnosticsReport {
     pub stt_timings: Option<SttTimingMetrics>,
     #[serde(default)]
     pub stt_config: Option<SttDecodingConfigSummary>,
+    #[serde(default)]
+    pub resampler_kind: Option<ResamplerKind>,
     pub raw_wav_path: Option<String>,
     pub canonical_wav_path: Option<String>,
     pub normalized_wav_path: Option<String>,
