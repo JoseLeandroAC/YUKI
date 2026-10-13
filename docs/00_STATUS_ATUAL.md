@@ -805,3 +805,31 @@ Resultados verificados do Marco 7.2 (Fechamento Definitivo & Patch Final):
 - `cargo fmt --all -- --check`: aprovado sem desvios de formatação;
 - `cargo clippy --workspace --all-targets -- -D warnings`: aprovado com zero advertências;
 - `cargo build --release`: aprovado com sucesso.
+
+---
+
+25. Registro de Propostas Arquiteturais Futuras (Não Implementadas Prematuramente)
+
+Em conformidade com a visão de longo prazo do projeto e preservando o princípio inegociável de separação entre especificação arquitetural e implementação em código, foram formalizadas as propostas da família de capacidades culturais, acompanhamento de continuidade e integração de contas pessoais:
+
+1. **Yuki Media Intelligence (`docs/proposals/YUKI_MEDIA_INTELLIGENCE.md`):**
+   - Sistema de inteligência cultural, entretenimento pessoal e curadoria intelectual cobrindo cinema, séries, animes, mangás, literatura, audiolivros, música e mídias expansíveis;
+   - Axioma fundamental de personalização: *Consumo ≠ Preferência* (distinção formal entre histórico factual, avaliação explícita, inferência estatística, interesse momentâneo e preferências duradouras);
+   - Arquitetura de 6 núcleos modulares: Media Library (identidade canônica e estados de consumo), Taste Engine (5 dimensões culturais: narrativa, emocional, vínculos, estética e música), Media Critic (diálogo analítico, confronto respeitoso e proteção inviolável contra spoilers), Music Curator (curadoria em linguagem natural integrada a serviços externos), Media Discovery (recomendações contextuais explicáveis e anti-bolha) e Media Connect (conectores para plataformas culturais);
+   - Especificação do modelo conceitual de dados (15 entidades formais) e roadmap futuro em 7 fases (YMI-0 a YMI-6).
+
+2. **Yuki Account Connect (`docs/proposals/YUKI_ACCOUNT_CONNECT.md`):**
+   - Infraestrutura centralizada e compartilhada de conexão com contas pessoais e serviços externos, reutilizável por múltiplas capacidades da plataforma;
+   - Suporte formal a 5 métodos de integração: OAuth 2.0 / APIs Oficiais, Conectores de Navegador via Sessão Local Autorizada, Conectores de Aplicativos Desktop, Importação de Arquivos Exportados (Takeout/GDPR) e APIs Proxy Normalizadas;
+   - Salvaguardas invioláveis: zero quebra de DRM ou CAPTCHA, reuso exclusivo do Credential Vault (ADR-008) sem duplicação de segredos, e isolamento por `owner_id`;
+   - **Sincronização Automática:** Requisito confirmado pelo proprietário para registro automático de atividade (episódios assistidos, livros lidos, faixas ouvidas, listas e notas) com controles granulares de governança (leitura automática vs mutações externas estritamente autorizadas);
+   - Máquina de estados de conexão, renovação autônoma de tokens, isolamento de falhas e expurgo total sob demanda.
+
+3. **Yuki Progress Tracker (`docs/proposals/YUKI_PROGRESS_TRACKER.md`):**
+   - Mecanismo unificado e transversal de acompanhamento de continuidade para mídias culturais, planos de estudo da Yuki Professora (FUVEST/OBMEP), cursos e projetos;
+   - Modelos especializados de progresso: Literatura (página, edição, capítulo, ritmo de leitura), Quadrinhos/Mangá (volume, capítulo, status de publicação), Audiovisual (temporada, episódio, timestamp), Cinema (segundo, duração), Audiolivro (posição temporal) e Acadêmico (módulo, aula, exercícios resolvidos);
+   - Interação fluida em linguagem natural por voz e texto;
+   - Regras formais para releituras/reassistências (preservação de ciclos anteriores), regressão de progresso (sessões de revisão sem perda de dados), resolução de conflitos (soberania da entrada manual do operador) e análise longitudinal de cadência de consumo.
+
+> [!NOTE]
+> **Status de Governança:** As propostas acima são estritamente documentais e representam planejamento estratégico futuro. Nenhuma capacidade, conector, tabela de banco de dados ou integração externa foi implementada no runtime. O projeto permanece no **Marco 8.1.1**, com o subsistema de voz mantido formalmente como **NÃO HOMOLOGADO FISICAMENTE** até a conclusão dos testes de bancada pelo operador.
