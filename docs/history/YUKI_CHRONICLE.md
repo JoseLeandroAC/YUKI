@@ -1761,6 +1761,37 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Auditoria Final WASAPI, Estabilidade Física e Qualidade do STT concluída com diagnósticos aprofundados e instrumentação não-intrusiva; ausência de perda de frames comprovada matematicamente; LinearBaseline preservado como padrão; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até avaliação final e aprovação do operador humano."`
 
+---
+
+## 2026-10-14 — Marco 8.1.1: Etapa 3B — Benchmark Final do STT Local Whisper
+
+- **Contexto e Missão**:
+  - Avaliar a precisão lexical e a latência do modelo local Whisper (`ggml-small.bin`, 244M parâmetros) antes da homologação física final do Marco 8.1.1 pelo operador humano.
+  - Executar uma bateria experimental de testes pareados controlados sobre gravações físicas canônicas preservadas (headset Bluetooth Redmi Buds 6 Play e microfone Realtek 48 kHz float), sob 6 configurações determinísticas (Baseline A, Prompt Lexical B, Fast STT C, Fast STT + Prompt D, Fast STT + Prompt com 6 e 8 threads E).
+  - Obter dados empíricos reais e objetivos de reconhecimento do nome ("Yuki"), estabilidade de comandos e tempos decompostos de processamento, sem alterar prematuramente os padrões de produção da assistente.
+- **Implementação e Achados Conclusivos (Etapa 3B)**:
+  1. **Auditoria das Opções CLI Reais:**
+     - Confirmado suporte nativo e governado a: transcrição de arquivo (`voice listen --file <PATH>`), seleção de idioma (`-l pt`), prompt lexical neutro (`--prompt "<TEXTO>"`), decodificação rápida (`--fast-stt` com greedy search `beam_size=1`, `best_of=1`, `no_fallback=true`), parametrização de threads (`-t <N>`) e diagnósticos de latência estendidos (`--diagnostics`).
+     - Aprimorado `src/main.rs` para exibir na CLI com `--diagnostics` a decomposição granular completa de `SttTimingMetrics` (prep, normalização, WAV temp, subprocesso wall-clock, load, mel, sampling, encode, decode, prompt, total e fallbacks).
+  2. **Resultados Empíricos do Benchmark Pareado (48 Baterias):**
+     - **Reconhecimento da Identidade ("Yuki"):** O baseline atual sem prompt apresentou **0.0% de acerto** em áudios físicos (7 de 8 áudios transcreveram o nome como a expressão coloquial `"E o que"`, e 1 como `"Iuki"`). A adição do prompt lexical neutro (`--prompt "Yuki, assistente virtual chamada Yuki."`) elevou a taxa de reconhecimento para **87.5%** (7 de 8 áudios com grafia exata "Yuki"), sem induzir falsos positivos no arquivo S5 onde a elocução não continha os fonemas correspondentes.
+     - **Speedup com Hyper-Threading (8 Threads):** Em processador Intel Core i5-10210U (4 núcleos físicos, 8 threads lógicas), elevar as threads do Whisper de 4 para 8 reduziu o tempo médio de inferência do encoder de 8.85s para 6.67s (**24.6% de ganho de velocidade**) e a latência total do Whisper de 12.80s para 9.23s (**27.9% mais rápido**), atingindo tempos totais de até 7.20s para gravações de 5 segundos.
+     - **Comportamento do Modo Rápido (`--fast-stt`):** O modo rápido isolado (sem prompt) mostrou-se instável e propenso a alucinações severas em áudios com ruído residual de fundo Bluetooth. No entanto, quando associado ao prompt lexical neutro, a busca gulosa estabilizou com precisão equivalente ao Beam Search completo (beam=5), com menor tempo de decodificação.
+  3. **Decomposição da Latência Ponta a Ponta:**
+     - O subsistema de áudio host em Rust consome **menos de 5 milissegundos** (< 0.05% do tempo total), demonstrando eficiência absoluta.
+     - O gargalo computacional primário (60% a 70% do tempo) reside no cálculo de tensores nas 12 camadas do Transformer Encoder do Whisper em CPU.
+     - A carga fria recorrente do modelo `ggml-small.bin` a cada turno consome entre 1.8s e 3.2s, apontando a transição futura para processo servidor persistente como a melhor oportunidade arquitetural de otimização estrutural.
+  4. **Documentação e Governança:**
+     - Relatório formal e detalhado registrado em `docs/audits/MARCO_8_1_1_STT_FINAL_BENCHMARK_REPORT.md`.
+     - Preservação estrita dos padrões de produção: `LocalWhisperConfig::default()` e resampler linear mantidos temporariamente inalterados, submetendo a recomendação técnica de adoção do prompt e threads ao operador humano.
+  5. **Métricas Finais e Portões de Qualidade:**
+     - 46 testes aprovados em `tests/voice_stt_tts.rs`.
+     - 618 testes ativos aprovados em todo o workspace (0 falhas; 5 testes live opt-in ignorados; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings` e `cargo build --release`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Benchmark Final do STT (Etapa 3B) concluído com 48 execuções pareadas; recuperação do reconhecimento da assistente de 0% para 87.5% comprovada via prompt lexical neutro; redução de 28% no tempo do Whisper demonstrada com 8 threads; padrões de produção preservados; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE até validação final com o operador humano."`
+
+
 
 
 

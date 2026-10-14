@@ -1186,6 +1186,64 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         }
                     }
 
+                    if is_diag_active && result.diagnostics.is_none() {
+                        println!("\n--- Decomposição de Latência do STT ---");
+                        println!(
+                            "• Prep / Mono Downmix: {:.2} ms",
+                            result.timings.audio_prep_ms
+                        );
+                        println!(
+                            "• Normalização & Enc:  {:.2} ms",
+                            result.timings.audio_norm_ms
+                        );
+                        println!(
+                            "• Gravação Temp WAV:   {:.2} ms",
+                            result.timings.temp_write_ms
+                        );
+                        println!(
+                            "• Subprocesso Whisper: {:.2} ms ({:.2}s)",
+                            result.timings.subprocess_wall_ms,
+                            result.timings.subprocess_wall_ms / 1000.0
+                        );
+                        if let Some(load) = result.timings.whisper_load_ms {
+                            println!("  ├─ Modelo Load:      {:.2} ms", load);
+                        }
+                        if let Some(mel) = result.timings.whisper_mel_ms {
+                            println!("  ├─ Mel Spectrogram:  {:.2} ms", mel);
+                        }
+                        if let Some(sample) = result.timings.whisper_sample_ms {
+                            println!("  ├─ Sampling:         {:.2} ms", sample);
+                        }
+                        if let Some(enc) = result.timings.whisper_encode_ms {
+                            println!("  ├─ Encode:           {:.2} ms", enc);
+                        }
+                        if let Some(dec) = result.timings.whisper_decode_ms {
+                            println!("  ├─ Decode:           {:.2} ms", dec);
+                        }
+                        if let Some(prompt) = result.timings.whisper_prompt_ms {
+                            println!("  ├─ Prompt Time:      {:.2} ms", prompt);
+                        }
+                        if let Some(tot) = result.timings.whisper_total_ms {
+                            println!(
+                                "  ├─ Whisper Total:    {:.2} ms ({:.2}s)",
+                                tot,
+                                tot / 1000.0
+                            );
+                        }
+                        if let Some(fb) = result.timings.whisper_fallbacks {
+                            println!("  └─ Fallbacks Usados: {}", fb);
+                        }
+                        println!(
+                            "• Pós-processamento:   {:.2} ms",
+                            result.timings.post_process_ms
+                        );
+                        println!(
+                            "• Latência Total STT:  {:.2} ms ({:.2}s)",
+                            result.timings.total_stt_wall_ms,
+                            result.timings.total_stt_wall_ms / 1000.0
+                        );
+                    }
+
                     if let Some(ref diag) = result.diagnostics {
                         yuki::voice::diag::print_diagnostic_summary(diag);
                     } else if let Some(ref diag) = audio_input.diagnostics {
