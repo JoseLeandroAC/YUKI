@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-13
-Status geral: Marco 8.1.1 — Conclusão da Etapa 2B.2 de STT: Auditoria da Integração Real WASAPI e Validação do Pipeline de Áudio (confirmação da Alternativa A com captura acumulada e reamostragem one-shot pós-gravação; justificativa arquitetural baseada no consumo em lote do Whisper.cpp, latência < 1ms e imunidade a buffer overruns na thread de captura; reusabilidade de instâncias via resample() com zero estado residual; testes end-to-end com IEEE Float 32-bit e PCM 16-bit); 615 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 620 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final do operador humano
+Status geral: Marco 8.1.1 — Conclusão da Auditoria Final WASAPI, Estabilidade Física e Qualidade do STT (diagnóstico conclusivo de descontinuidades WASAPI demonstrando ausência de lacunas reais de frames no Redmi Buds 6 Play; instrumentação granular em BufferMetrics com discontinuity_initial, discontinuity_after_initial e detected_gap_frames; confirmação e registro explícito de bypass em 16 kHz mono via resampler_applied; análise fonética dos erros de transcrição "Yuki" -> "E o que" e decomposição de latência do STT); 618 testes ativos aprovados (5 testes live opt-in ignorados, totalizando 623 testes; 0 falhas) no workspace; 71/71 testes adversariais aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final do operador humano
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -9,7 +9,7 @@ Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "
 
 1. Estado atual
 
-A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança, Migração WASAPI Core Audio, Laboratório Vocal, Auditoria Diagnóstica do Áudio Físico, Laboratório de Qualidade STT, Reamostragem Antialiasing, Correção de Streaming DSP e Auditoria do Pipeline Real WASAPI)**:
+A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansão de Infraestrutura), Marco 7 (Personal Intelligence Foundation), Marco 7.1 (Endurecimento da Personal Intelligence e Diretrizes de Evolução), Marco 7.2 (Hardening Final, Integridade e Validação Independente), Marco 8, Marco 8.1 e o **Marco 8.1.1 (Correções Críticas de Homologação, Alinhamento Final, Auditoria de Segurança, Migração WASAPI Core Audio, Laboratório Vocal, Auditoria Diagnóstica do Áudio Físico, Laboratório de Qualidade STT, Reamostragem Antialiasing, Correção de Streaming DSP, Auditoria do Pipeline Real WASAPI e Auditoria Final de Estabilidade e Qualidade STT)**:
 - **Research v1 (Marcos 1 a 5):** Capability `research.search` e `research.fetch`, defesas SSRF, extração HTML, suporte a Content-Encoding (gzip, deflate, br, identity), provedores Brave Search e LangSearch, Registro de Fontes e Citações Verificáveis;
 - **Marco 6 (Infraestrutura & Busca Local):** Credential Vault v1 inicial, defesas de streaming e sanitização em rede, e Native Search Foundation (busca soberana local SQLite FTS5 BM25, indexador com defesa de path traversal, zero rede);
 - **Marco 7 (Credential Vault Hardened & Admin CLI):** Canary upfront de autenticação, limites estritos de iteração PBKDF2 e payload, mitigação de symlinks, persistência estritamente transacional e interface administrativa de linha de comando (`yuki vault [init|store|replace|list|status|revoke|delete]`);
@@ -66,7 +66,14 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
       - **Justificativa da Decisão Arquitetural (Alternativa A mantida):** O consumidor atual (Whisper.cpp local) opera em lote sobre arquivo WAV completo temporário. A reamostragem pós-gravação consome menos de 1 ms em CPU para 10s de áudio, preserva o áudio nativo bruto de 48 kHz para diagnósticos sem overhead na thread de captura e evita risco de buffer overruns no driver do Windows;
       - **Reusabilidade de Instância e Zero Estado Residual:** Implementação do método `resample(&mut self, samples: &[i16])` em `AudioResampler`, garantindo `reset()` estrito antes e após a reamostragem, e provando por testes que chamadas consecutivas sobre a mesma instância são 100% livres de estado residual;
       - **Bateria de Testes do Pipeline Real:** 43 testes aprovados em `tests/voice_stt_tts.rs` (615 testes ativos no workspace, 0 falhas across all targets) validando o pipeline completo com entrada IEEE Float 32-bit e PCM 16-bit, integridade de transientes de borda, ausência de clipping e seleção governada por `YUKI_VOICE_RESAMPLER`;
-      - **Homologação:** O STT permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até nova validação física com o operador.
+   23. **Auditoria Final WASAPI, Estabilidade Física e Qualidade do STT:**
+       - **Diagnóstico Técnico das Descontinuidades WASAPI:** Comprovação de que o contador `discontinuity_glitches` mede pacotes com flag `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` sinalizada pelo driver (típico de startup de stream e de pacotes SCO Bluetooth HFP no Redmi Buds 6 Play), sem indicar perda efetiva de frames; todos os pacotes sinalizados continuam sendo consumidos integralmente em memória;
+       - **Instrumentação Granular de Diagnóstico (`BufferMetrics`):** Adição de métricas não-mascaradas em `BufferMetrics`: `discontinuity_initial` (flag no primeiro pacote de áudio), `discontinuity_after_initial` (descontinuidades após o pacote 0) e `detected_gap_frames` (cálculo de lacunas reais de amostragem via descontinuidade estrita em `dev_pos`), demonstrando matematicamente zero lacunas de frames nas sessões do Redmi Buds 6 Play (5.00s a 5.02s em 80.000 a 80.320 frames);
+       - **Integridade Acústica e Bypass Canônico em 16 kHz:** Confirmação de que áudio nativo em 16 kHz mono opera em bypass determinístico bit-a-bit no `AudioResampler`; adição do campo `resampler_applied` no relatório estruturado `AudioDiagnosticsReport` e na CLI de diagnóstico, distinguindo o resampler solicitado do efetivamente aplicado (`bypass_native_16khz`);
+       - **Diagnóstico de Precisão STT e Análise Fonética:** Investigação da substituição de "Yuki" por "E o que", demonstrando a proximidade espectral dos formantes ([ˈju.ki] vs [i u ˈki]) e o viés probabilístico a priori do Whisper em português; constatação experimental de que prompts lexicais curtos restauram o reconhecimento de "Yuki"; explicitação da limitação documental de que as referências faladas das 5 sessões adicionais do Redmi Buds não constam nos logs;
+       - **Diagnóstico de Latência:** Mapeamento da decomposição de tempo evidenciando que preparação de áudio, downmix e escrita do WAV consomem apenas 2-5 ms, enquanto a inferência em CPU do Whisper consome 10-12s (6-8s no encoder e 2-4s no decoder); sistematização de alternativas viáveis ordenadas por benefício/custo/risco (decodificação rápida `--fast-stt`, paralelização de threads, modelo `base`, servidor local daemon, bindings FFI nativos);
+       - **Validação Automatizada:** 46 testes aprovados em `tests/voice_stt_tts.rs` (618 testes ativos no workspace, 0 falhas; 71/71 testes adversariais);
+       - **Homologação:** O STT permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até nova validação e aprovação pelo operador humano.
 
 A situação atual pode ser resumida como:
 
@@ -84,7 +91,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-612 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 617 TESTES; 71/71 ADVERSARIAIS)
+618 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 623 TESTES; 71/71 ADVERSARIAIS)
 
 ---
 

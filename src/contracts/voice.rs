@@ -87,13 +87,22 @@ pub struct CaptureTimingMetrics {
 }
 
 /// Métricas de pacotes e buffers recebidos do subsistema WASAPI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BufferMetrics {
     pub total_packets: usize,
     pub total_raw_frames: usize,
     pub total_raw_bytes: usize,
     pub silent_buffer_events: usize,
     pub discontinuity_glitches: usize,
+    /// Sinalização de descontinuidade no primeiro pacote após início do stream (típico do WASAPI).
+    #[serde(default)]
+    pub discontinuity_initial: bool,
+    /// Descontinuidades observadas estritamente após o primeiro pacote do stream.
+    #[serde(default)]
+    pub discontinuity_after_initial: usize,
+    /// Total de frames ausentes detectados por salto efetivo na posição do hardware (dev_pos).
+    #[serde(default)]
+    pub detected_gap_frames: usize,
 }
 
 /// Métricas acústicas calculadas sobre o buffer de amostras.
@@ -207,6 +216,8 @@ pub struct AudioDiagnosticsReport {
     pub stt_config: Option<SttDecodingConfigSummary>,
     #[serde(default)]
     pub resampler_kind: Option<ResamplerKind>,
+    #[serde(default)]
+    pub resampler_applied: Option<String>,
     pub raw_wav_path: Option<String>,
     pub canonical_wav_path: Option<String>,
     pub normalized_wav_path: Option<String>,

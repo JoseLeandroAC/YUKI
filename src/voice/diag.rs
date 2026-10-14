@@ -198,7 +198,17 @@ pub fn save_diagnostic_session_ex(
     // 3. Medições acústicas do sinal canônico
     let acoustic_canonical = compute_acoustic_metrics(canonical_samples, 16000);
 
-    // 4. Salva relatório em JSON
+    // 4. Determina status efetivo de reamostragem vs bypass
+    let resampler_applied = if native_format.sample_rate == 16000 {
+        Some(
+            "bypass_native_16khz (taxa nativa já canônica de 16.000 Hz, sem reamostragem)"
+                .to_string(),
+        )
+    } else {
+        resampler_kind.map(|rk| format!("{} ({} Hz -> 16.000 Hz)", rk, native_format.sample_rate))
+    };
+
+    // 5. Salva relatório em JSON
     let report_filename = format!("diag_{}.json", session_id);
     let report_path = diag_dir.join(&report_filename);
 
@@ -215,6 +225,7 @@ pub fn save_diagnostic_session_ex(
         stt_timings: None,
         stt_config: None,
         resampler_kind,
+        resampler_applied,
         raw_wav_path: Some(raw_wav_path.to_string_lossy().to_string()),
         canonical_wav_path: Some(canonical_wav_path.to_string_lossy().to_string()),
         normalized_wav_path: None,
@@ -330,6 +341,12 @@ pub fn print_diagnostic_summary(report: &AudioDiagnosticsReport) {
     if let Some(ref guid) = fmt.sub_format_guid {
         println!("• SubFormat GUID:      {}", guid);
     }
+    if let Some(ref rk) = report.resampler_kind {
+        println!("• Resampler Solicitado:{}", rk);
+    }
+    if let Some(ref ra) = report.resampler_applied {
+        println!("• Resampler Aplicado:  {}", ra);
+    }
 
     println!("\n--- Métricas de Temporização e Ciclo de Vida ---");
     let t = &report.timings;
@@ -360,9 +377,18 @@ pub fn print_diagnostic_summary(report: &AudioDiagnosticsReport) {
         "• Total de Pacotes:    {} | Frames Lidos: {} | Bytes Lidos: {}",
         b.total_packets, b.total_raw_frames, b.total_raw_bytes
     );
+    let gap_detail = if b.detected_gap_frames == 0 {
+        "0 frames (fluxo contínuo sem perda)".to_string()
+    } else {
+        format!("{} frames perdidos", b.detected_gap_frames)
+    };
     println!(
-        "• Buffers Silenciosos: {} | Falhas/Glitches de Descontinuidade: {}",
-        b.silent_buffer_events, b.discontinuity_glitches
+        "• Buffers Silenciosos: {} | Flags Descontinuidade: {} (Startup: {}, Pós-startup: {}, Lacuna: {})",
+        b.silent_buffer_events,
+        b.discontinuity_glitches,
+        if b.discontinuity_initial { "Sim" } else { "Não" },
+        b.discontinuity_after_initial,
+        gap_detail
     );
 
     println!("\n--- Métricas Acústicas do Sinal Canônico (16kHz Mono) ---");

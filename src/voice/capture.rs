@@ -564,6 +564,11 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                     let mut total_raw_frames = 0usize;
                     let mut silent_buffer_events = 0usize;
                     let mut discontinuity_glitches = 0usize;
+                    let mut discontinuity_initial = false;
+                    let mut discontinuity_after_initial = 0usize;
+                    let mut detected_gap_frames = 0usize;
+                    let mut last_dev_pos: Option<u64> = None;
+                    let mut last_num_frames: u64 = 0;
 
                     while is_recording_flag.load(Ordering::SeqCst) {
                         let mut packet_size = 0u32;
@@ -587,7 +592,21 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                                 total_raw_frames += num_frames as usize;
                                 if flags & 1 != 0 {
                                     discontinuity_glitches += 1;
+                                    if total_packets == 1 {
+                                        discontinuity_initial = true;
+                                    } else {
+                                        discontinuity_after_initial += 1;
+                                    }
                                 }
+                                if let Some(prev_pos) = last_dev_pos {
+                                    let expected = prev_pos + last_num_frames;
+                                    if dev_pos > expected {
+                                        detected_gap_frames += (dev_pos - expected) as usize;
+                                    }
+                                }
+                                last_dev_pos = Some(dev_pos);
+                                last_num_frames = num_frames as u64;
+
                                 let byte_count = (num_frames as usize) * block_align;
                                 if flags & 2 != 0 {
                                     // AUDCLNT_BUFFERFLAGS_SILENT
@@ -630,7 +649,21 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                             total_raw_frames += num_frames as usize;
                             if flags & 1 != 0 {
                                 discontinuity_glitches += 1;
+                                if total_packets == 1 {
+                                    discontinuity_initial = true;
+                                } else {
+                                    discontinuity_after_initial += 1;
+                                }
                             }
+                            if let Some(prev_pos) = last_dev_pos {
+                                let expected = prev_pos + last_num_frames;
+                                if dev_pos > expected {
+                                    detected_gap_frames += (dev_pos - expected) as usize;
+                                }
+                            }
+                            last_dev_pos = Some(dev_pos);
+                            last_num_frames = num_frames as u64;
+
                             let byte_count = (num_frames as usize) * block_align;
                             if flags & 2 != 0 {
                                 silent_buffer_events += 1;
@@ -745,6 +778,9 @@ impl AudioCaptureBackend for WasapiAudioCaptureBackend {
                         total_raw_bytes: raw_bytes.len(),
                         silent_buffer_events,
                         discontinuity_glitches,
+                        discontinuity_initial,
+                        discontinuity_after_initial,
+                        detected_gap_frames,
                     };
 
                     let source_label = format!("wasapi-mic-{}", native_rate);
