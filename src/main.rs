@@ -1015,107 +1015,106 @@ async fn handle_voice_command(cmd: VoiceCommands) {
 
                 AudioInput::new(data, format, duration_ms, path)
             } else {
-                use std::sync::Arc;
-                use std::time::Duration;
-                use yuki::voice::capture::{
-                    AudioCaptureBackend, PushToTalkController, WindowsAudioCaptureBackend,
-                };
+                #[cfg(windows)]
+                {
+                    use std::sync::Arc;
+                    use std::time::Duration;
+                    use yuki::voice::capture::{
+                        AudioCaptureBackend, PushToTalkController, WindowsAudioCaptureBackend,
+                    };
 
-                let target_device = if let Some(ref dev_query) = input_device {
-                    match find_device(dev_query, AudioDeviceFlow::Input) {
-                        Ok(dev) => {
-                            println!(
-                                "Dispositivo de microfone selecionado: {} (ID: {})",
-                                dev.name, dev.id
-                            );
-                            Some(dev.id)
+                    let target_device = if let Some(ref dev_query) = input_device {
+                        match find_device(dev_query, AudioDeviceFlow::Input) {
+                            Ok(dev) => {
+                                println!(
+                                    "Dispositivo de microfone selecionado: {} (ID: {})",
+                                    dev.name, dev.id
+                                );
+                                Some(dev.id)
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Falha ao resolver dispositivo de entrada '{}': {}",
+                                    dev_query, e
+                                );
+                                return;
+                            }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "Falha ao resolver dispositivo de entrada '{}': {}",
-                                dev_query, e
-                            );
-                            return;
+                    } else {
+                        match get_default_device(AudioDeviceFlow::Input) {
+                            Ok(Some(def)) => {
+                                println!(
+                                    "Dispositivo de microfone padrão: {} (ID: {})",
+                                    def.name, def.id
+                                );
+                            }
+                            Ok(None) => {
+                                eprintln!("Erro: Nenhum dispositivo de microfone de entrada foi detectado ou está ativo.");
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!("Erro ao verificar dispositivo padrão de entrada: {}", e);
+                                return;
+                            }
                         }
+                        None
+                    };
+
+                    println!("Formato de captura negociado: 16000Hz, 1 canal (mono), 16-bit PCM");
+                    if is_diag_active {
+                        println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
                     }
-                } else {
-                    match get_default_device(AudioDeviceFlow::Input) {
-                        Ok(Some(def)) => {
-                            println!(
-                                "Dispositivo de microfone padrão: {} (ID: {})",
-                                def.name, def.id
-                            );
-                        }
-                        Ok(None) => {
-                            eprintln!("Erro: Nenhum dispositivo de microfone de entrada foi detectado ou está ativo.");
-                            return;
-                        }
-                        Err(e) => {
-                            eprintln!("Erro ao verificar dispositivo padrão de entrada: {}", e);
-                            return;
-                        }
-                    }
-                    None
-                };
 
-                println!("Formato de captura negociado: 16000Hz, 1 canal (mono), 16-bit PCM");
-                if is_diag_active {
-                    println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
-                }
+                    let duration_sec = seconds.clamp(1, 30);
+                    println!(
+                        "Iniciando captura de áudio do microfone por {} segundos...",
+                        duration_sec
+                    );
 
-                let duration_sec = seconds.clamp(1, 30);
-                println!(
-                    "Iniciando captura de áudio do microfone por {} segundos...",
-                    duration_sec
-                );
-
-                let backend: Arc<dyn AudioCaptureBackend> = {
-                    #[cfg(windows)]
-                    {
-                        let win = WindowsAudioCaptureBackend::with_diagnostics(
-                            target_device,
-                            is_diag_active,
+                    let win =
+                        WindowsAudioCaptureBackend::with_diagnostics(target_device, is_diag_active);
+                    if !win.is_device_available() {
+                        eprintln!(
+                            "Erro: O dispositivo de captura selecionado não está disponível."
                         );
-                        if !win.is_device_available() {
-                            eprintln!(
-                                "Erro: O dispositivo de captura selecionado não está disponível."
-                            );
-                            return;
-                        }
-                        Arc::new(win)
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        eprintln!("Erro: Captura física de áudio por microfone não suportada nesta plataforma.");
                         return;
                     }
-                };
+                    let backend: Arc<dyn AudioCaptureBackend> = Arc::new(win);
 
-                let ptt = PushToTalkController::new(backend);
-                if let Err(e) = ptt.press() {
-                    eprintln!("Falha ao iniciar captura de microfone: {}", e);
+                    let ptt = PushToTalkController::new(backend);
+                    if let Err(e) = ptt.press() {
+                        eprintln!("Falha ao iniciar captura de microfone: {}", e);
+                        return;
+                    }
+
+                    println!(
+                        "Gravando... Fale com a Yuki agora (tempo máximo: {}s)...",
+                        duration_sec
+                    );
+                    tokio::time::sleep(Duration::from_secs(duration_sec)).await;
+
+                    match ptt.release() {
+                        Ok(input) => {
+                            println!(
+                                "Captura concluída com sucesso ({} bytes, {}ms).",
+                                input.payload.len(),
+                                input.duration_ms
+                            );
+                            input
+                        }
+                        Err(e) => {
+                            eprintln!("Falha ao encerrar captura de áudio: {}", e);
+                            return;
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = input_device;
+                    let _ = seconds;
+                    let _ = is_diag_active;
+                    eprintln!("Erro: Captura física de áudio por microfone não suportada nesta plataforma.");
                     return;
-                }
-
-                println!(
-                    "Gravando... Fale com a Yuki agora (tempo máximo: {}s)...",
-                    duration_sec
-                );
-                tokio::time::sleep(Duration::from_secs(duration_sec)).await;
-
-                match ptt.release() {
-                    Ok(input) => {
-                        println!(
-                            "Captura concluída com sucesso ({} bytes, {}ms).",
-                            input.payload.len(),
-                            input.duration_ms
-                        );
-                        input
-                    }
-                    Err(e) => {
-                        eprintln!("Falha ao encerrar captura de áudio: {}", e);
-                        return;
-                    }
                 }
             };
 
@@ -1267,235 +1266,245 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             fast_stt,
             diagnostics,
         } => {
-            use std::sync::Arc;
-            use std::time::Duration;
-            use yuki::voice::capture::{
-                AudioCaptureBackend, PushToTalkController, WindowsAudioCaptureBackend,
-            };
-            use yuki::voice::conversation::VoiceConversationCoordinator;
-            use yuki::voice::playback::AudioPlaybackController;
+            #[cfg(windows)]
+            {
+                use std::sync::Arc;
+                use std::time::Duration;
+                use yuki::voice::capture::{
+                    AudioCaptureBackend, PushToTalkController, WindowsAudioCaptureBackend,
+                };
+                use yuki::voice::conversation::VoiceConversationCoordinator;
+                use yuki::voice::playback::AudioPlaybackController;
 
-            let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
+                let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
 
-            // 1. Resolução do microfone de entrada (fail-closed se indisponível)
-            let target_input_id = if let Some(ref dev_query) = input_device {
-                match find_device(dev_query, AudioDeviceFlow::Input) {
-                    Ok(dev) => {
-                        println!(
-                            "Microfone de entrada selecionado: {} (ID: {})",
-                            dev.name, dev.id
-                        );
-                        Some(dev.id)
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Falha ao resolver microfone de entrada '{}': {}",
-                            dev_query, e
-                        );
-                        return;
-                    }
-                }
-            } else {
-                match get_default_device(AudioDeviceFlow::Input) {
-                    Ok(Some(def)) => {
-                        println!("Microfone de entrada padrão: {} (ID: {})", def.name, def.id);
-                    }
-                    Ok(None) => {
-                        eprintln!("Erro: Nenhum microfone de entrada está ativo ou disponível no sistema.");
-                        return;
-                    }
-                    Err(e) => {
-                        eprintln!("Erro ao verificar microfone padrão: {}", e);
-                        return;
-                    }
-                }
-                None
-            };
-
-            // 2. Resolução do endpoint de saída se reprodução requerida
-            let target_output_id = if play {
-                if let Some(ref dev_query) = output_device {
-                    match find_device(dev_query, AudioDeviceFlow::Output) {
+                // 1. Resolução do microfone de entrada (fail-closed se indisponível)
+                let target_input_id = if let Some(ref dev_query) = input_device {
+                    match find_device(dev_query, AudioDeviceFlow::Input) {
                         Ok(dev) => {
                             println!(
-                                "Dispositivo de saída selecionado: {} (ID: {})",
+                                "Microfone de entrada selecionado: {} (ID: {})",
                                 dev.name, dev.id
                             );
                             Some(dev.id)
                         }
                         Err(e) => {
                             eprintln!(
-                                "Falha ao resolver dispositivo de saída '{}': {}",
+                                "Falha ao resolver microfone de entrada '{}': {}",
                                 dev_query, e
                             );
                             return;
                         }
                     }
                 } else {
-                    if let Ok(Some(def)) = get_default_device(AudioDeviceFlow::Output) {
-                        println!("Dispositivo de saída padrão: {} (ID: {})", def.name, def.id);
+                    match get_default_device(AudioDeviceFlow::Input) {
+                        Ok(Some(def)) => {
+                            println!("Microfone de entrada padrão: {} (ID: {})", def.name, def.id);
+                        }
+                        Ok(None) => {
+                            eprintln!("Erro: Nenhum microfone de entrada está ativo ou disponível no sistema.");
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("Erro ao verificar microfone padrão: {}", e);
+                            return;
+                        }
                     }
                     None
-                }
-            } else {
-                None
-            };
-
-            println!("Formato de áudio negociado: 16000Hz mono 16-bit PCM (WASAPI streaming)");
-            if is_diag_active {
-                println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
-            }
-
-            let duration_sec = seconds.clamp(1, 30);
-            println!(
-                "Iniciando turno conversacional de voz Push-to-Talk ({}s de captura)...",
-                duration_sec
-            );
-
-            let capture_backend: Arc<dyn AudioCaptureBackend> = {
-                #[cfg(windows)]
-                {
-                    let win = WindowsAudioCaptureBackend::with_diagnostics(
-                        target_input_id,
-                        is_diag_active,
-                    );
-                    if !win.is_device_available() {
-                        eprintln!(
-                            "Erro: O microfone selecionado não está acessível no Windows WASAPI."
-                        );
-                        return;
-                    }
-                    Arc::new(win)
-                }
-                #[cfg(not(windows))]
-                {
-                    eprintln!("Erro: Captura física de áudio por microfone não suportada nesta plataforma.");
-                    return;
-                }
-            };
-
-            let ptt = PushToTalkController::new(capture_backend);
-            if let Err(e) = ptt.press() {
-                eprintln!("Falha ao iniciar captura de microfone: {}", e);
-                return;
-            }
-
-            println!(
-                "Gravando... Fale com a Yuki agora (tempo: {}s)...",
-                duration_sec
-            );
-            tokio::time::sleep(Duration::from_secs(duration_sec)).await;
-
-            let audio_input = match ptt.release() {
-                Ok(input) => {
-                    println!(
-                        "Captura concluída ({} bytes, {}ms).",
-                        input.payload.len(),
-                        input.duration_ms
-                    );
-                    if let Some(ref diag) = input.diagnostics {
-                        yuki::voice::diag::print_diagnostic_summary(diag);
-                    }
-                    input
-                }
-                Err(e) => {
-                    eprintln!("Falha ao encerrar captura de áudio: {}", e);
-                    return;
-                }
-            };
-
-            // Inicializa modelo para o Core (Mock fallback limpo se não configurado)
-            let model_provider = resolve_model_provider_from_env()
-                .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
-            let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
-
-            let playback_controller = if play {
-                Arc::new(AudioPlaybackController::production_with_device(
-                    target_output_id,
-                ))
-            } else {
-                Arc::new(AudioPlaybackController::for_environment(
-                    yuki::voice::playback::PlaybackEnvironment::Disabled,
-                ))
-            };
-
-            // Resolução do idioma de STT para o roteador governado de conversação
-            let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
-            let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
-            let effective_lang = yuki::voice::stt::normalize_language_code(raw_lang);
-            let mut whisper_cfg =
-                yuki::voice::stt::LocalWhisperConfig::default().with_language(effective_lang);
-            if fast_stt {
-                whisper_cfg = whisper_cfg.with_fast_decoding();
-            }
-            if let Some(t) = threads {
-                if let Err(e) = whisper_cfg.set_threads(t) {
-                    eprintln!("Aviso: {}", e);
-                }
-            }
-            if let Some(bs) = beam_size {
-                if let Err(e) = whisper_cfg.set_beam_size(bs) {
-                    eprintln!("Aviso: {}", e);
-                }
-            }
-            if let Some(bo) = best_of {
-                if let Err(e) = whisper_cfg.set_best_of(bo) {
-                    eprintln!("Aviso: {}", e);
-                }
-            }
-            if no_fallback {
-                whisper_cfg = whisper_cfg.with_no_fallback(true);
-            }
-            if let Some(ref p) = prompt {
-                whisper_cfg = whisper_cfg.with_initial_prompt(p.clone());
-            }
-            let local_stt = Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
-            let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
-                if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
-                    Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
-                } else {
-                    Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
                 };
 
-            let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
-                local_stt,
-                None,
-                local_tts,
-                None,
-                yuki::contracts::voice::VoiceConfiguration::default(),
-            ));
+                // 2. Resolução do endpoint de saída se reprodução requerida
+                let target_output_id = if play {
+                    if let Some(ref dev_query) = output_device {
+                        match find_device(dev_query, AudioDeviceFlow::Output) {
+                            Ok(dev) => {
+                                println!(
+                                    "Dispositivo de saída selecionado: {} (ID: {})",
+                                    dev.name, dev.id
+                                );
+                                Some(dev.id)
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Falha ao resolver dispositivo de saída '{}': {}",
+                                    dev_query, e
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        if let Ok(Some(def)) = get_default_device(AudioDeviceFlow::Output) {
+                            println!("Dispositivo de saída padrão: {} (ID: {})", def.name, def.id);
+                        }
+                        None
+                    }
+                } else {
+                    None
+                };
 
-            let coordinator = VoiceConversationCoordinator::new(
-                core,
-                router,
-                Arc::new(yuki::voice::session::VoiceSessionManager::new()),
-                playback_controller,
-                Arc::new(tokio::sync::Mutex::new(
-                    yuki::voice::wakeword::WakeWordDetector::default(),
-                )),
-                None,
-            );
+                println!("Formato de áudio negociado: 16000Hz mono 16-bit PCM (WASAPI streaming)");
+                if is_diag_active {
+                    println!("Modo de diagnóstico ativo: capturando áudio bruto, canônico e métricas em data/voice_diag/");
+                }
 
-            println!("Processando turno de conversação governado...");
-            match coordinator
-                .process_button_turn("cli-turn", audio_input, false, false)
-                .await
-            {
-                Ok((yuki_res, audio_out)) => {
-                    println!("\nResposta da Yuki:");
-                    println!("\"{}\"", yuki_res.content);
-                    println!(
-                        "Áudio de resposta gerado: {:.2}s ({} bytes).",
-                        audio_out.duration_ms as f64 / 1000.0,
-                        audio_out.payload.len()
+                let duration_sec = seconds.clamp(1, 30);
+                println!(
+                    "Iniciando turno conversacional de voz Push-to-Talk ({}s de captura)...",
+                    duration_sec
+                );
+
+                let win =
+                    WindowsAudioCaptureBackend::with_diagnostics(target_input_id, is_diag_active);
+                if !win.is_device_available() {
+                    eprintln!(
+                        "Erro: O microfone selecionado não está acessível no Windows WASAPI."
                     );
-                    if play {
-                        let duration =
-                            std::time::Duration::from_millis(audio_out.duration_ms.max(100));
-                        tokio::time::sleep(duration).await;
+                    return;
+                }
+                let capture_backend: Arc<dyn AudioCaptureBackend> = Arc::new(win);
+
+                let ptt = PushToTalkController::new(capture_backend);
+                if let Err(e) = ptt.press() {
+                    eprintln!("Falha ao iniciar captura de microfone: {}", e);
+                    return;
+                }
+
+                println!(
+                    "Gravando... Fale com a Yuki agora (tempo: {}s)...",
+                    duration_sec
+                );
+                tokio::time::sleep(Duration::from_secs(duration_sec)).await;
+
+                let audio_input = match ptt.release() {
+                    Ok(input) => {
+                        println!(
+                            "Captura concluída ({} bytes, {}ms).",
+                            input.payload.len(),
+                            input.duration_ms
+                        );
+                        if let Some(ref diag) = input.diagnostics {
+                            yuki::voice::diag::print_diagnostic_summary(diag);
+                        }
+                        input
+                    }
+                    Err(e) => {
+                        eprintln!("Falha ao encerrar captura de áudio: {}", e);
+                        return;
+                    }
+                };
+
+                // Inicializa modelo para o Core (Mock fallback limpo se não configurado)
+                let model_provider = resolve_model_provider_from_env()
+                    .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
+                let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
+
+                let playback_controller = if play {
+                    Arc::new(AudioPlaybackController::production_with_device(
+                        target_output_id,
+                    ))
+                } else {
+                    Arc::new(AudioPlaybackController::for_environment(
+                        yuki::voice::playback::PlaybackEnvironment::Disabled,
+                    ))
+                };
+
+                // Resolução do idioma de STT para o roteador governado de conversação
+                let env_lang = std::env::var("YUKI_WHISPER_LANGUAGE").ok();
+                let raw_lang = language.as_deref().or(env_lang.as_deref()).unwrap_or("pt");
+                let effective_lang = yuki::voice::stt::normalize_language_code(raw_lang);
+                let mut whisper_cfg =
+                    yuki::voice::stt::LocalWhisperConfig::default().with_language(effective_lang);
+                if fast_stt {
+                    whisper_cfg = whisper_cfg.with_fast_decoding();
+                }
+                if let Some(t) = threads {
+                    if let Err(e) = whisper_cfg.set_threads(t) {
+                        eprintln!("Aviso: {}", e);
                     }
                 }
-                Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
+                if let Some(bs) = beam_size {
+                    if let Err(e) = whisper_cfg.set_beam_size(bs) {
+                        eprintln!("Aviso: {}", e);
+                    }
+                }
+                if let Some(bo) = best_of {
+                    if let Err(e) = whisper_cfg.set_best_of(bo) {
+                        eprintln!("Aviso: {}", e);
+                    }
+                }
+                if no_fallback {
+                    whisper_cfg = whisper_cfg.with_no_fallback(true);
+                }
+                if let Some(ref p) = prompt {
+                    whisper_cfg = whisper_cfg.with_initial_prompt(p.clone());
+                }
+                let local_stt =
+                    Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
+                let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
+                    if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
+                        Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
+                    } else {
+                        Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
+                    };
+
+                let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
+                    local_stt,
+                    None,
+                    local_tts,
+                    None,
+                    yuki::contracts::voice::VoiceConfiguration::default(),
+                ));
+
+                let coordinator = VoiceConversationCoordinator::new(
+                    core,
+                    router,
+                    Arc::new(yuki::voice::session::VoiceSessionManager::new()),
+                    playback_controller,
+                    Arc::new(tokio::sync::Mutex::new(
+                        yuki::voice::wakeword::WakeWordDetector::default(),
+                    )),
+                    None,
+                );
+
+                println!("Processando turno de conversação governado...");
+                match coordinator
+                    .process_button_turn("cli-turn", audio_input, false, false)
+                    .await
+                {
+                    Ok((yuki_res, audio_out)) => {
+                        println!("\nResposta da Yuki:");
+                        println!("\"{}\"", yuki_res.content);
+                        println!(
+                            "Áudio de resposta gerado: {:.2}s ({} bytes).",
+                            audio_out.duration_ms as f64 / 1000.0,
+                            audio_out.payload.len()
+                        );
+                        if play {
+                            let duration =
+                                std::time::Duration::from_millis(audio_out.duration_ms.max(100));
+                            tokio::time::sleep(duration).await;
+                        }
+                    }
+                    Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = seconds;
+                let _ = input_device;
+                let _ = output_device;
+                let _ = play;
+                let _ = language;
+                let _ = prompt;
+                let _ = threads;
+                let _ = beam_size;
+                let _ = best_of;
+                let _ = no_fallback;
+                let _ = fast_stt;
+                let _ = diagnostics;
+                eprintln!(
+                    "Erro: Turno conversacional de voz físico não suportado nesta plataforma."
+                );
             }
         }
         VoiceCommands::CompareStt {
