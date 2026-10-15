@@ -1,8 +1,8 @@
+#[cfg(windows)]
 use crate::contracts::identifiers::generate_unique_id;
-use crate::contracts::voice::{
-    AudioFormat, AudioInput, BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo,
-    ResamplerKind, VoiceError,
-};
+use crate::contracts::voice::{AudioFormat, AudioInput, ResamplerKind, VoiceError};
+#[cfg(windows)]
+use crate::contracts::voice::{BufferMetrics, CaptureTimingMetrics, NativeAudioFormatInfo};
 use crate::voice::audio::{AudioCodec, AudioResampler};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

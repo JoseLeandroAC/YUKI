@@ -1,4 +1,5 @@
 use crate::contracts::voice::{AudioOutput, VoiceError};
+#[cfg(windows)]
 use crate::voice::audio::AudioCodec;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -169,6 +170,7 @@ impl WindowsAudioPlaybackSink {
     }
 
     /// Prepara um buffer de áudio WAV válido a partir do payload fornecido.
+    #[cfg(windows)]
     #[allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
     fn prepare_wav_bytes(&self, output: &AudioOutput) -> Result<Vec<u8>, VoiceError> {
         if output.payload.starts_with(b"RIFF") && output.payload.len() >= 44 {
@@ -757,6 +759,7 @@ impl WasapiAudioPlaybackSink {
         self.device_id.as_deref()
     }
 
+    #[cfg(windows)]
     fn resample_linear(samples: &[i16], in_rate: u32, out_rate: u32) -> Vec<i16> {
         if in_rate == out_rate || samples.is_empty() {
             return samples.to_vec();
@@ -1282,14 +1285,7 @@ impl AudioPlaybackController {
     /// presente ou acessível, `is_device_available()` retornará `false` e chamadas a `play()`
     /// falharão explicitamente com `VoiceError::DeviceUnavailable`, preservando a verdade operacional.
     pub fn production() -> Self {
-        #[cfg(windows)]
-        {
-            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(None)))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::with_sink(Arc::new(MockPlaybackSink::new()))
-        }
+        Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(None)))
     }
 
     /// Construtor para ambiente operacional de produção com seleção opcional de dispositivo.
@@ -1298,27 +1294,12 @@ impl AudioPlaybackController {
     /// para o endpoint correspondente (ex: headset Bluetooth, USB DAC ou Realtek). Se omitido,
     /// utiliza o endpoint de renderização padrão do sistema.
     pub fn production_with_device(device_id: Option<String>) -> Self {
-        #[cfg(windows)]
-        {
-            Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(device_id)))
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = device_id;
-            Self::with_sink(Arc::new(MockPlaybackSink::new()))
-        }
+        Self::with_sink(Arc::new(WasapiAudioPlaybackSink::production(device_id)))
     }
 
     /// Construtor para o backend legado winmm (PlaySoundA), preservado para diagnóstico e compatibilidade.
     pub fn winmm() -> Self {
-        #[cfg(windows)]
-        {
-            Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::with_sink(Arc::new(MockPlaybackSink::new()))
-        }
+        Self::with_sink(Arc::new(WindowsAudioPlaybackSink::production()))
     }
 
     /// Construtor baseado no ambiente operacional explicitamente configurado.
@@ -1327,28 +1308,14 @@ impl AudioPlaybackController {
             PlaybackEnvironment::Production => Self::production(),
             PlaybackEnvironment::Test => Self::new(),
             PlaybackEnvironment::Disabled => {
-                #[cfg(windows)]
-                {
-                    Self::with_sink(Arc::new(WasapiAudioPlaybackSink::silenced()))
-                }
-                #[cfg(not(windows))]
-                {
-                    Self::with_sink(Arc::new(MockPlaybackSink::new()))
-                }
+                Self::with_sink(Arc::new(WasapiAudioPlaybackSink::silenced()))
             }
         }
     }
 
     /// Construtor para testes ao vivo (opt-in explícito via `YUKI_LIVE_AUDIO_TESTS=1`).
     pub fn live_test() -> Self {
-        #[cfg(windows)]
-        {
-            Self::with_sink(Arc::new(WindowsAudioPlaybackSink::opt_in_test()))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::with_sink(Arc::new(MockPlaybackSink::new()))
-        }
+        Self::with_sink(Arc::new(WindowsAudioPlaybackSink::opt_in_test()))
     }
 
     /// Construtor parametrizado com sink explícito.

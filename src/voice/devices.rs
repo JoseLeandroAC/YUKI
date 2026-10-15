@@ -358,6 +358,7 @@ pub fn list_audio_devices(only_active: bool) -> Result<Vec<AudioDeviceInfo>, Voi
 
     #[cfg(not(windows))]
     {
+        let _ = only_active;
         Ok(Vec::new())
     }
 }
