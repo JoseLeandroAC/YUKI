@@ -296,16 +296,16 @@ impl WasapiAudioCaptureBackend {
 
 impl AudioCaptureBackend for WasapiAudioCaptureBackend {
     fn start_capture(&self) -> Result<(), VoiceError> {
+        if !self.is_device_available() {
+            return Err(VoiceError::DeviceUnavailable(
+                "Nenhum microfone de captura ativo ou acessível no sistema operacional (WASAPI)"
+                    .to_string(),
+            ));
+        }
+
         #[cfg(windows)]
         {
             use wasapi_ffi::*;
-
-            if !self.is_device_available() {
-                return Err(VoiceError::DeviceUnavailable(
-                    "Nenhum microfone de captura ativo ou acessível no sistema operacional (WASAPI)"
-                        .to_string(),
-                ));
-            }
 
             if self.is_recording.swap(true, Ordering::SeqCst) {
                 return Err(VoiceError::SessionConflict(
@@ -1062,15 +1062,15 @@ impl MciAudioCaptureBackend {
 
 impl AudioCaptureBackend for MciAudioCaptureBackend {
     fn start_capture(&self) -> Result<(), VoiceError> {
+        if !self.is_device_available() {
+            return Err(VoiceError::DeviceUnavailable(
+                "Nenhum microfone detectado ou acessível no sistema operacional (waveIn)"
+                    .to_string(),
+            ));
+        }
+
         #[cfg(windows)]
         {
-            if !self.is_device_available() {
-                return Err(VoiceError::DeviceUnavailable(
-                    "Nenhum microfone detectado ou acessível no sistema operacional (waveIn)"
-                        .to_string(),
-                ));
-            }
-
             if self.is_recording.swap(true, Ordering::SeqCst) {
                 return Err(VoiceError::SessionConflict(
                     "Captura de áudio já em andamento".to_string(),

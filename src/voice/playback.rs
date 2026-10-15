@@ -171,7 +171,6 @@ impl WindowsAudioPlaybackSink {
     }
 
     /// Prepara um buffer de áudio WAV válido a partir do payload fornecido.
-    #[cfg(windows)]
     #[allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
     fn prepare_wav_bytes(&self, output: &AudioOutput) -> Result<Vec<u8>, VoiceError> {
         if output.payload.starts_with(b"RIFF") && output.payload.len() >= 44 {
@@ -195,23 +194,23 @@ impl WindowsAudioPlaybackSink {
 
 impl AudioPlaybackSink for WindowsAudioPlaybackSink {
     fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
+        let should_emit_physical = match self.policy {
+            AudioOutputPolicy::Production => true,
+            AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
+            AudioOutputPolicy::Silenced => false,
+        };
+
+        if !should_emit_physical {
+            // Em modo não-físico (teste sem opt-in ou silenciado), valida a integridade
+            // do buffer WAV e retém o buffer em memória para inspeção, mantendo silêncio absoluto.
+            let wav_bytes = Arc::new(self.prepare_wav_bytes(output)?);
+            let mut buf_lock = self.current_wav_buffer.lock().unwrap();
+            *buf_lock = Some(wav_bytes);
+            return Ok(());
+        }
+
         #[cfg(windows)]
         {
-            let should_emit_physical = match self.policy {
-                AudioOutputPolicy::Production => true,
-                AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
-                AudioOutputPolicy::Silenced => false,
-            };
-
-            if !should_emit_physical {
-                // Em modo não-físico (teste sem opt-in ou silenciado), valida a integridade
-                // do buffer WAV e retém o buffer em memória para inspeção, mantendo silêncio absoluto.
-                let wav_bytes = Arc::new(self.prepare_wav_bytes(output)?);
-                let mut buf_lock = self.current_wav_buffer.lock().unwrap();
-                *buf_lock = Some(wav_bytes);
-                return Ok(());
-            }
-
             if !self.is_device_available() {
                 return Err(VoiceError::DeviceUnavailable(
                     "Nenhum dispositivo de reprodução de áudio detectado no sistema operacional (waveOut)"
@@ -792,29 +791,28 @@ impl WasapiAudioPlaybackSink {
 
 impl AudioPlaybackSink for WasapiAudioPlaybackSink {
     fn play(&self, output: &AudioOutput) -> Result<(), VoiceError> {
+        let should_emit_physical = match self.policy {
+            AudioOutputPolicy::Production => true,
+            AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
+            AudioOutputPolicy::Silenced => false,
+        };
+
+        if !should_emit_physical {
+            let wav_bytes = Arc::new(output.payload.clone());
+            *self.current_wav_buffer.lock().unwrap() = Some(wav_bytes);
+            return Ok(());
+        }
+
+        if !self.is_device_available() {
+            return Err(VoiceError::DeviceUnavailable(
+                "Nenhum dispositivo de reprodução de áudio ativo detectado (WASAPI)".to_string(),
+            ));
+        }
+
         #[cfg(windows)]
         {
             use std::time::Duration;
             use wasapi_render_ffi::*;
-
-            let should_emit_physical = match self.policy {
-                AudioOutputPolicy::Production => true,
-                AudioOutputPolicy::OptInTest => is_live_audio_test_allowed(),
-                AudioOutputPolicy::Silenced => false,
-            };
-
-            if !should_emit_physical {
-                let wav_bytes = Arc::new(output.payload.clone());
-                *self.current_wav_buffer.lock().unwrap() = Some(wav_bytes);
-                return Ok(());
-            }
-
-            if !self.is_device_available() {
-                return Err(VoiceError::DeviceUnavailable(
-                    "Nenhum dispositivo de reprodução de áudio ativo detectado (WASAPI)"
-                        .to_string(),
-                ));
-            }
 
             let (format, samples) =
                 if output.payload.starts_with(b"RIFF") && output.payload.len() >= 44 {
