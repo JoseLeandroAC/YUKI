@@ -222,8 +222,10 @@ type CaptureWorkerHandle =
 
 #[derive(Debug)]
 pub struct WasapiAudioCaptureBackend {
+    #[cfg_attr(not(windows), allow(dead_code))]
     device_id: Option<String>,
     is_recording: Arc<AtomicBool>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     diagnostics_enabled: bool,
     worker_handle: CaptureWorkerHandle,
     resampler_kind: ResamplerKind,
@@ -273,6 +275,16 @@ impl WasapiAudioCaptureBackend {
     /// Retorna a estratégia de reamostragem ativa no backend de captura.
     pub fn resampler_kind(&self) -> ResamplerKind {
         self.resampler_kind
+    }
+
+    /// Retorna o identificador do dispositivo de captura configurado, se especificado.
+    pub fn device_id(&self) -> Option<&str> {
+        self.device_id.as_deref()
+    }
+
+    /// Informa se o modo de diagnóstico de áudio detalhado está habilitado no backend.
+    pub fn is_diagnostics_enabled(&self) -> bool {
+        self.diagnostics_enabled
     }
 
     /// Resample linear de uma sequência mono de amostras `i16` para a taxa de amostragem alvo.
@@ -990,8 +1002,11 @@ mod winmm_mci {
 /// e tradução formal de códigos de erro do Windows via `mciGetErrorStringA`.
 #[derive(Debug)]
 pub struct MciAudioCaptureBackend {
+    #[cfg_attr(not(windows), allow(dead_code))]
     alias: Arc<Mutex<Option<String>>>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     temp_path: Arc<Mutex<Option<std::path::PathBuf>>>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     is_recording: Arc<AtomicBool>,
 }
 

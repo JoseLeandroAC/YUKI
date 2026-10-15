@@ -114,6 +114,7 @@ pub fn is_live_audio_test_allowed() -> bool {
 #[derive(Debug)]
 pub struct WindowsAudioPlaybackSink {
     policy: AudioOutputPolicy,
+    #[cfg_attr(not(windows), allow(dead_code))]
     current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
 }
 
@@ -718,6 +719,7 @@ pub mod wasapi_render_ffi {
 #[derive(Debug)]
 pub struct WasapiAudioPlaybackSink {
     device_id: Option<String>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     policy: AudioOutputPolicy,
     is_playing: Arc<AtomicBool>,
     current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
@@ -757,6 +759,11 @@ impl WasapiAudioPlaybackSink {
 
     pub fn device_id(&self) -> Option<&str> {
         self.device_id.as_deref()
+    }
+
+    /// Retorna a política de saída de áudio ativa no sink.
+    pub fn policy(&self) -> AudioOutputPolicy {
+        self.policy
     }
 
     #[cfg(windows)]
