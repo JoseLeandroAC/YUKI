@@ -1,5 +1,4 @@
 use crate::contracts::voice::{AudioOutput, VoiceError};
-#[cfg(windows)]
 use crate::voice::audio::AudioCodec;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
