@@ -80,6 +80,10 @@ pub struct LocalWhisperConfig {
     pub best_of: Option<u32>,
     /// Desativa o fallback de temperatura ao decodificar (-nf / --no-fallback)
     pub no_fallback: bool,
+    /// Estratégia de detecção de silêncio acústico pré-normalização (padrão: Legacy / `is_silent_pcm`).
+    pub silence_detector: crate::voice::stt::silence::SilenceDetectorKind,
+    /// Teto máximo de ganho em dB para normalização de amplitude (None = sem teto, padrão).
+    pub max_gain_db: Option<f32>,
 }
 
 impl LocalWhisperConfig {
@@ -172,6 +176,21 @@ impl LocalWhisperConfig {
     pub fn is_fast_mode(&self) -> bool {
         self.beam_size == Some(1) && self.best_of == Some(1) && self.no_fallback
     }
+
+    /// Configura a estratégia de detecção de silêncio acústico pré-normalização.
+    pub fn with_silence_detector(
+        mut self,
+        detector: crate::voice::stt::silence::SilenceDetectorKind,
+    ) -> Self {
+        self.silence_detector = detector;
+        self
+    }
+
+    /// Configura o teto máximo de ganho em dB para normalização de amplitude (ex: Some(18.0)).
+    pub fn with_max_gain_db(mut self, max_gain_db: Option<f32>) -> Self {
+        self.max_gain_db = max_gain_db;
+        self
+    }
 }
 
 impl Default for LocalWhisperConfig {
@@ -226,6 +245,17 @@ impl Default for LocalWhisperConfig {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let silence_detector = match std::env::var("YUKI_VOICE_SILENCE_DETECTOR").as_deref() {
+            Ok("windowed") => crate::voice::stt::silence::SilenceDetectorKind::Windowed(
+                crate::voice::stt::silence::WindowedSilenceConfig::default(),
+            ),
+            _ => crate::voice::stt::silence::SilenceDetectorKind::Legacy,
+        };
+
+        let max_gain_db = std::env::var("YUKI_VOICE_MAX_GAIN_DB")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok());
+
         Self {
             binary_path,
             model_path,
@@ -238,6 +268,8 @@ impl Default for LocalWhisperConfig {
             beam_size,
             best_of,
             no_fallback,
+            silence_detector,
+            max_gain_db,
         }
     }
 }
@@ -675,7 +707,14 @@ impl LocalWhisperSttProvider {
         // 5. Curto-circuito econômico: verifica silêncio acústico ANTES da normalização.
         // Se verificado após a normalização, o piso de ruído seria artificialmente amplificado,
         // mascarando o silêncio e gerando alucinações acústicas no modelo.
-        if is_silent_pcm(&mono_samples) {
+        let is_silent = match &self.config.silence_detector {
+            crate::voice::stt::silence::SilenceDetectorKind::Legacy => is_silent_pcm(&mono_samples),
+            crate::voice::stt::silence::SilenceDetectorKind::Windowed(w_cfg) => {
+                crate::voice::stt::silence::is_silent_windowed(&mono_samples, 16000, w_cfg)
+            }
+        };
+
+        if is_silent {
             tracing::debug!(
                 "Áudio identificado como silêncio acústico; transcrição concluída vazia."
             );
@@ -701,7 +740,7 @@ impl LocalWhisperSttProvider {
 
         // 6. Normaliza amplitude com margem de segurança contra saturação (clipping)
         let t_norm_start = std::time::Instant::now();
-        AudioCodec::normalize_amplitude(&mut mono_samples, 28000);
+        AudioCodec::normalize_amplitude_bounded(&mut mono_samples, 28000, self.config.max_gain_db);
 
         // Re-codifica áudio WAV normalizado para entrega ao processo do whisper
         let norm_format = crate::contracts::voice::AudioFormat {

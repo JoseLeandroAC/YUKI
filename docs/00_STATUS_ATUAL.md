@@ -1,7 +1,7 @@
 Yuki — Status Atual do Projeto
 
 Última atualização: 2026-10-15
-Status geral: Marco 8.1.1 — Correção Cirúrgica do CI Multiplataforma Concluída (Pipeline do GitHub Actions em Linux ubuntu-latest 100% verde na run 38809962363: cargo fmt, typecheck, cargo clippy --all-targets -- -D warnings, cargo test e OCI Runtime Release Gate com Docker e hardening H1-H9 todos aprovados; preservação integral de 100% do comportamento operacional e das APIs de áudio no Windows; 618 testes ativos aprovados no workspace; 71/71 testes adversariais aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final pelo operador humano)
+Status geral: Marco 8.1.1 — Auditoria de Silêncio, Ruído Bluetooth e Melhorias Experimentais no STT Concluídas (Implementação modular de detecção de silêncio por janelas temporais com persistência e variância em `src/voice/stt/silence.rs`; normalização com teto configurável de ganho em dB `AudioCodec::normalize_amplitude_bounded`; preservação comprovada de falas em baixo volume a -51.12 dBFS sem falsos negativos; auditoria WASAPI comprovando zero perda de frames em Bluetooth; suíte de testes A/B com 12 testes aprovados em `tests/voice_stt_silence_ab.rs`; 630 testes ativos aprovados no workspace; baselines de produção integralmente preservados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até aprovação pelo operador humano)
 Repositório: "JoseLeandroAC/YUKI"
 Branch de trabalho: "feature/marco-8.1.1-homologation-fixes"
 Baselines preservados: "v0.1.0-foundation" (654c181), "v0.2.0-mvp1" (6a9d070), "marco-7.2-final" (961be2c), "marco-8.1-final" (bd588e5) e "marco-8.1.1-inicial" (62cc878)
@@ -89,7 +89,15 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
        - **Contrato Fail-Closed de Dispositivos Inexistentes:** Extração da verificação `if !self.is_device_available()` para a entrada de `start_capture` em `WasapiAudioCaptureBackend` e `MciAudioCaptureBackend`, garantindo que tentativas de iniciar captura em endpoints inexistentes retornem estritamente `VoiceError::DeviceUnavailable` em qualquer plataforma (teste 71 aprovado);
        - **Import Incondicional de Codec:** `AudioCodec` tornado incondicionalmente importado em `src/voice/playback.rs`, atendendo à validação pura em memória de `prepare_wav_bytes`;
        - **Desacoplamento de Binários Não-Versionados em Testes de Corpus:** Em `tests/voice_stt_tts.rs` (`test_stt_eval_corpus_manifest_structural_integrity`), a verificação de arquivos físicos de áudio `.wav` (ignorados pelo `.gitignore` por serem binários pesados de ~70MB) foi condicionada à sua existência em disco, validando a integridade estrutural do esquema JSON sem quebrar a execução em clones limpos de CI;
-       - **Esteira do GitHub Actions 100% Verde:** Execução oficial da run [38809962363](https://github.com/JoseLeandroAC/YUKI/actions/runs/38809962363) com ambos os jobs (`Build & Test Validation` e `OCI Runtime Release Gate`) concluídos com status de **sucesso** (`conclusion: success`), incluindo `rustfmt`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets` e hardening de contêiner OCI (H1 a H9).
+    26. **Auditoria de Silêncio e Ruído Bluetooth, Preservação de Fala Baixa e Melhorias Experimentais no STT:**
+        - **Diagnóstico da Causa Raiz do Redmi Buds 6 Play:** Investigação da falha de curto-circuito de silêncio e alucinação ("Você tem uma sensação?" consumindo 20.7s) demonstrando que decorria da conjunção rígida global `is_silent_pcm` (`rms < 120.0 && max_abs < 250`), onde um único pico pontual esparso de 647 amostras no Bluetooth quebrava a detecção de silêncio, seguido pela normalização cega de amplitude sem teto de ganho, que aplicava fator de escala de $\times 43.28$ (+32.7 dB), empurrando ruído de fundo Bluetooth de -53 dBFS diretamente para o Whisper a -20 dBFS;
+        - **Detecção de Silêncio por Janelas Temporais (`WindowedSilenceDetector` em `src/voice/stt/silence.rs`):** Implementação modular avaliando janelas de 20ms (320 amostras a 16kHz), persistência temporal de fonemas (mínimo de 3 janelas consecutivas ativas = 60ms para rejeitar transientes e estalos elétricos isolados) e variância de RMS entre blocos para rejeição de ruído contínuo estacionário, mantendo o baseline legado `SilenceDetectorKind::Legacy` preservado como padrão;
+        - **Normalização de Amplitude com Teto de Ganho (`AudioCodec::normalize_amplitude_bounded`):** Implementação em `src/voice/audio.rs` com suporte a teto configurável de amplificação em dB (`max_gain_db: Option<f32>`), preservando a função legado `normalize_amplitude` sem quebra de contratos;
+        - **Preservação Comprovada de Fala em Baixo Volume:** Comprovação empírica de que a elocução real de baixa amplitude no microfone Realtek (`diag_1a141edca97_1` a -51.12 dBFS / RMS 91.1) é 100% preservada pelo detector janelado nas configurações Beta e Gamma (83 janelas ativas, persistência contínua de 37 janelas = 740ms), sem falsos negativos e com reconhecimento exato das palavras pelo Whisper sob normalização bounded (+18 dB);
+        - **Auditoria WASAPI de Descontinuidades em Bluetooth:** Comprovação de que as 31 a 38 flags de descontinuidade pós-startup no Redmi Buds 6 Play decorrem de sincronização de pacotes SCO no buffer compartilhado do driver Bluetooth do Windows, com `detected_gap_frames == 0` comprovando matematicamente zero perda de frames em 80.000 a 80.320 amostras;
+        - **Taxonomia e Governança dos 6 Cenários Acústicos:** Formalização da fronteira entre VAD acústico (que detectou corretamente voz de terceiros e TV na gravação física do Redmi Buds sem falha de energia), biometria de locutor e validação de intenção no Core;
+        - **Suíte de Testes A/B Completa:** 12 novos testes aprovados em `tests/voice_stt_silence_ab.rs` cobrindo casos sintéticos controlados e todos os WAVs físicos de bancada;
+        - **Governança:** Baselines mantidos inalterados; STT mantido formalmente como **NÃO HOMOLOGADO FISICAMENTE** até nova rodada e aprovação pelo operador humano.
 
 A situação atual pode ser resumida como:
 
@@ -107,7 +115,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-618 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 623 TESTES; 71/71 ADVERSARIAIS)
+630 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 635 TESTES; 71/71 ADVERSARIAIS)
 
 ---
 

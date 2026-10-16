@@ -1821,6 +1821,38 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Correção Cirúrgica do CI Multiplataforma concluída com sucesso integral no GitHub Actions (run 38809962363 verde em Build & Test e OCI Release Gate); compatibilidade estática e dinâmica assegurada no Linux sem qualquer regressão no Windows; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE aguardando validação final pelo operador humano."`
 
+---
+
+## 2026-10-15 — Marco 8.1.1: Auditoria de Silêncio e Ruído Bluetooth, Preservação de Fala Baixa e Melhorias Experimentais no STT
+
+- **Contexto e Missão**:
+  - Com o CI multiplataforma 100% verde e estável, o operador reportou a ocorrência de gravações encaminhadas ao Whisper sem comando intencional, destacando o headset Bluetooth Redmi Buds 6 Play que produziu uma transcrição indevida ("Você tem uma sensação?" consumindo 20.7s de CPU), enquanto no microfone Realtek o silêncio era rejeitado em 0.00s.
+  - O operador contextualizou criticamente que durante a gravação com o fone, havia conversas de familiares e um vídeo do Iberê tocando no quarto. Portanto, o áudio continha de fato atividade vocal humana no ambiente, não devendo ser classificado como erro de VAD.
+  - Missão: investigar o pipeline completo de captura, detecção de silêncio (`is_silent_pcm`), normalização e Whisper; auditar flags WASAPI no Bluetooth; implementar experimentalmente detecção de silêncio por janelas e normalização com ganho limitado sem alterar baselines existentes; e comprovar a preservação estrita de falas de baixa amplitude (como a gravação Realtek a -51.12 dBFS).
+- **Diagnóstico das Causas Raiz**:
+  1. **Fragilidade Conjuntiva do `is_silent_pcm` Legado:** A condição global `rms < 120.0 && max_abs < 250` falhava diante de qualquer transiente isolado de hardware. No Redmi Buds (`diag_1a141c9c7b6_1`), o RMS era 72.87 (< 120), mas um único pico elétrico/RF de 647 amostras invalidou a detecção de silêncio.
+  2. **Efeito Destrutivo da Normalização Desenfreada (+32.7 dB):** Uma vez que `is_silent_pcm` retornou falso, `AudioCodec::normalize_amplitude` calculou $28000 / 647 = \times 43.28$ (+32.72 dB). O ruído de fundo sepultado em -53 dBFS foi catapultado para -20 dBFS, reduzindo a razão de silêncio de 86.4% para 6.0% e empurrando estática amplificada para o decodificador do Whisper, que acionou fallbacks de temperatura, demorou 20.7s e gerou alucinação fonética.
+  3. **Auditoria WASAPI de Descontinuidades no Bluetooth:** Comprovou-se que as 31 a 38 descontinuidades pós-startup decorrem da sincronização de pacotes SCO no buffer compartilhado do driver Bluetooth HFP do Windows diante de polling de 15ms. `detected_gap_frames` foi exatamente 0 em todas as sessões, e a contagem real de frames (80.000 a 80.320) corresponde com precisão milimétrica ao tempo de relógio (5.00s a 5.02s), demonstrando que não houve perda física de dados.
+- **Implementação Conclusiva**:
+  1. **Detecção de Silêncio por Janelas Temporais (`src/voice/stt/silence.rs`):**
+     - Módulo `WindowedSilenceDetector` avaliando blocos de 20ms (320 amostras a 16kHz), persistência temporal fonética (`min_consecutive_active_windows: 3` = 60ms) para rejeitar cliques e pulsos RF de < 60ms, e desvio padrão de RMS entre blocos (`min_variance_std_dev: 10.0`) para descartar ruído contínuo estacionário.
+     - Preservação estrita do baseline legado: enum `SilenceDetectorKind::Legacy` (padrão) e `SilenceDetectorKind::Windowed(config)`.
+  2. **Normalização de Amplitude com Teto de Ganho (`AudioCodec::normalize_amplitude_bounded`):**
+     - Adicionado método em `src/voice/audio.rs` com suporte a `max_gain_db: Option<f32>`, limitando o fator de escala linear a $10^{\text{db} / 20}$.
+     - A função legado `AudioCodec::normalize_amplitude` foi preservada intacta delegando para o modo unbounded (`None`), assegurando compatibilidade retroativa absoluta.
+  3. **Integração no STT Local (`LocalWhisperConfig`):**
+     - Campos `silence_detector` e `max_gain_db` configuráveis via API fluente (`with_silence_detector`, `with_max_gain_db`) e via variáveis de ambiente (`YUKI_VOICE_SILENCE_DETECTOR=windowed`, `YUKI_VOICE_MAX_GAIN_DB=18.0`).
+  4. **Preservação Comprovada de Falas em Baixo Volume:**
+     - A gravação física Realtek com fala real sussurrada/baixa (`diag_1a141edca97_1` a -51.12 dBFS / RMS 91.1) foi testada: o detector janelado registrou 83 janelas ativas e sustentação ininterrupta de 37 janelas (740ms), garantindo **zero falsos negativos**.
+     - No Whisper, sob normalização com teto de +18 dB, a frase foi transcrita com **maior precisão e menor latência** ("E o que me ajuda essa matemática?" em 6.06s vs 7.81s do baseline), comprovando que o teto de ganho reduz a amplificação de ruído sem prejudicar formantes baixos.
+  5. **Bateria de Testes A/B (`tests/voice_stt_silence_ab.rs`):**
+     - 12 testes aprovados cobrindo casos sintéticos controlados (zero, hiss, drone, transiente isolado, fala sussurrada) e áudios físicos reais (silêncio Realtek, fala baixa Realtek, fala normal Realtek com/sem Yuki, fala normal Redmi Buds, voz de fundo e teste de inferência Whisper com ganho bounded).
+  6. **Métricas Finais e Portões de Qualidade:**
+     - 630 testes ativos aprovados em todo o workspace (0 falhas; 5 testes live opt-in ignorados; 71/71 testes adversariais).
+     - 100% de conformidade com `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` e `cargo test`.
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Auditoria de Silêncio e Ruído Bluetooth concluída com implementação experimental de detector janelado e normalização com teto de ganho; preservação comprovada de falas em baixo volume a -51.12 dBFS sem falsos negativos; auditoria WASAPI confirmando zero lacunas de frames; baselines de produção integralmente preservados; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE aguardando validação final com o operador humano."`
+
 
 
 

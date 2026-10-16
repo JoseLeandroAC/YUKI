@@ -359,20 +359,42 @@ impl AudioCodec {
         mono
     }
 
-    /// Normaliza amplitude das amostras para um pico desejado (ex: 28000 para margem de segurança contra clipping).
-    pub fn normalize_amplitude(samples: &mut [i16], target_peak: i16) {
+    /// Normaliza amplitude das amostras para um pico desejado com teto configurável de ganho em dB.
+    /// Se `max_gain_db` for `None`, a amplificação é plena até o pico alvo (comportamento baseline).
+    /// Se `max_gain_db` for `Some(db)`, o fator de ganho linear é limitado a 10^(db / 20).
+    /// Retorna o fator de escala linear efetivamente aplicado.
+    pub fn normalize_amplitude_bounded(
+        samples: &mut [i16],
+        target_peak: i16,
+        max_gain_db: Option<f32>,
+    ) -> f64 {
         if samples.is_empty() {
-            return;
+            return 1.0;
         }
         let current_peak = samples.iter().map(|&s| s.abs()).max().unwrap_or(0);
         if current_peak == 0 || current_peak == target_peak {
-            return;
+            return 1.0;
         }
-        let factor = (target_peak as f64) / (current_peak as f64);
+        let mut factor = (target_peak as f64) / (current_peak as f64);
+        if let Some(max_db) = max_gain_db {
+            if max_db > 0.0 {
+                let max_factor = 10.0_f64.powf((max_db as f64) / 20.0);
+                if factor > max_factor {
+                    factor = max_factor;
+                }
+            }
+        }
         for s in samples.iter_mut() {
             let val = (*s as f64 * factor).round();
             *s = val.clamp(-32768.0, 32767.0) as i16;
         }
+        factor
+    }
+
+    /// Normaliza amplitude das amostras para um pico desejado (ex: 28000 para margem de segurança contra clipping).
+    /// Preserva o contrato e comportamento legado do Marco 8.1 sem teto de ganho.
+    pub fn normalize_amplitude(samples: &mut [i16], target_peak: i16) {
+        let _ = Self::normalize_amplitude_bounded(samples, target_peak, None);
     }
 
     /// Calcula a energia RMS das amostras.
