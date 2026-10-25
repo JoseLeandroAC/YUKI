@@ -2100,19 +2100,21 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
   - Avaliados os modelos Zipformer Pruned Transducer `zh-en-3M` (fonético) e `gigaspeech-3.3M` (BPE), além de sua versão INT8.
   - Submetidos testes físicos contra o conjunto canônico de áudios em `data/voice_diag/` (fala com "Yuki", fala alheia, ruído ambiente e silêncio).
 
-- **Evidências e Métricas Empíricas**:
+- **Evidências e Métricas Empíricas (com Errata de Ground Truth)**:
   1. **Sanidade da Infraestrutura Técnica:** Validada com **100% de sucesso (2/2)** nos áudios oficiais de teste em inglês (`en_0.wav` detectando `LIGHT_UP` e `en_1.wav` detectando `LOVELY_CHILD` nos timestamps exatos).
   2. **Eficiência de Recursos Operacionais:** Carga fria única de 2.38s a 2.66s, *warm reset* de 0.00ms, consumo de memória de **~60MB a 65MB de RAM** (~85% de redução frente ao Whisper) e latência de **25ms a 35ms** por bloco de 100ms (**3.5x a 4.0x mais rápido que tempo real**; **9.6x** em blocos de 20ms).
-  3. **Incompatibilidade Acústica com PT-BR:** Inexistência de modelos oficiais em português no ecossistema `sherpa-onnx`. Todas as 8 variantes fonéticas CMU e 4 variantes BPE resultaram em **0 Verdadeiros Positivos (100% False Negatives)** nos áudios canônicos do operador em português brasileiro. Flexibilização extrema de limiares induziu Falso Positivo em áudio de sussurro.
+  3. **Comportamento em PT-BR e Reclassificação da Variante 3:** 
+     - A gravação física `canonical_16k_diag_1a141edca97_1.wav` (-51.12 dBFS Realtek) teve sua transcrição real humana confirmada como *"Yuki, me ajuda a estudar matemática."* (ground truth = POSITIVO).
+     - O disparo da **Variante 3 (`Y UW1 K IY1 @YUKI`)** aos 1.36s a 1.76s foi reclassificado como **VERDADEIRO POSITIVO (TP = 1)**, comprovando capacidade do Zipformer de detectar a palavra-chave em fala sussurrada suave com **zero falsos alarmes em todo o conjunto negativo (FP = 0)**.
+     - Sensibilidade geral em PT-BR: 33.3% (1/3), omitindo fala comprimida Bluetooth e fala contínua rápida. O modelo não é absolutamente incompatível, mas requer calibração acústica dedicada para atingir patamar de produção.
 
-- **Direcionamento Arquitetural e Governança**:
-  - Descarte do `sherpa-onnx` *off-the-shelf* para produção imediata devido à ausência de modelagem acústica em PT-BR.
-  - Recomendação de **Arquitetura em Dois Estágios**: Estágio 1 com VAD neural contínuo de ultrabaixa potência (Silero VAD ONNX, ~2MB, <1% CPU) acoplado ao Estágio 2 com modelo dedicado treinado sinteticamente via `openWakeWord` para "Yuki" em PT-BR.
-  - Relatório formal registrado em `docs/audits/MARCO_8_1_1_WAKE_WORD_KWS_EXPERIMENT_REPORT.md`.
+- **Direcionamento Arquitetural e Governança (Transição para o Marco 8.1.2)**:
+  - Encerramento formal do Marco 8.1.1 preservando o status de homologação física pendente.
+  - Abertura da fase experimental do Marco 8.1.2 para desenvolvimento de Wake Word personalizado via `openWakeWord` com treinamento sintético PT-BR e estudo comparativo de arquitetura com/sem Silero VAD.
   - O modo Push-to-Talk (PTT) permanece como o padrão exclusivo e homologado de produção.
 
 - **Declaração Oficial**:
-  - `"Marco 8.1.1 — Experimento de Wake Word dedicado com sherpa-onnx KWS concluído; infraestrutura operacional validada com 100% de sanidade e consumo reduzido de ~60MB RAM; inviabilidade acústica de modelos pré-treinados em português comprovada empiricamente (0% TP em PT-BR); arquitetura futura direcionada para Silero VAD + openWakeWord em dois estágios; subsistema de Wake Word permanece formalmente classificado como NÃO HOMOLOGADO FISICAMENTE."`
+  - `"Marco 8.1.1 — Experimento de Wake Word dedicado concluído com errata do ground truth registrada; verdadeiro positivo comprovado na Variante 3 (TP=1, FP=0 em PT-BR); taxa de falso positivo zero em todos os negativos; transição formal para o Marco 8.1.2 autorizada para investigação de modelo personalizado openWakeWord e avaliação de Silero VAD; subsistema de ativação contínua por voz permanece formalmente NÃO HOMOLOGADO FISICAMENTE."`
 
 
 

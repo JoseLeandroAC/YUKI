@@ -23,16 +23,16 @@ Foi implementada uma Prova de Conceito (PoC) autônoma e isolada em `scratch/kws
    - **Latência de Processamento:** Decodificação de blocos de 100ms realizada em 25ms a 35ms (fator de aceleração de **3.5x a 4.0x em relação ao tempo real**). Em blocos granulares de 20ms, alcançou **9.6x tempo real**.
    - **Sanidade Técnica Confirmada:** Nos áudios de calibração em inglês (`en_0.wav` e `en_1.wav`), o motor detectou com **100% de acerto (2/2)** as palavras-chave nativas (`LIGHT_UP` e `LOVELY_CHILD`) nos timestamps exatos.
 
-2. **Inviabilidade Acústica dos Modelos Pré-treinados em Português Brasileiro (PT-BR):**  
+2. **Comportamento Acústico dos Modelos Pré-treinados em Português Brasileiro (PT-BR):**  
    - Não existem modelos KWS pré-treinados oficiais para língua portuguesa no catálogo do `sherpa-onnx`.
-   - A hipótese de reconhecimento *zero-shot* da pronúncia brasileira "Yuki" ([ˈju.ki]) através de dicionários fonéticos CMU (`en.phone`) ou tokenização BPE foi **empiricamente refutada**: em todas as 8 variantes fonéticas e 4 variantes BPE testadas sobre os áudios canônicos reais do operador, foram obtidos **0 Verdadeiros Positivos (100% False Negatives)**.
-   - A flexibilização excessiva do limiar acústico (boost +3.0 e threshold #0.05) gerou **Falso Positivo** em áudio de sussurro sem a palavra-chave.
+   - **Correção da Base Experimental (Errata):** A gravação canônica `canonical_16k_diag_1a141edca97_1.wav` (-51.12 dBFS, microfone Realtek) foi confirmada com a elocução real do operador: *"Yuki, me ajuda a estudar matemática."* (ground truth = POSITIVO).
+   - **Reclassificação da Variante 3 (`Y UW1 K IY1 @YUKI`):** Ao contrário da inferência inicial de falso alarme, a ativação aos **1.36s a 1.76s** correspondeu exatamente à elocução da palavra-chave pelo operador, constituindo um **VERDADEIRO POSITIVO (TP = 1)** em fala de baixa amplitude!
+   - **Especificidade e Rejeição:** Em todas as configurações testadas, a taxa de falsos positivos nos áudios sem Yuki (silêncio, conversa alheia e fala sem a palavra-chave) foi de **0% (FP = 0)**.
+   - **Limitação de Sensibilidade Geral:** Nas frases em volume normal com compressão Bluetooth (`canonical_16k_diag_1a141d14d0f_1.wav`) e fala contínua mais rápida (`canonical_16k_diag_1a136305f7a_1.wav`), os modelos pré-treinados em inglês omitiram a ativação (FN = 2). A sensibilidade geral obtida de 33.3% (1 de 3) demonstra que o modelo não é totalmente incompatível, mas requer calibração acústica específica para PT-BR para atingir confiabilidade de produção (>90%).
 
-3. **Direcionamento Arquitetural:**  
-   - O uso do `sherpa-onnx` *off-the-shelf* está descartado para produção.
-   - A arquitetura recomendada para a YUKI consiste em um **Pipeline em Dois Estágios**:
-     - **Estágio 1 (Gate de Baixa Potência):** VAD Neural Contínuo (**Silero VAD ONNX**, modelo de ~2MB, <1% de CPU, 15MB RAM).
-     - **Estágio 2 (Reconhecedor Especializado):** Modelo KWS treinado sinteticamente via **openWakeWord** para a palavra "Yuki" em PT-BR (ONNX dedicado de ~3MB) OU STT pré-condicionado ativado sob demanda.
+3. **Direcionamento Arquitetural (Transição para o Marco 8.1.2):**  
+   - O uso do `sherpa-onnx` *off-the-shelf* não atende aos requisitos de cobertura ampla sem treino em PT-BR.
+   - O Marco 8.1.2 investigará um modelo personalizado treinado para "Yuki" via **openWakeWord** em conjunto com uma avaliação comparativa entre KWS contínuo direto e KWS com **Silero VAD** em dois estágios.
 
 ---
 
@@ -51,9 +51,9 @@ Foram submetidas à PoC as gravações canônicas de bancada em 16kHz PCM mono/d
 |---|---|---|---|---|
 | `canonical_16k_diag_1a141d14d0f_1.wav` | 5.01s | Normal (Redmi Buds 6 Play) | *"Yuki, que horas são?"* | **SIM (Alvo 1)** |
 | `canonical_16k_diag_1a136305f7a_1.wav` | 10.00s | Normal (Realtek 48k->16k) | *"Olá, Yuki. Meu nome é José..."* | **SIM (Alvo 2)** |
+| `canonical_16k_diag_1a141edca97_1.wav` | 5.04s | Fala baixa (-51 dBFS, Realtek) | *"Yuki, me ajuda a estudar matemática."* | **SIM (Alvo 3)** |
 | `canonical_16k_diag_1a1420049f7_1.wav` | 5.01s | Normal (Realtek) | *"Hoje vou estudar matemática para a FUVEST."* | **NÃO (Rejeição)** |
 | `canonical_16k_diag_1a141c9c7b6_1.wav` | 5.00s | Ruído ambiente / vozes de terceiros | Conversa de terceiros / vídeo | **NÃO (Rejeição)** |
-| `canonical_16k_diag_1a141edca97_1.wav` | 5.04s | Fala baixa (-51 dBFS, Realtek) | Sussurro do operador sem Yuki | **NÃO (Rejeição)** |
 | `canonical_16k_diag_1a142036d81_1.wav` | 5.01s | Silêncio puro (-67 dBFS, Realtek) | Ruído elétrico de bancada | **NÃO (Rejeição)** |
 
 ---
@@ -68,38 +68,41 @@ Foram submetidas à PoC as gravações canônicas de bancada em 16kHz PCM mono/d
   - Palavra-chave: `L AH1 V L IY0 CH AY1 L D @LOVELY_CHILD`
   - **Resultado:** **Detectado com sucesso**. Timestamps: `[5.24s, 5.32s, 5.40s, 5.48s, 5.56s, 5.68s, 5.84s, 5.92s, 5.96s]`.
 
-A verificação comprovou o funcionamento perfeito do motor, demonstrando que a falha em português decorre do desacoplamento acústico-fonético e não de falha de implementação.
+A verificação comprovou o funcionamento perfeito do motor, demonstrando que o subsistema em Rust / ONNX Runtime opera em estrita conformidade com os modelos.
 
 ### 3.2 Avaliação no Modelo Fonético `zh-en-3M` (Streaming de Chunks de 100ms)
 - **Tempo de Carga Fria:** 2380.37 ms.
 - **RAM pós-carga:** 60.41 MB (delta: +50.48 MB).
 
-| Variante Fonética | Transcrição Fonética CMU | TP | FP | TN | FN | Observação |
+| Variante Fonética | Transcrição Fonética CMU | TP | FP | TN | FN | Observação Acústica |
 |---|---|:---:|:---:|:---:|:---:|---|
-| **Variante 1** | `Y UW1 K IY0 @YUKI` | 0 | 0 | 4 | 2 | Padrão /'ju:ki/ tônica U. |
-| **Variante 2** | `Y UW0 K IY1 @YUKI` | 0 | 0 | 4 | 2 | Oxítona tônica I. |
-| **Variante 3** | `Y UW1 K IY1 @YUKI` | 0 | **1** | 3 | 2 | **Falso Positivo** em `1a141edca97_1.wav` (1.36s a 1.76s). |
-| **Variante 4** | `Y UW0 K IY0 @YUKI` | 0 | 0 | 4 | 2 | Átona. |
-| **Variante 5** | `Y UW1 K IY0 :2.0 #0.15 @YUKI` | 0 | 0 | 4 | 2 | Boost moderado (+2.0). |
-| **Variante 6** | `Y UW1 K IY0 :3.0 #0.05 @YUKI` | 0 | 0 | 4 | 2 | Boost extremo (+3.0) e threshold permissivo. |
-| **Variante 7** | `Y UW0 K IY1 :2.0 #0.15 @YUKI` | 0 | 0 | 4 | 2 | Oxítona com boost. |
-| **Variante 8** | `Y UW0 K IY1 :3.0 #0.05 @YUKI` | 0 | 0 | 4 | 2 | Oxítona com boost extremo. |
+| **Variante 1** | `Y UW1 K IY0 @YUKI` | 0 | 0 | 3 | 3 | Padrão /'ju:ki/ tônica U. |
+| **Variante 2** | `Y UW0 K IY1 @YUKI` | 0 | 0 | 3 | 3 | Oxítona tônica I. |
+| **Variante 3** | `Y UW1 K IY1 @YUKI` | **1** | **0** | **3** | **2** | **VERDADEIRO POSITIVO** em `1a141edca97_1.wav` (1.36s a 1.76s); **0 falsos positivos**. |
+| **Variante 4** | `Y UW0 K IY0 @YUKI` | 0 | 0 | 3 | 3 | Átona. |
+| **Variante 5** | `Y UW1 K IY0 :2.0 #0.15 @YUKI` | 0 | 0 | 3 | 3 | Boost moderado (+2.0). |
+| **Variante 6** | `Y UW1 K IY0 :3.0 #0.05 @YUKI` | 0 | 0 | 3 | 3 | Boost extremo (+3.0) e threshold permissivo. |
+| **Variante 7** | `Y UW0 K IY1 :2.0 #0.15 @YUKI` | 0 | 0 | 3 | 3 | Oxítona com boost. |
+| **Variante 8** | `Y UW0 K IY1 :3.0 #0.05 @YUKI` | 0 | 0 | 3 | 3 | Oxítona com boost extremo. |
+
+> **Destaque Empírico da Variante 3:**
+> Ao modelar ambas as vogais com tonicidade (`Y UW1 K IY1`), o alinhador acústico casou com a energia espectral de formantes da palavra "Yuki" falada a -51.12 dBFS no microfone Realtek, registrando a ativação exatamente no intervalo [1.36s, 1.76s] com **zero disparos espúrios** em todo o conjunto negativo (silêncio, terceiros e fala alheia).
 
 ### 3.3 Avaliação no Modelo BPE `gigaspeech-3.3M` (SentencePiece)
-- **Tempo de Carga Fria:** 2668.49 ms.
-- **RAM pós-carga:** 63.44 MB (delta: +53.52 MB).
+- **Tempo de Carga Fria:** 2468.71 ms.
+- **RAM pós-carga:** 102.48 MB.
 
 | Variante BPE | Configuração de Tokens | TP | FP | TN | FN |
 |---|---|:---:|:---:|:---:|:---:|
-| **Variante BPE 1** | `▁ Y U K I @YUKI` | 0 | 0 | 4 | 2 |
-| **Variante BPE 2** | `Y U K I @YUKI` | 0 | 0 | 4 | 2 |
-| **Variante BPE 3** | `▁ Y U K I :2.0 #0.15 @YUKI` | 0 | 0 | 4 | 2 |
-| **Variante BPE 4** | `▁ Y U K I :3.0 #0.05 @YUKI` | 0 | 0 | 4 | 2 |
+| **Variante BPE 1** | `▁ Y U K I @YUKI` | 0 | 0 | 3 | 3 |
+| **Variante BPE 2** | `Y U K I @YUKI` | 0 | 0 | 3 | 3 |
+| **Variante BPE 3** | `▁ Y U K I :2.0 #0.15 @YUKI` | 0 | 0 | 3 | 3 |
+| **Variante BPE 4** | `▁ Y U K I :3.0 #0.05 @YUKI` | 0 | 0 | 3 | 3 |
 
 ### 3.4 Modelo Quantizado INT8 (`zh-en-3M INT8`)
-- **Tempo de Carga Fria:** 3657.50 ms.
-- **RAM pós-carga:** 85.04 MB.
-- **Acurácia em PT-BR:** 0 TP, 0 FP, 4 TN, 2 FN.
+- **Tempo de Carga Fria:** 2574.15 ms.
+- **RAM pós-carga:** 100.62 MB.
+- **Acurácia em PT-BR:** 0 TP, 0 FP, 3 TN, 3 FN.
 
 ### 3.5 Streaming Granular em Blocos Curtos de 20ms
 - No áudio canônico `canonical_16k_diag_1a141d14d0f_1.wav` (5.01s):
