@@ -201,6 +201,17 @@ impl VoiceConversationCoordinator {
 
         match turn_result {
             Ok(output) => {
+                // Se a sessão foi assinalada como Interrupted concorrentemente durante o turno,
+                // cancela o sink de reprodução e rejeita transição para Idle.
+                if self.session_manager.is_interrupted(
+                    device_id,
+                    &session.session_id,
+                    session.generation,
+                ) {
+                    let _ = self.playback.interrupt();
+                    guard.mark_completed();
+                    return Err(VoiceError::Interrupted);
+                }
                 session.transition_to(VoiceSessionState::Idle)?;
                 session.in_flight = false;
                 self.session_manager.update_session(&session);
@@ -210,11 +221,29 @@ impl VoiceConversationCoordinator {
             Err(e) => {
                 let err_str = e.to_string();
                 let phase = session.state.to_string();
-                if session.state != VoiceSessionState::Idle {
-                    let _ = session.transition_to(VoiceSessionState::Failed(err_str.clone()));
+                let is_interrupted_error = matches!(e, VoiceError::Interrupted)
+                    || self.session_manager.is_interrupted(
+                        device_id,
+                        &session.session_id,
+                        session.generation,
+                    );
+
+                if is_interrupted_error {
+                    session.in_flight = false;
+                    let _ = session.transition_to(VoiceSessionState::Interrupted);
+                    self.session_manager.finish_operation(
+                        device_id,
+                        &session_id,
+                        session.generation,
+                        Some(VoiceSessionState::Interrupted),
+                    );
+                } else {
+                    if session.state != VoiceSessionState::Idle {
+                        let _ = session.transition_to(VoiceSessionState::Failed(err_str.clone()));
+                    }
+                    session.in_flight = false;
+                    self.session_manager.update_session(&session);
                 }
-                session.in_flight = false;
-                self.session_manager.update_session(&session);
                 guard.mark_completed();
 
                 let error_kind = match &e {
@@ -264,27 +293,39 @@ impl VoiceConversationCoordinator {
     ) -> Result<(YukiResult, AudioOutput), VoiceError> {
         // 1. Captura
         session.transition_to(VoiceSessionState::Capturing)?;
-        self.session_manager.update_session(session);
-
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
 
         // 2. Transcrição (STT)
         session.transition_to(VoiceSessionState::Transcribing)?;
-        self.session_manager.update_session(session);
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         let transcribed_text = self
             .router
             .transcribe(&audio_input, allow_cloud_stt)
             .await?;
 
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
@@ -314,11 +355,12 @@ impl VoiceConversationCoordinator {
 
         // 3. Processamento no YukiCore
         session.transition_to(VoiceSessionState::Processing)?;
-        self.session_manager.update_session(session);
-
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
@@ -330,25 +372,39 @@ impl VoiceConversationCoordinator {
             .await
             .map_err(|e| VoiceError::TranscriptionFailed(format!("Erro no Core: {}", e)))?;
 
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
 
         // 4. Síntese de Voz (TTS)
         session.transition_to(VoiceSessionState::Synthesizing)?;
-        self.session_manager.update_session(session);
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         let audio_output = self
             .router
             .synthesize(&user_output.content, allow_cloud_tts)
             .await?;
 
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
@@ -369,16 +425,26 @@ impl VoiceConversationCoordinator {
 
         // 5. Inicia reprodução segura
         session.transition_to(VoiceSessionState::Speaking)?;
-        self.session_manager.update_session(session);
-
-        if self
-            .session_manager
-            .is_interrupted(device_id, &session.session_id, session.generation)
+        if !self.session_manager.update_session(session)
+            || self.session_manager.is_interrupted(
+                device_id,
+                &session.session_id,
+                session.generation,
+            )
         {
             return Err(VoiceError::Interrupted);
         }
 
         self.playback.play(&audio_output)?;
+
+        // Verificação pós-disparo para mitigar corrida entre check e início do playback:
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id, session.generation)
+        {
+            let _ = self.playback.interrupt();
+            return Err(VoiceError::Interrupted);
+        }
 
         Ok((user_output, audio_output))
     }
@@ -467,7 +533,8 @@ impl Drop for SessionTurnGuard {
 
 /// Sanitiza mensagens de erro técnicas antes da persistência no registro de auditoria,
 /// prevenindo a exposição acidental de credenciais, chaves, senhas ou payloads excessivos.
-fn sanitize_error_for_audit(err: &str) -> String {
+/// Garante truncamento respeitando estritamente os limites de caracteres válidos em UTF-8.
+pub fn sanitize_error_for_audit(err: &str) -> String {
     let mut sanitized = err.to_string();
     let sensitive_keys = [
         "bearer ",
@@ -485,9 +552,15 @@ fn sanitize_error_for_audit(err: &str) -> String {
             break;
         }
     }
-    // Trunca mensagens excessivamente longas para evitar exaustão de payload no SQLite
-    if sanitized.len() > 500 {
-        sanitized.truncate(500);
+    // Trunca mensagens excessivamente longas respeitando fronteiras de caracteres válidas em UTF-8
+    // para evitar exaustão de payload no SQLite e pânico ao fatiar no meio de caractere multibyte.
+    const MAX_AUDIT_ERROR_BYTES: usize = 500;
+    if sanitized.len() > MAX_AUDIT_ERROR_BYTES {
+        let mut boundary = MAX_AUDIT_ERROR_BYTES;
+        while boundary > 0 && !sanitized.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        sanitized.truncate(boundary);
         sanitized.push_str("... [truncated]");
     }
     sanitized

@@ -123,15 +123,17 @@ impl VoiceSessionManager {
         let mut lock = self.active_sessions.lock().unwrap();
 
         let next_generation = if let Some(existing) = lock.get(&dev) {
-            if !existing.is_timed_out() {
-                // Bloqueia novo turno se houver operação assíncrona ainda executando no hardware/core
-                if existing.in_flight {
-                    return Err(VoiceError::SessionConflict(format!(
-                        "Dispositivo '{}' possui operação assíncrona em andamento na sessão '{}' (estado '{}')",
-                        dev, existing.session_id, existing.state
-                    )));
-                }
+            // Precedência de in_flight: Bloqueia novo turno se houver operação assíncrona ainda
+            // executando fisicamente no hardware/subprocesso, INDEPENDENTE de timeout de inatividade.
+            // Timeout de inatividade sozinho NÃO é confirmação de encerramento do processo em andamento.
+            if existing.in_flight {
+                return Err(VoiceError::SessionConflict(format!(
+                    "Dispositivo '{}' possui operação assíncrona em andamento na sessão '{}' (estado '{}')",
+                    dev, existing.session_id, existing.state
+                )));
+            }
 
+            if !existing.is_timed_out() {
                 // Permite novo turno se a operação antiga já encerrou (Idle, Failed ou Interrupted)
                 let can_start_new_turn = existing.state == VoiceSessionState::Idle
                     || matches!(existing.state, VoiceSessionState::Failed(_))
@@ -163,15 +165,30 @@ impl VoiceSessionManager {
 
     /// Atualiza o estado da sessão ativa.
     ///
-    /// Proteção contra sobrescrita tardia:
-    /// Rejeita atualizações caso o `session_id` ou a `generation` da sessão fornecida
-    /// divirjam do registro ativo atual no dispositivo.
+    /// Proteção contra sobrescrita tardia e reversão de cancelamento:
+    /// 1. Rejeita atualizações caso o `session_id` ou a `generation` da sessão fornecida
+    ///    divirjam do registro ativo atual no dispositivo.
+    /// 2. Se a sessão ativa foi assinalada como `Interrupted`, rejeita atualizações da mesma geração
+    ///    que tentem reverter para estados em andamento (ex: Processing, Synthesizing, Speaking).
     pub fn update_session(&self, session: &VoiceSession) -> bool {
         let mut lock = self.active_sessions.lock().unwrap();
         if let Some(existing) = lock.get_mut(&session.device_id) {
             if existing.session_id == session.session_id
                 && existing.generation == session.generation
             {
+                if existing.state == VoiceSessionState::Interrupted
+                    && session.state != VoiceSessionState::Interrupted
+                {
+                    tracing::warn!(
+                        device_id = %session.device_id,
+                        session_id = %session.session_id,
+                        generation = session.generation,
+                        attempted_state = %session.state,
+                        "Rejeitada tentativa de sobrescrever estado Interrupted por atualização tardia na mesma geração"
+                    );
+                    return false;
+                }
+
                 *existing = session.clone();
                 return true;
             } else {

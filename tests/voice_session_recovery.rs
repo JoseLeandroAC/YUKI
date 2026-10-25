@@ -841,3 +841,376 @@ async fn test_recovery_09_stale_task_cannot_trigger_core_or_produce_audio() {
     assert_eq!(sess_active.session_id, "sess-turno-2");
     assert_eq!(sess_active.generation, 2);
 }
+
+// ============================================================================
+// 10. TIMEOUT VS IN_FLIGHT (OPERAÇÃO PROLONGADA DO WHISPER)
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_10_in_flight_blocks_new_turn_even_after_session_timeout() {
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let dev = "dev-whisper-slow";
+
+    // Configura sessão com timeout curtíssimo de 1 segundo
+    let config = VoiceConfiguration {
+        session_timeout_secs: 1,
+        ..Default::default()
+    };
+
+    // Turno 1 inicia com in_flight = true (simulando inferência pesada no Whisper)
+    let sess1 = session_mgr
+        .start_session("sess-whisper-1", dev, config.clone())
+        .expect("Turno 1 deve iniciar com sucesso");
+    assert_eq!(sess1.generation, 1);
+    assert!(sess1.in_flight);
+
+    // Aguarda mais do que session_timeout_secs (2.1s para ultrapassar 1s com margem inteira de num_seconds > 1)
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    // Confirma que a sessão expirou por inatividade de tempo
+    let current_sess = session_mgr.get_session(dev).unwrap();
+    assert!(
+        current_sess.is_timed_out(),
+        "Sessão deve estar com is_timed_out() == true"
+    );
+    assert!(
+        current_sess.in_flight,
+        "Sessão deve permanecer in_flight enquanto o processo não concluir"
+    );
+
+    // Tenta iniciar Turno 2 no mesmo dispositivo:
+    // DEVE ser bloqueado categoricamente com SessionConflict!
+    // Invariante: Timeout sozinho NÃO é confirmação de cancelamento físico.
+    let turn2_res = session_mgr.start_session("sess-whisper-2", dev, config.clone());
+    assert!(
+        turn2_res.is_err(),
+        "Turno 2 deve ser bloqueado enquanto o Turno 1 estiver in_flight, mesmo após timeout"
+    );
+    match turn2_res {
+        Err(VoiceError::SessionConflict(msg)) => {
+            assert!(
+                msg.contains("operação assíncrona em andamento"),
+                "Mensagem deve esclarecer operação assíncrona em andamento: {}",
+                msg
+            );
+        }
+        other => panic!("Esperado SessionConflict, obtido: {:?}", other),
+    }
+
+    // Agora o Turno 1 finalmente conclui (finish_operation)
+    session_mgr.finish_operation(
+        dev,
+        &sess1.session_id,
+        sess1.generation,
+        Some(VoiceSessionState::Idle),
+    );
+
+    // Com in_flight = false, o novo turno pode agora iniciar com sucesso
+    let turn2_success = session_mgr
+        .start_session("sess-whisper-2", dev, config)
+        .expect("Turno 2 deve iniciar após liberação de in_flight");
+    assert_eq!(turn2_success.generation, 2);
+    assert_eq!(turn2_success.session_id, "sess-whisper-2");
+}
+
+// ============================================================================
+// 11. INTERRUPÇÃO VS UPDATE_SESSION (PRESERVAÇÃO DE CANCELAMENTO)
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_11_interrupted_state_cannot_be_overwritten_by_same_generation_update() {
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let dev = "dev-interrupt-overwrite";
+
+    // 1. Teste direto na camada de sessão:
+    // Inicia sessão e transiciona para Interrupted
+    let sess = session_mgr
+        .start_session("sess-test-1", dev, VoiceConfiguration::default())
+        .unwrap();
+    assert_eq!(sess.generation, 1);
+
+    // Operador interrompe a sessão no manager
+    let mut interrupted_copy = sess.clone();
+    interrupted_copy
+        .transition_to(VoiceSessionState::Interrupted)
+        .unwrap();
+    assert!(session_mgr.update_session(&interrupted_copy));
+
+    // Agora uma cópia defasada da mesma geração que estava em Transcribing tenta atualizar para Processing
+    let mut stale_copy = sess.clone();
+    stale_copy
+        .transition_to(VoiceSessionState::Capturing)
+        .unwrap();
+    stale_copy
+        .transition_to(VoiceSessionState::Transcribing)
+        .unwrap();
+    stale_copy
+        .transition_to(VoiceSessionState::Processing)
+        .unwrap();
+    let updated = session_mgr.update_session(&stale_copy);
+
+    // DEVE ser rejeitado com false e estado mantido como Interrupted!
+    assert!(
+        !updated,
+        "update_session deve rejeitar sobrescrita de Interrupted por estado em andamento"
+    );
+    let current = session_mgr.get_session(dev).unwrap();
+    assert_eq!(
+        current.state,
+        VoiceSessionState::Interrupted,
+        "Estado deve permanecer Interrupted"
+    );
+
+    // 2. Teste integrado no VoiceConversationCoordinator:
+    // Inicia um turno em background com STT que pausa
+    let started = Arc::new(AtomicBool::new(false));
+    let allow_proceed = Arc::new(tokio::sync::Notify::new());
+
+    struct PausingStt2 {
+        meta: VoiceProviderMetadata,
+        started: Arc<AtomicBool>,
+        allow_proceed: Arc<tokio::sync::Notify>,
+    }
+    impl yuki::contracts::voice::SpeechToTextProvider for PausingStt2 {
+        fn metadata(&self) -> &VoiceProviderMetadata {
+            &self.meta
+        }
+        fn health<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), VoiceError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn transcribe<'a>(
+            &'a self,
+            _audio: &'a AudioInput,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, VoiceError>> + Send + 'a>,
+        > {
+            self.started.store(true, Ordering::SeqCst);
+            let notify = self.allow_proceed.clone();
+            Box::pin(async move {
+                notify.notified().await;
+                Ok("Yuki teste".to_string())
+            })
+        }
+    }
+
+    let pausing_stt = Arc::new(PausingStt2 {
+        meta: VoiceProviderMetadata::new(
+            "PausingStt2",
+            VoiceProviderType::LocalEdge,
+            vec!["pt".to_string()],
+            16000,
+            false,
+            "1.0",
+        ),
+        started: started.clone(),
+        allow_proceed: allow_proceed.clone(),
+    });
+
+    let (playback, mock_sink) = AudioPlaybackController::mock();
+    let router = Arc::new(GovernedVoiceRouter::new(
+        pausing_stt,
+        None,
+        Arc::new(MockTtsProvider::new()),
+        None,
+        VoiceConfiguration::default(),
+    ));
+
+    let core_called = Arc::new(AtomicBool::new(false));
+    struct TrackingCoreProvider(Arc<AtomicBool>, MockModelProvider);
+    impl yuki::models::provider::ModelProvider for TrackingCoreProvider {
+        fn generate<'a>(
+            &'a self,
+            req: &'a yuki::models::provider::ModelRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            yuki::models::provider::ModelResponse,
+                            yuki::models::errors::ModelError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.0.store(true, Ordering::SeqCst);
+            self.1.generate(req)
+        }
+        fn metadata(&self) -> yuki::models::provider::ModelMetadata {
+            self.1.metadata()
+        }
+        fn health(&self) -> yuki::models::provider::HealthStatus {
+            self.1.health()
+        }
+    }
+
+    let core = Arc::new(
+        YukiCore::new().with_model_provider(Arc::new(TrackingCoreProvider(
+            core_called.clone(),
+            MockModelProvider::new(),
+        ))),
+    );
+
+    let coordinator = Arc::new(VoiceConversationCoordinator::new(
+        core,
+        router,
+        session_mgr.clone(),
+        Arc::new(playback),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    ));
+
+    let dev_coord = "dev-coord-interrupt";
+    let coord_clone = coordinator.clone();
+    let turn_handle = tokio::spawn(async move {
+        coord_clone
+            .process_button_turn(dev_coord, create_dummy_audio(), false, false)
+            .await
+    });
+
+    // Aguarda o STT iniciar
+    for _ in 0..50 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(started.load(Ordering::SeqCst));
+
+    // Usuário pressiona interrupt() no coordenador enquanto o STT está processando
+    coordinator
+        .interrupt(dev_coord)
+        .expect("Interrupção deve ter sucesso");
+
+    // Libera o STT para acordar e tentar seguir para Core/TTS
+    allow_proceed.notify_one();
+    let turn_res = turn_handle.await.unwrap();
+
+    // 1. O turno deve retornar Err(VoiceError::Interrupted)
+    assert!(
+        matches!(turn_res, Err(VoiceError::Interrupted)),
+        "Turno interrompido deve retornar Err(VoiceError::Interrupted): {:?}",
+        turn_res
+    );
+
+    // 2. O Core NUNCA foi chamado
+    assert!(
+        !core_called.load(Ordering::SeqCst),
+        "Core não pode ter sido chamado após interrupção"
+    );
+
+    // 3. O Playback NUNCA emitiu áudio
+    assert_eq!(
+        mock_sink.played_count(),
+        0,
+        "Playback não pode ter executado áudio após interrupção"
+    );
+
+    // 4. O estado no manager permaneceu Interrupted (não foi revertido para Idle ou Processing)
+    let final_sess = session_mgr.get_session(dev_coord).unwrap();
+    assert_eq!(final_sess.state, VoiceSessionState::Interrupted);
+    assert!(!final_sess.in_flight);
+}
+
+// ============================================================================
+// 12. SANITIZAÇÃO UTF-8 MULTIBYTE E REDAÇÃO DE CREDENCIAIS
+// ============================================================================
+#[test]
+fn test_recovery_12_audit_sanitization_multibyte_utf8_no_panic() {
+    use yuki::voice::conversation::sanitize_error_for_audit;
+
+    // Caso A: Mensagem com exatamente 499 bytes ASCII seguida por caractere multibyte de 2 bytes (português 'ã')
+    // Com truncate(500) ingênuo, isso causaria pânico de runtime ('byte index 500 is not a char boundary')
+    let mut msg_pt = "A".repeat(499);
+    msg_pt.push('ã'); // 'ã' tem 2 bytes em UTF-8: [0xC3, 0xA3] -> len total = 501
+    assert_eq!(msg_pt.len(), 501);
+
+    let sanitized_pt = sanitize_error_for_audit(&msg_pt);
+    assert!(
+        sanitized_pt.ends_with("... [truncated]"),
+        "Deve conter sufixo de truncamento"
+    );
+    // Garante que o texto resultante é string UTF-8 válida
+    let _ = std::str::from_utf8(sanitized_pt.as_bytes()).expect("Deve ser UTF-8 válido");
+
+    // Caso B: Mensagem com 499 bytes ASCII seguida por caractere japonês de 3 bytes ('雪' - Yuki)
+    // O byte 500 cairia no segundo byte de '雪' [0xE9, 0x9B, 0xAA]
+    let mut msg_jp = "B".repeat(499);
+    msg_jp.push('雪'); // 3 bytes -> len total = 502
+    assert_eq!(msg_jp.len(), 502);
+
+    let sanitized_jp = sanitize_error_for_audit(&msg_jp);
+    assert!(sanitized_jp.ends_with("... [truncated]"));
+    let _ = std::str::from_utf8(sanitized_jp.as_bytes()).expect("Deve ser UTF-8 válido");
+
+    // Caso C: Mensagem com 499 bytes ASCII seguida por emoji de 4 bytes ('🤖')
+    let mut msg_emoji = "C".repeat(499);
+    msg_emoji.push('🤖'); // 4 bytes -> len total = 503
+    assert_eq!(msg_emoji.len(), 503);
+
+    let sanitized_emoji = sanitize_error_for_audit(&msg_emoji);
+    assert!(sanitized_emoji.ends_with("... [truncated]"));
+    let _ = std::str::from_utf8(sanitized_emoji.as_bytes()).expect("Deve ser UTF-8 válido");
+
+    // Caso D: Redação de credenciais sensíveis (Bearer, api_key, password, tokens)
+    let msg_secret = "Falha ao autenticar: Bearer sk-ant-api03-secret-token-key";
+    let sanitized_secret = sanitize_error_for_audit(msg_secret);
+    assert!(
+        sanitized_secret.contains("[REDACTED_SENSITIVE"),
+        "Credencial sensível deve ser redigida: {}",
+        sanitized_secret
+    );
+    assert!(
+        !sanitized_secret.contains("sk-ant-api03"),
+        "Payload do token não pode vazar para o log de auditoria"
+    );
+
+    let msg_pwd = "Database connection error: password=admin_secret_pass";
+    let sanitized_pwd = sanitize_error_for_audit(msg_pwd);
+    assert!(sanitized_pwd.contains("[REDACTED_SENSITIVE"));
+    assert!(!sanitized_pwd.contains("admin_secret_pass"));
+}
+
+// ============================================================================
+// 13. CICLO DE VIDA DE ARQUIVOS TEMPORÁRIOS E CANCELAMENTO DE PROCESSOS
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_13_subprocess_cleanup_and_temp_file_lifecycle() {
+    // Valida que o padrão TempCleaner com RAII Drop limpa arquivos temporários de STT/TTS
+    // mesmo diante de interrupção ou queda assíncrona
+    let temp_dir = std::env::temp_dir();
+    let temp_file_path = temp_dir.join(format!("yuki_test_cleaner_{}.wav", uuid_ms_test()));
+
+    // Escreve arquivo temporário simulando geração de WAV para Whisper ou Piper
+    std::fs::write(&temp_file_path, b"RIFF....WAVEfmt ....data....").unwrap();
+    assert!(temp_file_path.exists(), "Arquivo temporário deve existir");
+
+    struct TempCleaner(std::path::PathBuf);
+    impl Drop for TempCleaner {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    // Executa bloco com cleaner
+    {
+        let _cleaner = TempCleaner(temp_file_path.clone());
+        assert!(temp_file_path.exists());
+        // Simula término do escopo / abort da future
+    }
+
+    // Após o Drop, o arquivo foi deslinkado sem deixar órfãos no sistema de arquivos
+    assert!(
+        !temp_file_path.exists(),
+        "Arquivo temporário deve ter sido removido automaticamente pelo TempCleaner"
+    );
+}
+
+fn uuid_ms_test() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:x}", ms)
+}

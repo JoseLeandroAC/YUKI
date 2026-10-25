@@ -1998,6 +1998,51 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Recuperação segura de sessões conversacionais concluída com fencing monotônico de geração, guardiões RAII contra cancelamentos prematuros, isolamento de subprocessos via kill_on_drop, sanitização e minimização de dados em auditoria VoiceProcessingFailed e cobertura de 9 testes de integração comprovando bloqueio de efeitos observáveis em tarefas defasadas; retificação empírica e investigação comparativa de Wake Word finalizadas propondo arquitetura desacoplada de ring buffer e KWS; baselines de produção integralmente preservados; STT e Wake Word contínuo permanecem formalmente NÃO HOMOLOGADOS FISICAMENTE aguardando validação final pelo operador humano."`
 
+---
+
+## 2026-10-25 — Marco 8.1.1: Fechamento de Concorrência, Robustez e Higienização UTF-8
+
+- **Contexto e Motivação**:
+  - Na revisão do commit `de6d7e6` e do workflow `40215293400` do GitHub Actions, foram identificados e auditados quatro riscos adicionais de concorrência e robustez no gerenciamento de sessões conversacionais:
+    1. Precedência de `is_timed_out()` sobre `in_flight`: no `start_session()`, se a operação assíncrona do Whisper demorasse mais de 15s (ultrapassando `session_timeout_secs`), uma nova sessão podia ser iniciada concorrentemente no mesmo dispositivo porque a verificação de `in_flight` estava aninhada dentro de `!is_timed_out()`.
+    2. Perda do estado `Interrupted` por chamadas tardias a `update_session()`: na mesma geração, se o operador chamasse `coordinator.interrupt(dev)`, a sessão era marcada como `Interrupted`; contudo, se a tarefa em andamento tentasse atualizar o estado para `Processing` ou `Synthesizing`, `update_session()` sobrescrevia o estado assinalado, desfazendo o cancelamento.
+    3. Condição de corrida entre `is_interrupted()` e `playback.play()`: se uma interrupção chegasse exatamente após a checagem mas antes do início da reprodução, o áudio podia ser emitido.
+    4. Pânico de runtime em `sanitize_error_for_audit()`: corte ingênuo por bytes em `truncate(500)` entrava em pânico se o byte 500 coincidisse com o meio de um caractere UTF-8 multibyte (acentos em português `ã`, caracteres CJK `雪`, emojis `🤖`).
+    5. Verificação do ciclo de vida de arquivos temporários e subprocessos (`TempCleaner` e `kill_on_drop(true)`).
+
+- **Implementação e Correções**:
+  1. **Precedência de `in_flight` no `VoiceSessionManager` (`src/voice/session.rs`):**
+     - A checagem de `existing.in_flight` foi desacoplada de `!existing.is_timed_out()`.
+     - Se houver operação assíncrona ou de subprocesso em voo, a tentativa de iniciar novo turno é imediatamente rejeitada com `VoiceError::SessionConflict`, mesmo que o timeout de inatividade tenha expirado. Timeout sozinho não é evidência de término de processo.
+  2. **Proteção contra Sobrescrita de `Interrupted` (`src/voice/session.rs`):**
+     - Em `VoiceSessionManager::update_session()`, qualquer tentativa de sobrescrever `existing.state == VoiceSessionState::Interrupted` com um estado em andamento (`Processing`, `Synthesizing`, etc.) na mesma geração é categoricamente rejeitada (`return false`).
+  3. **Fencing Estrito no Coordenador e Verificação Pós-Play (`src/voice/conversation.rs`):**
+     - Em `execute_turn_steps()`, todas as transições verificam atomicamente `!update_session() || is_interrupted()`, abortando de imediato com `VoiceError::Interrupted`.
+     - Após `playback.play(&audio_output)`, uma verificação pós-disparo cancela imediatamente o sink de áudio via `playback.interrupt()` e retorna `Err(VoiceError::Interrupted)` se uma interrupção concorrente tiver sido assinalada.
+     - Em `process_button_turn()`, a conclusão com sucesso é blindada contra interrupções tardias, e erros de interrupção preservam o estado `Interrupted` no manager via `finish_operation()`.
+  4. **Higienização UTF-8 Multibyte sem Pânico (`src/voice/conversation.rs`):**
+     - `sanitize_error_for_audit()` refatorada com busca regressiva em `is_char_boundary(boundary)`, garantindo corte limpo na última fronteira de caractere válida anterior a 500 bytes.
+     - Redação preventiva de credenciais sensíveis (`Bearer`, `api_key`, `password`, `private_key`, etc.) para prevenção de vazamentos em logs de auditoria SQLite.
+  5. **Ciclo de Vida de Subprocessos e Arquivos Temporários:**
+     - Confirmação do guardião RAII `TempCleaner` em `Drop`, assegurando deslinkagem de arquivos temporários `yuki_stt_*.wav` e `yuki_tts_*.wav` mesmo sob cancelamento de `Future`.
+
+- **Testes Automatizados (`tests/voice_session_recovery.rs`):**
+  - Adicionados 4 novos testes de integração e robustez (totalizando 13 testes aprovados na suíte):
+    - `test_recovery_10_in_flight_blocks_new_turn_even_after_session_timeout`: reproduz operação que excede `session_timeout_secs`, comprovando bloqueio com `SessionConflict` enquanto `in_flight == true`, e liberação correta apenas após `finish_operation()`.
+    - `test_recovery_11_interrupted_state_cannot_be_overwritten_by_same_generation_update`: comprova que `update_session()` rejeita sobrescrita de `Interrupted`, que o coordenador aborta sem acionar Core nem Playback, e que a sessão permanece `Interrupted`.
+    - `test_recovery_12_audit_sanitization_multibyte_utf8_no_panic`: testa exaustivamente mensagens com limite exato de 499 bytes seguidos por caracteres de 2 bytes (`ã`), 3 bytes (`雪`) e 4 bytes (`🤖`), comprovando ausência de pânico, validade UTF-8 e redação de credenciais.
+    - `test_recovery_13_subprocess_cleanup_and_temp_file_lifecycle`: valida remoção determinística de arquivos temporários via RAII Drop.
+
+- **Métricas e Portões de Qualidade**:
+  - `cargo fmt --check`: 100% aprovado sem desvios.
+  - `cargo clippy --all-targets -- -D warnings`: 100% limpo com zero avisos.
+  - `cargo test --test voice_session_recovery`: 13/13 testes aprovados (0 falhas).
+  - `cargo test --test voice_conversational_and_wakeword`: 18/18 testes simulados aprovados (0 falhas; 5 físicos ignorados).
+  - `cargo test`: 665 testes ativos aprovados across all targets (0 falhas).
+
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Fechamento de concorrência, robustez de sessões conversacionais e higienização UTF-8 concluídos; precedência incondicional de in_flight sobre timeout validada; proteção estrita contra sobrescrita de sessões interrompidas implementada; mitigação de corrida de áudio em reprodução ativa comprovada; eliminação definitiva de riscos de pânico por truncamento UTF-8 multibyte em logs de auditoria; 13 testes de recuperação e concorrência aprovados; total de 665 testes ativos no workspace 100% verdes; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final em campo pelo operador humano."`
+
 
 
 
