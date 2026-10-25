@@ -2087,6 +2087,34 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Fechamento atômico de turnos, proteção de playback ativo contra conflitos de sessão e testes determinísticos concorrentes concluídos; complete_turn e fail_turn atômicos sob lock do manager; in_flight rigorosamente liberado em todos os caminhos; interrupção tardia blindada contra falso sucesso; isolamento de playback ativo comprovado; 16 testes de recuperação e concorrência 100% aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE aguardando validação final pelo operador humano."`
 
+---
+
+## 2026-10-25 — Marco 8.1.1: Experimento de Wake Word Dedicado (sherpa-onnx KWS) e Decisão Arquitetural
+
+- **Contexto e Missão**:
+  - Com o fechamento atômico de turnos e a recuperação de concorrência concluídos no commit `dc38a2c`, iniciou-se a investigação experimental de um motor de Wake Word local, rápido e confiável para Windows/Rust, capaz de operar em escuta contínua sem depender da execução pesada do Whisper a cada pequeno quadro acústico.
+  - Missão: avaliar oficialmente a viabilidade técnica do `sherpa-onnx` Keyword Spotting (KWS), seu suporte a modelos pré-treinados, compatibilidade fonética com a pronúncia brasileira de "Yuki", consumo de recursos (CPU, RAM, latência) e alternativas viáveis, mantendo a árvore de produção limpa.
+
+- **Execução Experimental em Ambiente Isolado**:
+  - Implementada uma Prova de Conceito (PoC) desacoplada em `scratch/kws/poc_kws` com `sherpa-onnx` (v2.0.0) em vinculação dinâmica (`shared`) no Windows x64 via `rust-lld`.
+  - Avaliados os modelos Zipformer Pruned Transducer `zh-en-3M` (fonético) e `gigaspeech-3.3M` (BPE), além de sua versão INT8.
+  - Submetidos testes físicos contra o conjunto canônico de áudios em `data/voice_diag/` (fala com "Yuki", fala alheia, ruído ambiente e silêncio).
+
+- **Evidências e Métricas Empíricas**:
+  1. **Sanidade da Infraestrutura Técnica:** Validada com **100% de sucesso (2/2)** nos áudios oficiais de teste em inglês (`en_0.wav` detectando `LIGHT_UP` e `en_1.wav` detectando `LOVELY_CHILD` nos timestamps exatos).
+  2. **Eficiência de Recursos Operacionais:** Carga fria única de 2.38s a 2.66s, *warm reset* de 0.00ms, consumo de memória de **~60MB a 65MB de RAM** (~85% de redução frente ao Whisper) e latência de **25ms a 35ms** por bloco de 100ms (**3.5x a 4.0x mais rápido que tempo real**; **9.6x** em blocos de 20ms).
+  3. **Incompatibilidade Acústica com PT-BR:** Inexistência de modelos oficiais em português no ecossistema `sherpa-onnx`. Todas as 8 variantes fonéticas CMU e 4 variantes BPE resultaram em **0 Verdadeiros Positivos (100% False Negatives)** nos áudios canônicos do operador em português brasileiro. Flexibilização extrema de limiares induziu Falso Positivo em áudio de sussurro.
+
+- **Direcionamento Arquitetural e Governança**:
+  - Descarte do `sherpa-onnx` *off-the-shelf* para produção imediata devido à ausência de modelagem acústica em PT-BR.
+  - Recomendação de **Arquitetura em Dois Estágios**: Estágio 1 com VAD neural contínuo de ultrabaixa potência (Silero VAD ONNX, ~2MB, <1% CPU) acoplado ao Estágio 2 com modelo dedicado treinado sinteticamente via `openWakeWord` para "Yuki" em PT-BR.
+  - Relatório formal registrado em `docs/audits/MARCO_8_1_1_WAKE_WORD_KWS_EXPERIMENT_REPORT.md`.
+  - O modo Push-to-Talk (PTT) permanece como o padrão exclusivo e homologado de produção.
+
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Experimento de Wake Word dedicado com sherpa-onnx KWS concluído; infraestrutura operacional validada com 100% de sanidade e consumo reduzido de ~60MB RAM; inviabilidade acústica de modelos pré-treinados em português comprovada empiricamente (0% TP em PT-BR); arquitetura futura direcionada para Silero VAD + openWakeWord em dois estágios; subsistema de Wake Word permanece formalmente classificado como NÃO HOMOLOGADO FISICAMENTE."`
+
+
 
 
 
