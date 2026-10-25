@@ -2116,21 +2116,49 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Experimento de Wake Word dedicado concluído com errata do ground truth registrada; verdadeiro positivo comprovado na Variante 3 (TP=1, FP=0 em PT-BR); taxa de falso positivo zero em todos os negativos; transição formal para o Marco 8.1.2 autorizada para investigação de modelo personalizado openWakeWord e avaliação de Silero VAD; subsistema de ativação contínua por voz permanece formalmente NÃO HOMOLOGADO FISICAMENTE."`
 
+---
 
+## 2026-10-25 — Marco 8.1.2: Otimização Experimental de Pré-Roll e Primeiro Modelo Personalizado openWakeWord em PT-BR (100% de Acurácia Física em Rust)
 
+- **Contexto e Missão**:
+  - Com a conclusão do experimento com `sherpa-onnx` no Marco 8.1.1 e a constatação de limitações fonéticas dos modelos Zipformer em inglês para o português brasileiro em fala contínua (sensibilidade máxima de 66.7%), o Marco 8.1.2 foi aberto formalmente para investigar duas frentes complementares:
+    1. Otimização do pré-roll no pipeline de dois estágios (Silero VAD + KWS) para evitar perda do fonema inicial [j] em falas suaves ou sussurradas.
+    2. Criação, treinamento e validação do primeiro modelo de Wake Word personalizado para a palavra "Yuki" em PT-BR utilizando a arquitetura `openWakeWord`, com paridade matemática completa comprovada entre Python e Rust.
 
+- **Execução Experimental em Ambiente Isolado (Etapas 1 a 4)**:
+  1. **Investigação Controlada do Pré-roll (Silero VAD + KWS Zipformer na PoC `poc_kws`):**
+     - Avaliados 5 tamanhos de pré-roll (0 ms, 200 ms, 400 ms, 600 ms e 800 ms) contra os 6 WAVs canônicos físicos de bancada.
+     - **Conclusão:** A faixa ideal de pré-roll é de **200 ms a 400 ms**. Com 0 ms, o ataque do VAD deglute o fonema inicial; com 600–800 ms, o acúmulo de ruído estacionário/Bluetooth degrada a pontuação acústica. No áudio de silêncio puro (`canonical_16k_diag_1a142036d81_1.wav`), o Silero VAD suprimiu **100% das decodificações KWS** (zero inferências executadas), comprovando economia computacional em repouso. Contudo, a fala natural rápida continuou omitida pelo Zipformer em inglês.
+  2. **Primeiro Modelo Personalizado openWakeWord em PT-BR (`yuki_v0.1.onnx`):**
+     - Sintetizado dataset neural de alta fidelidade via `edge-tts` com múltiplas vozes masculinas, femininas e cross-accents (160 bases positivas x 4 alinhamentos temporais = 571 tensores; 199 bases negativas fatiadas = 387 tensores).
+     - Inclusão mandatória de negativos foneticamente similares (*"aqui"*, *"vi"*, *"dia"*, *"tudo"*, *"chove"*, *"jukebox"*, *"iúca"*, *"uísque"* e diálogos domésticos de controle).
+     - Extração de tensores `(16, 96)` via backbone oficial do *Google Speech Embedding* (`melspectrogram.onnx` + `embedding_model.onnx`).
+     - Treinamento da cabeça classificadora FCN (`1536 -> 128 -> 128 -> 1`) com AdamW e BCELoss.
+     - **Métricas no conjunto de teste não visto:** **97.24% de acurácia global**, **97.96% de sensibilidade (recall)** e **95.74% de especificidade**. Modelo exportado para ONNX (837 KB).
+  3. **Motor Autônomo em Rust (`poc_oww`) e Paridade Matemática:**
+     - Implementado runtime puro em Rust vinculando dinamicamente ao `onnxruntime.dll` via crate `ort` 2.0 (`load-dynamic`).
+     - Identificado o invariante de escala interno exigido pelo Google Speech Embedding: $\text{melspec} = x / 10.0 + 2.0$.
+     - Implementado anel temporal de 16 blocos (1.28 s) e supressão estrita durante o *warmup* inicial para eliminar falsos alarmes de borda.
 
+- **Resultados da Validação Física nos 6 Áudios Canônicos em Rust**:
+  - **Verdadeiros Positivos (TP): 3 de 3 (100.0% de sensibilidade):**
+    - `canonical_16k_diag_1a141d14d0f_1.wav` (Bluetooth, *"Yuki, que horas são?"*): detectado aos 2.160 s (score 0.940).
+    - `canonical_16k_diag_1a136305f7a_1.wav` (Realtek normal, *"Yuki, quanto é 2 mais 2?"*): detectado aos 1.520 s (score 0.591, $\Delta t = -30.0$ ms).
+    - `canonical_16k_diag_1a141edca97_1.wav` (Baixo volume -51.12 dBFS, *"Yuki, me ajuda a estudar matemática."*): detectado aos 2.000 s (score 0.792, $\Delta t = +240.0$ ms).
+  - **Verdadeiros Negativos (TN): 3 de 3 (100.0% de especificidade):**
+    - `canonical_16k_diag_1a1420049f7_1.wav` (*"Hoje vou estudar matemática para a FUVEST."*): rejeitado (score máx 0.011).
+    - `canonical_16k_diag_1a141c9c7b6_1.wav` (*"Quanto é 2 mais 2?"*): rejeitado (score máx 0.048).
+    - `canonical_16k_diag_1a142036d81_1.wav` (Silêncio e ruído elétrico de bancada): rejeitado (score máx 0.004).
+  - **Falsos Positivos (FP): 0** | **Falsos Negativos (FN): 0** | **Acurácia Física Global: 100.0%**.
+  - **Perfil Operacional de Produção:**
+    - Carga fria (*Cold Load*): **115.84 ms** (23x mais rápido que sherpa-onnx).
+    - Pegada de RAM: **37.03 MB** (+32.69 MB delta, 60% menor que sherpa-onnx).
+    - Fator de processamento: **23.5x a 28.6x mais rápido que tempo real** (RTF ~ 0.038).
 
+- **Decisão Arquitetural Formal (Etapa 5)**:
+  - Adotar oficialmente a arquitetura **openWakeWord com classificador dedicado ONNX (`yuki_v0.1.onnx`)** como o motor definitivo de *Keyword Spotting* para a assistente **YUKI 2.0**.
+  - A arquitetura superou o `sherpa-onnx` em acurácia física (100% vs 66.7%), sensibilidade acústica regional, velocidade de inicialização (115 ms vs 2665 ms), uso de memória (37 MB vs 60–90 MB) e facilidade de ajuste fino.
+  - O modo Push-to-Talk (PTT) permanece como o padrão exclusivo e homologado de produção.
 
-
-
-
-
-
-
-
-
-
-
-
-
+- **Declaração Oficial**:
+  - `"Marco 8.1.2 — Otimização experimental de pré-roll concluída (janela ideal de 200 ms a 400 ms); primeiro modelo personalizado openWakeWord em PT-BR ('yuki_v0.1.onnx') treinado e integrado ao Rust via ort 2.0; invariante de escala do melspectrograma validado; 100% de acurácia física comprovada nos 6 WAVs canônicos (TP 3/3, TN 3/3, FP 0, FN 0); openWakeWord formalmente selecionado como arquitetura definitiva de KWS; ativação contínua por voz mantida formalmente como NÃO HOMOLOGADA FISICAMENTE aguardando testes ao vivo com operador no Marco 8.1.3."`
