@@ -7,7 +7,7 @@ use crate::core::yuki_core::YukiCore;
 use crate::persistence::sqlite::SqliteAuditStore;
 use crate::voice::playback::AudioPlaybackController;
 use crate::voice::router::GovernedVoiceRouter;
-use crate::voice::session::VoiceSessionManager;
+use crate::voice::session::{VoiceSession, VoiceSessionManager};
 use crate::voice::wakeword::WakeWordDetector;
 use std::sync::Arc;
 
@@ -174,24 +174,98 @@ impl VoiceConversationCoordinator {
         // Interrompe reprodução prévia em curso (barge-in do usuário)
         self.playback.interrupt()?;
 
-        // 1. Inicia ou recupera sessão
+        // 1. Inicia sessão governada (geração isolada e in_flight = true)
         let config = self.router.config().clone();
         let session_id = format!("voice_{}_{}", device_id, uuid_ms());
         let mut session = self
             .session_manager
             .start_session(&session_id, device_id, config)?;
 
+        // Guardião RAII que assegura liberação de in_flight caso a future seja abortada/dropada
+        let mut guard = SessionTurnGuard::new(
+            self.session_manager.clone(),
+            device_id.to_string(),
+            session_id.clone(),
+            session.generation,
+        );
+
+        let turn_result = self
+            .execute_turn_steps(
+                &mut session,
+                device_id,
+                audio_input,
+                allow_cloud_stt,
+                allow_cloud_tts,
+            )
+            .await;
+
+        match turn_result {
+            Ok(output) => {
+                session.transition_to(VoiceSessionState::Idle)?;
+                session.in_flight = false;
+                self.session_manager.update_session(&session);
+                guard.mark_completed();
+                Ok(output)
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if session.state != VoiceSessionState::Idle {
+                    let _ = session.transition_to(VoiceSessionState::Failed(err_str.clone()));
+                }
+                session.in_flight = false;
+                self.session_manager.update_session(&session);
+                guard.mark_completed();
+
+                self.record_audit_event(
+                    EventType::VoiceProcessingFailed,
+                    serde_json::json!({
+                        "device_id": device_id,
+                        "session_id": session_id,
+                        "generation": session.generation,
+                        "error": err_str,
+                    }),
+                )
+                .await;
+
+                Err(e)
+            }
+        }
+    }
+
+    async fn execute_turn_steps(
+        &self,
+        session: &mut VoiceSession,
+        device_id: &str,
+        audio_input: AudioInput,
+        allow_cloud_stt: bool,
+        allow_cloud_tts: bool,
+    ) -> Result<(YukiResult, AudioOutput), VoiceError> {
+        // 1. Captura
         session.transition_to(VoiceSessionState::Capturing)?;
-        self.session_manager.update_session(&session);
+        self.session_manager.update_session(session);
+
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id)
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         // 2. Transcrição (STT)
         session.transition_to(VoiceSessionState::Transcribing)?;
-        self.session_manager.update_session(&session);
+        self.session_manager.update_session(session);
 
         let transcribed_text = self
             .router
             .transcribe(&audio_input, allow_cloud_stt)
             .await?;
+
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id)
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         // Registra evento de auditoria VoiceInputReceived (minimização de dados: apenas metadados técnicos)
         self.record_audit_event(
@@ -208,7 +282,7 @@ impl VoiceConversationCoordinator {
 
         if transcribed_text.trim().is_empty() {
             session.transition_to(VoiceSessionState::Idle)?;
-            self.session_manager.update_session(&session);
+            self.session_manager.update_session(session);
             return Err(VoiceError::TranscriptionFailed(
                 "Nenhuma fala reconhecida no áudio capturado".to_string(),
             ));
@@ -216,7 +290,14 @@ impl VoiceConversationCoordinator {
 
         // 3. Processamento no YukiCore
         session.transition_to(VoiceSessionState::Processing)?;
-        self.session_manager.update_session(&session);
+        self.session_manager.update_session(session);
+
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id)
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         let user_input = UserInput::new(&transcribed_text);
         let user_output = self
@@ -225,14 +306,28 @@ impl VoiceConversationCoordinator {
             .await
             .map_err(|e| VoiceError::TranscriptionFailed(format!("Erro no Core: {}", e)))?;
 
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id)
+        {
+            return Err(VoiceError::Interrupted);
+        }
+
         // 4. Síntese de Voz (TTS)
         session.transition_to(VoiceSessionState::Synthesizing)?;
-        self.session_manager.update_session(&session);
+        self.session_manager.update_session(session);
 
         let audio_output = self
             .router
             .synthesize(&user_output.content, allow_cloud_tts)
             .await?;
+
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id)
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         // Registra evento de auditoria VoiceOutputProduced
         self.record_audit_event(
@@ -248,13 +343,9 @@ impl VoiceConversationCoordinator {
 
         // 5. Inicia reprodução segura
         session.transition_to(VoiceSessionState::Speaking)?;
-        self.session_manager.update_session(&session);
+        self.session_manager.update_session(session);
 
         self.playback.play(&audio_output)?;
-
-        // Retorna a sessão para Idle (ou pronta para o próximo turno)
-        session.transition_to(VoiceSessionState::Idle)?;
-        self.session_manager.update_session(&session);
 
         Ok((user_output, audio_output))
     }
@@ -294,4 +385,49 @@ fn uuid_ms() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{:x}", ms)
+}
+
+/// Guardião RAII de ciclo de vida do turno conversacional.
+/// Assegura que `in_flight` seja liberado e que a sessão seja transicionada
+/// para `Interrupted` caso a `Future` do turno seja cancelada, abortada ou caia prematuramente.
+struct SessionTurnGuard {
+    session_manager: Arc<VoiceSessionManager>,
+    device_id: String,
+    session_id: String,
+    generation: u64,
+    completed: bool,
+}
+
+impl SessionTurnGuard {
+    fn new(
+        session_manager: Arc<VoiceSessionManager>,
+        device_id: String,
+        session_id: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            session_manager,
+            device_id,
+            session_id,
+            generation,
+            completed: false,
+        }
+    }
+
+    fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for SessionTurnGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.session_manager.finish_operation(
+                &self.device_id,
+                &self.session_id,
+                self.generation,
+                Some(VoiceSessionState::Interrupted),
+            );
+        }
+    }
 }

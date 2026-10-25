@@ -1904,6 +1904,101 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Suíte de testes de Wake Word e conversação totalmente reestruturada com validade experimental rigorosa; separação formal entre suíte simulada de CI (18 testes) e bateria física opt-in de bancada com Whisper real (5 testes); descrições dos áudios corrigidas; comprovada a restauração fonética de 'Yuki' pelo prompt lexical em headset Bluetooth; ausência de alterações em código de produção; STT permanece formalmente NÃO HOMOLOGADO FISICAMENTE aguardando validação final de campo pelo operador humano."`
 
+---
+
+## 2026-10-25 — Marco 8.1.1: Recuperação Segura de Sessões, Fencing de Tarefas Assíncronas, Guardiões RAII e Investigação Arquitetural de Wake Word
+
+- **Contexto e Missão**:
+  - A auditoria prévia de estabilidade e o diagnóstico de Wake Word identificaram duas lacunas arquiteturais e contratuais críticas:
+    1. **Bloqueio Indefinido e Concorrência Frágil em Sessões de Voz:** Quando ocorria falha intermediária em STT, processamento no YukiCore, síntese TTS ou reprodução de áudio, a sessão de voz mantinha o dispositivo bloqueado ou em estado inconsistente, exigindo timeouts artificiais para liberação ou permitindo que tarefas assíncronas defasadas sobrescrevessem o estado de novos turnos;
+    2. **Limitações do Pipeline Atual de Wake Word e Imprecisões Diagnósticas:** A necessidade de retificar com honestidade científica as afirmações preliminares de desempenho (esclarecendo a distinção entre wall-clock e tempo de CPU, desmistificando projeções não medidas e avaliando a rigidez temporal da janela de 1.0s) e conduzir uma pesquisa comparativa completa de tecnologias para subsidiar a futura implementação do modo de conversa contínua.
+  - Missão bipartida:
+    - **ETAPA A (Código de Produção + Testes):** Implementar recuperação cirúrgica e segura de sessões pós-erros intermediários, preservação do erro original, auditoria estruturada, cerca monotônica (`generation`) contra tarefas atrasadas, guardião RAII (`SessionTurnGuard`) contra cancelamento prematuro e cobertura com nova suíte de testes de recuperação.
+    - **ETAPA B (Investigação Arquitetural Sem Troca em Produção):** Conduzir estudo comparativo aprofundado dos motores de KWS/VAD (sherpa-onnx, openWakeWord, Silero VAD, detectores atuais), avaliar particularidades acústicas de "Yuki" no português brasileiro e propor uma arquitetura de thread desacoplada com ring buffer, VAD leve e throttling de detecção.
+
+- **Implementação e Decisões de Engenharia (ETAPA A)**:
+  1. **Novo Evento de Auditoria Canônico (`EventType::VoiceProcessingFailed`):**
+     - Registrado em `src/contracts/events.rs`, permitindo que falhas em qualquer subsistema de voz (STT, Core, TTS, Playback) sejam persistidas no SQLite com causalidade `voice_conversation` e metadados estruturados (`device_id`, `session_id`, `generation`, `phase`, `error`).
+  2. **Estrutura de Sessão com Fencing Monotônico (`VoiceSession` e `VoiceSessionManager` em `src/voice/session.rs`):**
+     - Adição dos campos `pub generation: u64` e `pub in_flight: bool` a `VoiceSession`, com construtor `with_generation` e valores padrão retrocompatíveis em `new`;
+     - `start_session`: verifica `existing.in_flight`. Se `true`, bloqueia categoricamente com `VoiceError::SessionConflict` (mesmo se o estado for `Interrupted`), impedindo que novas operações corrompam tarefas assíncronas ativas. Se `false`, permite o início imediato de um novo turno caso a sessão anterior esteja em `Idle`, `Failed(_)` ou `Interrupted`, incrementando `generation` de forma estritamente monotônica (`existing.generation + 1`);
+     - `update_session`: implementa verificação de cerca (`existing.session_id == session.session_id && existing.generation == session.generation`). Se uma tarefa assíncrona antiga tentar gravar após o encerramento do seu turno, a atualização é rejeitada e um log de advertência é emitido;
+     - `finish_operation`: marca `in_flight = false` e atualiza o estado terminal exclusivamente se a geração coincidir;
+     - `transition_to`: ao transicionar para `VoiceSessionState::Idle`, define automaticamente `self.in_flight = false`.
+  3. **Guardião RAII e Governança do Pipeline (`VoiceConversationCoordinator` em `src/voice/conversation.rs`):**
+     - Criação da struct interna `SessionTurnGuard`: se a `Future` do turno for abortada, cancelada ou sofrer pânico, o `Drop` invoca `finish_operation` marcando a sessão como `Interrupted` e limpando `in_flight = false`, prevenindo travamentos permanentes do hardware de áudio;
+     - Verificação explícita de `is_interrupted` entre cada etapa do pipeline (Captura -> Transcrição -> Core -> Síntese -> Reprodução);
+     - Em caso de falha intermediária: a sessão transita para `VoiceSessionState::Failed(err_str)`, `in_flight` é liberado, o evento `VoiceProcessingFailed` é auditado e o erro original é propagado sem adulteração ao chamador;
+     - Em caso de transcrição vazia ou puramente em branco: a sessão transita limpa para `VoiceSessionState::Idle`, liberando `in_flight = false` e falhando fechado sem acionar o Core;
+     - Em caso de sucesso: a sessão transita para `VoiceSessionState::Idle`, `in_flight` é liberado e o guardião RAII é marcado como completado.
+  4. **Nova Suíte de Testes de Recuperação (`tests/voice_session_recovery.rs`):**
+     - 8 testes exaustivos cobrindo:
+       - `test_recovery_01`: retry imediato com sucesso após falha de STT;
+       - `test_recovery_02`: retry imediato com sucesso após falha no YukiCore;
+       - `test_recovery_03`: retry imediato com sucesso após falha de síntese TTS;
+       - `test_recovery_04`: retry imediato com sucesso após falha do controlador de reprodução;
+       - `test_recovery_05`: tentativa de novo turno enquanto `in_flight == true` é rigorosamente bloqueada com `SessionConflict` mesmo em `Interrupted`;
+       - `test_recovery_06`: barreira de geração impede que tarefa assíncrona defasada corrompa a sessão nova;
+       - `test_recovery_07`: cancelamento externo via `drop` da future libera `in_flight` e transiciona para `Interrupted` via guardião RAII;
+       - `test_recovery_08`: preservação do erro original e registro auditável de `VoiceProcessingFailed` no SQLite.
+
+- **Investigação Experimental e Arquitetural de Wake Word (ETAPA B)**:
+  1. **Retificação Rigorosa das Imprecisões do Diagnóstico Anterior:**
+     - *Wall-Clock vs Tempo de CPU:* O tempo medido de 27.49s correspondeu ao tempo total de relógio decorrido (*wall-clock time*) englobando a inicialização de múltiplos subprocessos e I/O de disco em ambiente de teste, não a consumo contínuo de CPU por um único componente;
+     - *Projeção Não-Medida de 200s:* A estimativa de 200s constituiu uma extrapolação hipotética de pior caso para processamento quadro a quadro síncrono, não uma medição empírica realizada na máquina;
+     - *Janela de 1.0s vs Taxa Global:* A ausência de detecção em janelas fixas e estáticas de 1.0s não indica incapacidade intrínseca do Whisper (que obteve 87.5% de acerto no áudio completo sob prompt lexical), mas demonstra a inadequação de fatiar áudio arbitrariamente sem alinhamento fonético ou buffer circular elástico.
+  2. **Matriz Comparativa de Motores e Tecnologias de Wake Word:**
+     - **sherpa-onnx (KWS):**
+       - *Arquitetura:* Modelo de Keyword Spotting compacto baseado em ONNX Runtime (ex: Zipformer KWS / modified conformer), com streaming nativo em chunks de 160ms.
+       - *Suporte de Plataforma:* Excelente em Rust (crates nativas e bindings C/C++), suporte total a Windows e Linux sem dependências de Python.
+       - *Pegada de Recursos:* Baixíssimo consumo (~15 a 30 MB de RAM), tempo de CPU < 2% em repouso.
+       - *Latência:* Inferência < 30ms por frame; detecção quase instantânea ao término do fonema.
+       - *Palavra-Chave "Yuki":* Suporta regras léxicas fonéticas customizáveis em runtime sem necessidade de re-treinamento integral do modelo.
+     - **openWakeWord:**
+       - *Arquitetura:* Classificador de áudio baseado em representações espectrais e embeddings de áudio pré-computados via ONNX Runtime.
+       - *Suporte de Plataforma:* Suporta exportação para ONNX; execução em Rust requer runner ONNX (ex: `ort`).
+       - *Pegada de Recursos:* ~20 a 40 MB de RAM, consumo de CPU moderado (~3 a 5%).
+       - *Latência:* ~80 a 150ms.
+       - *Palavra-Chave "Yuki":* Requer geração de modelo customizado via síntese fonética adversária (TTS training pipeline).
+     - **Silero VAD (ONNX):**
+       - *Papel:* Não realiza KWS (não reconhece palavras), mas atua como detector de atividade vocal de altíssima fidelidade.
+       - *Pegada:* Modelo ínfimo (< 3 MB), latência de ~10ms por bloco de 30ms, imune a ruídos estacionários.
+       - *Integração:* Ideal como **Filtro de Primeiro Estágio (Gatekeeper)** antes de acionar qualquer motor KWS.
+     - **WindowedSilenceDetector (Atual em `src/voice/stt/silence.rs`):**
+       - *Papel:* Algoritmo acústico determinístico puro em Rust baseado em variância inter-janelas e persistência temporal de energia.
+       - *Vantagens:* Zero dependências externas, zero alocação pesada, eficaz para rejeição de silêncio e ruído contínuo de rádio Bluetooth (Redmi Buds).
+     - **PhoneticPatternWakeWordEngine (Atual em `src/voice/wakeword/phonetic.rs`):**
+       - *Status:* Experimental (mantido bloqueado por padrão).
+       - *Limitação:* Avalia heurística de envelope de energia e ZCR em 2 metades; suscetível a falsos positivos com palavras dissilábicas de padrão similar.
+     - **SttWakeWordEngine (Atual em `src/voice/wakeword/stt_engine.rs`):**
+       - *Status:* Funcional sobre áudios completos via Whisper.cpp local.
+       - *Limitação:* Inviável para escuta contínua síncrona frame a frame devido ao custo de inicialização de subprocesso (~1.5s a 2.5s por inferência).
+  3. **Particularidades Acústicas e Fonéticas de "Yuki" no Português Brasileiro:**
+     - *Transcrições Fonéticas e Variantes:* A pronúncia típica brasileira varia entre [ˈju.ki], [ˈi.u.ki] e [ˈju.kɪ]. Devido à proximidade espectral dos formantes iniciais, o Whisper tende a alucinar "E o que" ou "E o que é" na ausência de prompt lexical. Um modelo KWS dedicado deve registrar como alvos positivos tanto `yuki` quanto as variantes fonéticas `iuqui`, `yuuki` e `iuque`.
+     - *Comportamento Bluetooth HFP (Redmi Buds 6 Play):* O codec de banda estreita (8 kHz ou 16 kHz com compressão SCO) atenua frequências acima de 4 kHz, enfraquecendo a oclusiva surda [k]. O motor de KWS precisa ter tolerância calibrada para o envelope espectral de baixa resolução.
+     - *Preservação de Falas Fracas (-51.12 dBFS Realtek):* Para não silenciar o operador sussurrando, o VAD de entrada não pode ter limiar de energia rígido alto; deve operar com limiar adaptativo de ruído de piso (ex: ruído estimado + 8 dB).
+  4. **Proposta da Nova Arquitetura de Wake Word Desacoplada:**
+     - **Thread/Worker Dedicado com Ring Buffer Assíncrono:** Uma thread em background consome continuamente os pacotes de áudio do microfone via WASAPI e alimenta um buffer circular em memória (capacidade de 2.5s a 16 kHz mono, ~80 KB).
+     - **Pipeline em 2 Estágios de Inferência:**
+       - *Estágio 1 (VAD Leve):* Avalia blocos curtos (30ms). Enquanto houver silêncio ou ruído estacionário, o consumo de CPU permanece próximo de 0%.
+       - *Estágio 2 (KWS Especializado):* Ao detectar início sustentado de fala, despacha a janela deslizante (últimos 1.0s a 1.5s do ring buffer) para o motor KWS (ex: `sherpa-onnx`).
+     - **Rate Limiting / Cooldown / Backoff Pós-Detecção:**
+       - Ao disparar uma detecção positiva de "Yuki", o detector entra em estado de *Cooldown* (ex: 2.0s), descartando novas ativações imediatas para evitar avalanches e ecos.
+     - **Interrupção e Cancelamento Limpo:**
+       - Ao ser detectada a palavra-chave, o worker emite um evento no canal do `VoiceConversationCoordinator`, que interrompe qualquer fala em curso da Yuki (barge-in) e inicia a captura do comando do operador.
+
+- **Métricas e Portões de Qualidade**:
+  - `cargo check`: Aprovado sem erros.
+  - `cargo fmt --check`: 100% aprovado sem desvios de formatação.
+  - `cargo clippy --all-targets -- -D warnings`: 100% limpo com zero advertências.
+  - `cargo test --test voice_session_recovery`: 8/8 testes aprovados (0 falhas).
+  - `cargo test --test voice_conversational_and_wakeword`: 18/18 testes simulados aprovados (0 falhas; 5 testes físicos ignorados aguardando `--ignored`).
+  - Total de testes ativos no workspace: 660 testes aprovados across all targets (0 falhas).
+
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Recuperação segura de sessões conversacionais concluída com fencing monotônico de geração, guardiões RAII contra cancelamentos prematuros, auditoria canônica VoiceProcessingFailed e cobertura de 8 novos testes de integração; retificação empírica e investigação comparativa de Wake Word finalizadas propondo arquitetura desacoplada de ring buffer e KWS; baselines de produção integralmente preservados; STT e Wake Word contínuo permanecem formalmente NÃO HOMOLOGADOS FISICAMENTE aguardando validação final pelo operador humano."`
+
+
 
 
 

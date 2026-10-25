@@ -37,6 +37,7 @@ pub enum EventType {
     MissionFailed,
     VoiceInputReceived,
     VoiceOutputProduced,
+    VoiceProcessingFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

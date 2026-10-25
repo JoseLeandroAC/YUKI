@@ -582,20 +582,46 @@ async fn test_13_coordinator_error_propagation_and_session_state_audit() {
     assert!(err_stt.is_err());
 
     let session_stt = session_mgr_stt.get_session("dev-err-stt").unwrap();
-    assert_eq!(
-        session_stt.state,
-        VoiceSessionState::Transcribing,
-        "Sessão após erro em STT deve refletir a fase onde ocorreu a falha"
+    assert!(
+        matches!(session_stt.state, VoiceSessionState::Failed(_)),
+        "Sessão após erro em STT deve estar em Failed: {:?}",
+        session_stt.state
+    );
+    assert!(
+        session_stt
+            .history
+            .iter()
+            .any(|(s, _)| *s == VoiceSessionState::Transcribing),
+        "Histórico deve comprovar passagem por Transcribing antes da falha"
     );
 
-    // Recuperação via interrupt():
-    coord_stt_fail.interrupt("dev-err-stt").unwrap();
-    let session_stt_recovered = session_mgr_stt.get_session("dev-err-stt").unwrap();
-    assert_eq!(session_stt_recovered.state, VoiceSessionState::Interrupted);
+    // Recuperação imediata: dispositivo liberado sem depender de timeout
+    let ok_stt = Arc::new(MockSttProvider::new().with_response("Yuki recuperada"));
+    let router_recovered = Arc::new(GovernedVoiceRouter::new(
+        ok_stt.clone(),
+        None,
+        tts.clone(),
+        None,
+        VoiceConfiguration::default(),
+    ));
+    let (coord_recovered, _) = VoiceConversationCoordinator::for_test(
+        core.clone(),
+        router_recovered,
+        session_mgr_stt.clone(),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    );
+    let retry_stt = coord_recovered
+        .process_button_turn("dev-err-stt", dummy_audio.clone(), false, false)
+        .await;
+    assert!(
+        retry_stt.is_ok(),
+        "Novo turno deve iniciar imediatamente após falha de STT: {:?}",
+        retry_stt.err()
+    );
 
     // 2. Falha em TTS: a sessão transita para Synthesizing antes da chamada;
-    // ao falhar com '?', a sessão permanece em Synthesizing.
-    let ok_stt = Arc::new(MockSttProvider::new().with_response("Olá Yuki"));
+    // ao falhar, a sessão transita para Failed e libera o dispositivo.
     let failing_tts = Arc::new(MockTtsProvider::new().with_failure(true));
     let router_tts_fail = Arc::new(GovernedVoiceRouter::new(
         ok_stt,
@@ -615,15 +641,47 @@ async fn test_13_coordinator_error_propagation_and_session_state_audit() {
     );
 
     let err_tts = coord_tts_fail
-        .process_button_turn("dev-err-tts", dummy_audio, false, false)
+        .process_button_turn("dev-err-tts", dummy_audio.clone(), false, false)
         .await;
     assert!(err_tts.is_err());
 
     let session_tts = session_mgr_tts.get_session("dev-err-tts").unwrap();
-    assert_eq!(
-        session_tts.state,
-        VoiceSessionState::Synthesizing,
-        "Sessão após erro em TTS deve refletir a fase onde ocorreu a falha"
+    assert!(
+        matches!(session_tts.state, VoiceSessionState::Failed(_)),
+        "Sessão após erro em TTS deve estar em Failed: {:?}",
+        session_tts.state
+    );
+    assert!(
+        session_tts
+            .history
+            .iter()
+            .any(|(s, _)| *s == VoiceSessionState::Synthesizing),
+        "Histórico deve comprovar passagem por Synthesizing antes da falha"
+    );
+
+    // Recuperação imediata pós-TTS
+    let ok_tts = Arc::new(MockTtsProvider::new());
+    let router_tts_recovered = Arc::new(GovernedVoiceRouter::new(
+        Arc::new(MockSttProvider::new().with_response("Yuki recuperada pós-TTS")),
+        None,
+        ok_tts,
+        None,
+        VoiceConfiguration::default(),
+    ));
+    let (coord_tts_rec, _) = VoiceConversationCoordinator::for_test(
+        Arc::new(YukiCore::new()),
+        router_tts_recovered,
+        session_mgr_tts.clone(),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    );
+    let retry_tts = coord_tts_rec
+        .process_button_turn("dev-err-tts", dummy_audio, false, false)
+        .await;
+    assert!(
+        retry_tts.is_ok(),
+        "Novo turno deve iniciar imediatamente após falha de TTS: {:?}",
+        retry_tts.err()
     );
 }
 
