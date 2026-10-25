@@ -111,6 +111,16 @@ A verificação comprovou o funcionamento perfeito do motor, demonstrando que o 
   - Latência média por decodificação: **33.22 ms** (máxima: 112.38 ms).
   - Wall-clock total: **520.08 ms** para 5.01s de áudio (**Speedup: 9.6x tempo real**).
 
+### 3.6 Comparativo Arquitetural: KWS Puro (Arq A) vs Silero VAD + KWS (Arq B)
+Submeteu-se a PoC à avaliação pareada entre escuta contínua direta (Arq A) e acoplamento a um VAD neural Silero VAD (ONNX ~643 KB) com buffer circular de pré-roll (Arq B):
+- **Silêncio de Bancada Realtek (`1a142036d81_1.wav` a -67 dBFS):**  
+  A Arq A executou 15 passos de decodificação no KWS (463.88ms). A Arq B identificou ausência total de voz em 106.31ms com **0 decodes no KWS** (economia de 100% de inferência do KWS em repouso).
+- **Ruído / Bluetooth Redmi Buds (`1a141d14d0f_1.wav` com "Yuki, que horas são?"):**  
+  A Arq A não disparou pelo acúmulo de ruído prévio de conexão Bluetooth. A Arq B isolou o bloco limpo de voz de 2.06s (32.928 amostras) e **detectou "Yuki" com sucesso** aos 307.12ms totais.
+- **Fala Baixa / Sussurrada Realtek (`1a141edca97_1.wav` a -51.12 dBFS com "Yuki, me ajuda..."):**  
+  A Arq A detectou a palavra-chave no fluxo contínuo. A Arq B demorou ~200ms para acumular probabilidade de voz no sussurro, e o segmento extraído sem pré-roll concatenado ceifou a consoante inicial [j], fazendo o KWS falhar.
+- **Diretriz Arquitetural Mandatória:** O teste comprovou empiricamente que o Silero VAD é altamente eficaz para economia em silêncio e limpeza de ruído, mas exige **obrigatoriamente um buffer circular de pré-roll (mínimo 400ms a 600ms)** concatenado antes do segmento de voz para não perder o início de chamadas sussurradas.
+
 ---
 
 ## 4. Quadro Comparativo: sherpa-onnx KWS vs Whisper SttWakeWordEngine
@@ -121,7 +131,7 @@ A verificação comprovou o funcionamento perfeito do motor, demonstrando que o 
 | **Custo por Sessão de Áudio** | **0.00 ms** (stream limpo) | 1.8s a 3.2s de inicialização de processo | `sherpa-onnx` infinitamente superior |
 | **Consumo de Memória (RAM)** | **~60 MB a 65 MB** | ~350 MB a 600 MB (Whisper base/small) | Economia de ~85% de memória |
 | **Latência por Bloco de 100ms** | **25 ms a 35 ms** | Inviável em streaming curto | Viabiliza escuta contínua de baixa potência |
-| **Suporte a PT-BR sem Treino** | ❌ **Incompatível (0% TP)** | ✅ **Compatível (~87.5% com prompt)** | Whisper compreende fonética de PT-BR |
+| **Suporte a PT-BR sem Treino** | ⚠️ **Parcial (33.3% TP com Variante 3)** | ✅ **Compatível (~87.5% com prompt)** | Zipformer detectou fala suave (-51 dBFS); Whisper requer prompt |
 | **Rejeição a Ruído / Terceiros** | ✅ **100% TN** (rejeita áudios sem Yuki) | ⚠️ Suscetível a alucinações ("you", etc.) | KWS dedicado tem alta rejeição acústica |
 
 ---
@@ -130,16 +140,16 @@ A verificação comprovou o funcionamento perfeito do motor, demonstrando que o 
 
 ### Alternativa A: openWakeWord com Modelo Customizado em PT-BR
 - **Estrutura:** Rede neural leve baseada em melspectrograma exportada para ONNX (~3MB a 5MB).
-- **Treinamento Sintético:** O framework openWakeWord treina modelos a partir de 50.000 amostras sintéticas de TTS (Piper/Edge-TTS em português com sotaques regionais) combinadas com ruídos ambientes.
+- **Treinamento Sintético:** O framework openWakeWord treina modelos a partir de 2.000 a 3.000 amostras sintéticas de TTS (Piper/Edge-TTS em português com sotaques regionais) combinadas com ruídos ambientes e adversariais fonéticos.
 - **Integração em Rust:** Pode ser executada nativamente em Rust via `ort` (ONNX Runtime, já testado e validado neste experimento).
 - **Classificação:** **Caminho mais viável e sustentável.**
 
 ### Alternativa B: Treinamento / Fine-tuning de Zipformer no sherpa-onnx (icefall/k2)
 - Exige infraestrutura de treino pesado em PyTorch/CUDA e centenas de horas de corpora PT-BR. Custo-benefício desfavorável no momento.
 
-### Alternativa C: Arquitetura em Dois Estágios (Silero VAD + Wake Word Dedicado)
-- **Estágio 1:** Silero VAD ONNX (~2MB, <1% CPU) filtrando 100% do tempo de silêncio e ruído de fundo.
-- **Estágio 2:** Modelo dedicado de palavra-chave (openWakeWord ou Whisper primed) acionado apenas quando voz humana for confirmada.
+### Alternativa C: Arquitetura em Dois Estágios (Silero VAD + Pré-roll + Wake Word Dedicado)
+- **Estágio 1:** Silero VAD ONNX (~643 KB, <1% CPU) filtrando 100% do tempo de silêncio e ruído contínuo, com buffer circular de pré-roll de 400ms a 600ms.
+- **Estágio 2:** Modelo dedicado de palavra-chave (openWakeWord treinado) acionado apenas quando voz humana for confirmada.
 
 ---
 
