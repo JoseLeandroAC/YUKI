@@ -882,3 +882,56 @@ Em conformidade com a visão de longo prazo do projeto e preservando o princípi
 
 > [!NOTE]
 > **Status de Governança:** As propostas acima são estritamente documentais e representam planejamento estratégico futuro. Nenhuma capacidade, conector, tabela de banco de dados ou integração externa foi implementada no runtime. O projeto permanece no **Marco 8.1.1**, com o subsistema de voz mantido formalmente como **NÃO HOMOLOGADO FISICAMENTE** até a conclusão dos testes de bancada pelo operador.
+
+---
+
+26. Registro de Validação Experimental de Wake Word, Continuidade Conversacional e Governança Vocal (Marco 8.1.1)
+
+Em conformidade com a auditoria de validade experimental do Marco 8.1.1, a suíte de testes de voz foi completamente reestruturada (`tests/voice_conversational_and_wakeword.rs`), eliminando fragilidades metodológicas anteriores e estabelecendo uma separação estrita e inequívoca entre testes contratuais simulados e testes empíricos de bancada física:
+
+1. **Separação Estrutural da Suíte de Testes:**
+   - **Parte A: Suíte Simulada de Integração e Contratos (CI / sem hardware):** 18 testes determinísticos e autossuficientes executados continuamente em qualquer ambiente de integração contínua (Windows e Linux) sem dependência de microfones físicos, arquivos externos de áudio ou binários compilados do Whisper.
+   - **Parte B: Bateria Física Opt-in (`#[ignore]`) com Whisper Real:** 5 testes empíricos executados exclusivamente quando acionados pelo operador via flag `--ignored`, submetendo gravações canônicas autênticas (`data/voice_diag/`) diretamente ao decodificador real do Whisper local (`LocalWhisperSttProvider`), sem mascaramento por mocks textuais e com **falha explícita (`panic!`)** se algum arquivo de bancada faltar.
+
+2. **Resultados e Descobertas Empíricas da Bateria Física (Parte B):**
+   - **Detecção com Condicionamento Léxico e Incerteza Acústica em Baseline (`canonical_16k_diag_1a141d14d0f_1.wav`):**
+     - Dispositivo: Redmi Buds 6 Play (Bluetooth HFP).
+     - Frase pretendida pelo operador: *"Yuki, que horas são?"*.
+     - Em modo baseline puro (sem prompt): O decodificador do Whisper omite a palavra de ativação e transcreve apenas *"Que horas são?"*. Como resultado, o `SttWakeWordEngine` retorna `None`, documentando factualmente a incerteza acústica e a perda do formante de ativação na decodificação crua.
+     - Em modo condicionado léxica e contextualmente (`with_default_prompt_for_language()`, utilizando o preset de vocabulário pt-BR `"Yuki, FUVEST, OBMEP, Engenharia de Computação."`): O Whisper restaura a âncora fonética e transcreve perfeitamente *"Yuki, que horas são?"*, permitindo ao `SttWakeWordEngine` validar a palavra-chave e produzir ativação legítima com confiança 0.95.
+   - **Rejeição de Áudio de Fundo e Terceiros (`canonical_16k_diag_1a141c9c7b6_1.wav`):**
+     - Dispositivo: Redmi Buds 6 Play.
+     - Conteúdo autêntico: Conversa de familiares e áudio de vídeo do Iberê ao fundo do ambiente.
+     - Transcrição observada no Whisper real: *"Você tem que ver o que é que está acontecendo."* (sem menção a "Yuki").
+     - Comportamento: O `SttWakeWordEngine` rejeita legitimamente a janela (zero ativações espúrias).
+   - **Rejeição de Fala do Operador sem Palavra-Chave (`canonical_16k_diag_1a1420049f7_1.wav`):**
+     - Dispositivo: Microfone integrado Realtek.
+     - Frase pretendida pelo operador: *"Hoje vou estudar matemática para a FUVEST."* (comando real, porém sem a palavra-chave "Yuki").
+     - Transcrição observada no Whisper real: Não contém "Yuki".
+     - Comportamento: O `SttWakeWordEngine` rejeita a ativação (zero falsos positivos).
+   - **Rejeição de Silêncio Ambiental Puro (`canonical_16k_diag_1a142036d81_1.wav`):**
+     - Dispositivo: Realtek (-67.17 dBFS).
+     - Comportamento: O VAD rejeita todos os quadros, assegurando que o motor STT não seja acionado desnecessariamente.
+   - **Discriminação de Fala Fraca / Baixa Amplitude (`canonical_16k_diag_1a141edca97_1.wav`):**
+     - Dispositivo: Realtek (-51.12 dBFS / RMS ~91, pico 945).
+     - VAD legado quadro a quadro (20ms, threshold 300 RMS): Rejeita 100% dos quadros isolados (0 ativados).
+     - VAD legado em janela acumulada (10 quadros de 100ms): Média entre 90 e 180 RMS, rejeitando integralmente a janela.
+     - Detector janelado adaptativo (`WindowedSilenceConfig`, threshold 80 RMS): Captura 83 janelas ativas com run contíguo sustentado de 37 janelas (740ms), atestando formalmente a capacidade de preservar falas reais sussurradas.
+
+3. **Fortalecimento e Cobertura da Suíte Simulada (Parte A):**
+   - **Asserção Rígida de Vulnerabilidade Acústica:** Demonstração determinística de que o motor acústico experimental `PhoneticPatternWakeWordEngine` é vulnerável a falsos positivos diante de sinais dissilábicos sintéticos não-Yuki (tons de 640 Hz e 1600 Hz com envelope dissilábico), justificando a política *fail-closed* que bloqueia sua auto-ativação por padrão.
+   - **Auditoria de Conexão no CLI:** Confirmação de que o `VoiceConversationCoordinator` armazena o detector, mas a CLI (`src/main.rs`) conecta exclusivamente comandos Push-to-Talk (`VoiceCommands::Turn`), não existindo atualmente escuta contínua em background.
+   - **Auditoria de Estado de Sessão pós-Erro:** Verificação de que falhas em STT, Core ou TTS retêm a sessão registrada em seu respectivo estado (`Transcribing`, `Processing`, `Synthesizing`), comprovando a recuperação governada via `coordinator.interrupt(device_id)`.
+   - **Segurança e Isolamento Ontológico (`Data != Instruction`):** Comprovação de que injeções de prompt e comandos destrutivos transcritos são tratados estritamente como dados textuais não-confiáveis, sem execução de ferramentas.
+   - **Portão de Aprovação Humana à Prova de Voz:** O `MissionApprovalManager` rejeitou tentativas de autorização vocal contra solicitações de aprovação reais pendentes com token criptográfico de 32 hex no SQLite, falhando com `ApprovalMismatch` tanto na ausência de token quanto diante de frases orais arbitrárias.
+   - **Continuidade Conversacional e Histórico:** O `PromptBudgetManager` formata o slice multi-turno em `### HISTÓRICO RECENTE:`. Documentou-se a lacuna pontual em `src/core/yuki_core.rs` (onde a chamada atual passa `&[]`), e validou-se a máquina de estados `VoiceSessionState` permitindo transições `Speaking -> WakeListening` e `Interrupted -> WakeListening`.
+
+Resultados verificados:
+- `cargo test --test voice_conversational_and_wakeword`: 18 testes aprovados (0 falhas; 5 testes físicos ignorados aguardando `--ignored`);
+- `cargo test --test voice_conversational_and_wakeword physical_ -- --ignored --nocapture`: 5/5 testes de bancada física aprovados com Whisper real e WAVs autênticos;
+- Suíte geral de testes de voz: 98 testes aprovados em `tests/voice_*`;
+- `cargo fmt --check`: aprovado sem desvios;
+- `cargo clippy --all-targets -- -D warnings`: aprovado com zero advertências.
+
+> [!IMPORTANT]
+> **Status de Homologação:** A conclusão bem-sucedida das baterias de testes automatizados e de bancada atesta a robustez contratual e empírica da implementação, mas o subsistema de voz da Yuki permanece formalmente **NÃO HOMOLOGADO FISICAMENTE** até a homologação final de campo pelo operador humano.
