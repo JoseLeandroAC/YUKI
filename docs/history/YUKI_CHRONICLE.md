@@ -1991,12 +1991,13 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
   - `cargo check`: Aprovado sem erros.
   - `cargo fmt --check`: 100% aprovado sem desvios de formatação.
   - `cargo clippy --all-targets -- -D warnings`: 100% limpo com zero advertências.
-  - `cargo test --test voice_session_recovery`: 8/8 testes aprovados (0 falhas).
+  - `cargo test --test voice_session_recovery`: 9/9 testes aprovados (0 falhas).
   - `cargo test --test voice_conversational_and_wakeword`: 18/18 testes simulados aprovados (0 falhas; 5 testes físicos ignorados aguardando `--ignored`).
-  - Total de testes ativos no workspace: 660 testes aprovados across all targets (0 falhas).
+  - Total de testes ativos no workspace: 661 testes aprovados across all targets (0 falhas).
 
 - **Declaração Oficial**:
-  - `"Marco 8.1.1 — Recuperação segura de sessões conversacionais concluída com fencing monotônico de geração, guardiões RAII contra cancelamentos prematuros, auditoria canônica VoiceProcessingFailed e cobertura de 8 novos testes de integração; retificação empírica e investigação comparativa de Wake Word finalizadas propondo arquitetura desacoplada de ring buffer e KWS; baselines de produção integralmente preservados; STT e Wake Word contínuo permanecem formalmente NÃO HOMOLOGADOS FISICAMENTE aguardando validação final pelo operador humano."`
+  - `"Marco 8.1.1 — Recuperação segura de sessões conversacionais concluída com fencing monotônico de geração, guardiões RAII contra cancelamentos prematuros, isolamento de subprocessos via kill_on_drop, sanitização e minimização de dados em auditoria VoiceProcessingFailed e cobertura de 9 testes de integração comprovando bloqueio de efeitos observáveis em tarefas defasadas; retificação empírica e investigação comparativa de Wake Word finalizadas propondo arquitetura desacoplada de ring buffer e KWS; baselines de produção integralmente preservados; STT e Wake Word contínuo permanecem formalmente NÃO HOMOLOGADOS FISICAMENTE aguardando validação final pelo operador humano."`
+
 
 
 

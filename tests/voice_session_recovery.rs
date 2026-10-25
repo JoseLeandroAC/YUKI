@@ -661,3 +661,183 @@ async fn test_recovery_08_audit_events_and_original_error_preservation() {
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+// ============================================================================
+// 9. EFEITOS OBSERVÁVEIS DO FENCING: TAREFA ANTIGA NÃO INVOCA CORE NEM PLAYBACK
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_09_stale_task_cannot_trigger_core_or_produce_audio() {
+    let dev = "dev-observable-test";
+
+    // Mock STT que pausa após iniciar para simular corrida/atraso
+    struct PausingStt {
+        meta: VoiceProviderMetadata,
+        started: Arc<AtomicBool>,
+        allow_proceed: Arc<tokio::sync::Notify>,
+    }
+    impl yuki::contracts::voice::SpeechToTextProvider for PausingStt {
+        fn metadata(&self) -> &VoiceProviderMetadata {
+            &self.meta
+        }
+        fn health<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), VoiceError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn transcribe<'a>(
+            &'a self,
+            _audio: &'a AudioInput,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, VoiceError>> + Send + 'a>,
+        > {
+            self.started.store(true, Ordering::SeqCst);
+            let notify = self.allow_proceed.clone();
+            Box::pin(async move {
+                notify.notified().await;
+                Ok("Comando atrasado da sessão antiga".to_string())
+            })
+        }
+    }
+
+    let started = Arc::new(AtomicBool::new(false));
+    let allow_proceed = Arc::new(tokio::sync::Notify::new());
+    let pausing_stt = Arc::new(PausingStt {
+        meta: VoiceProviderMetadata::new(
+            "PausingStt",
+            VoiceProviderType::LocalEdge,
+            vec!["pt".to_string()],
+            16000,
+            false,
+            "1.0",
+        ),
+        started: started.clone(),
+        allow_proceed: allow_proceed.clone(),
+    });
+
+    // Provedor de modelo rastreável para efeito observável no Core
+    struct TrackingProvider {
+        called: Arc<AtomicBool>,
+        inner: MockModelProvider,
+    }
+    impl yuki::models::provider::ModelProvider for TrackingProvider {
+        fn generate<'a>(
+            &'a self,
+            request: &'a yuki::models::provider::ModelRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            yuki::models::provider::ModelResponse,
+                            yuki::models::errors::ModelError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.called.store(true, Ordering::SeqCst);
+            self.inner.generate(request)
+        }
+        fn metadata(&self) -> yuki::models::provider::ModelMetadata {
+            self.inner.metadata()
+        }
+        fn health(&self) -> yuki::models::provider::HealthStatus {
+            self.inner.health()
+        }
+    }
+
+    let core_called = Arc::new(AtomicBool::new(false));
+    let core = Arc::new(
+        YukiCore::new().with_model_provider(Arc::new(TrackingProvider {
+            called: core_called.clone(),
+            inner: MockModelProvider::new(),
+        })),
+    );
+
+    let (playback, mock_sink) = AudioPlaybackController::mock();
+    let router = Arc::new(GovernedVoiceRouter::new(
+        pausing_stt,
+        None,
+        Arc::new(MockTtsProvider::new()),
+        None,
+        VoiceConfiguration::default(),
+    ));
+
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let coordinator = Arc::new(VoiceConversationCoordinator::new(
+        core,
+        router,
+        session_mgr.clone(),
+        Arc::new(playback),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    ));
+
+    // Inicia Turno 1 em background
+    let coord1 = coordinator.clone();
+    let turn1_handle = tokio::spawn(async move {
+        coord1
+            .process_button_turn(dev, create_dummy_audio(), false, false)
+            .await
+    });
+
+    // Aguarda Turno 1 entrar em execução dentro do STT
+    for _ in 0..50 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "Turno 1 deve ter iniciado STT"
+    );
+
+    let sess1 = session_mgr.get_session(dev).unwrap();
+    assert_eq!(sess1.generation, 1);
+    assert!(sess1.in_flight);
+
+    // Simula cancelamento/interrupção do Turno 1 e liberação da sessão
+    session_mgr.finish_operation(
+        dev,
+        &sess1.session_id,
+        1,
+        Some(VoiceSessionState::Interrupted),
+    );
+
+    // Turno 2 (Geração 2) inicia no mesmo dispositivo
+    let sess2 = session_mgr
+        .start_session("sess-turno-2", dev, VoiceConfiguration::default())
+        .expect("Turno 2 deve iniciar com sucesso");
+    assert_eq!(sess2.generation, 2);
+    assert_eq!(sess2.session_id, "sess-turno-2");
+
+    // Agora o Turno 1 acorda do STT
+    allow_proceed.notify_one();
+    let turn1_res = turn1_handle.await.unwrap();
+
+    // 1. Efeito Observável: Turno 1 foi barrado com Interrupted
+    assert!(
+        matches!(turn1_res, Err(VoiceError::Interrupted)),
+        "Turno 1 defasado DEVE retornar VoiceError::Interrupted: {:?}",
+        turn1_res
+    );
+
+    // 2. Efeito Observável: O Core NUNCA foi chamado pelo Turno 1
+    assert!(
+        !core_called.load(Ordering::SeqCst),
+        "Core NÃO PODE ter sido invocado por tarefa defasada"
+    );
+
+    // 3. Efeito Observável: O Playback NUNCA recebeu áudio do Turno 1
+    assert_eq!(
+        mock_sink.played_count(),
+        0,
+        "Playback NÃO PODE ter reproduzido áudio de tarefa defasada"
+    );
+
+    // 4. Integridade da Sessão Ativa: Sessão 2 permaneceu intocada
+    let sess_active = session_mgr.get_session(dev).unwrap();
+    assert_eq!(sess_active.session_id, "sess-turno-2");
+    assert_eq!(sess_active.generation, 2);
+}

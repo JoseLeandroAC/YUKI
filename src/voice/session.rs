@@ -209,11 +209,15 @@ impl VoiceSessionManager {
         }
     }
 
-    /// Verifica se a sessão ativa para o dispositivo foi sinalizada como `Interrupted`.
-    pub fn is_interrupted(&self, device_id: &str, session_id: &str) -> bool {
+    /// Verifica se a sessão ativa para o dispositivo foi sinalizada como `Interrupted`
+    /// ou se foi substituída por geração ou sessão posterior.
+    pub fn is_interrupted(&self, device_id: &str, session_id: &str, generation: u64) -> bool {
         let lock = self.active_sessions.lock().unwrap();
         if let Some(existing) = lock.get(device_id) {
-            existing.session_id == session_id && existing.state == VoiceSessionState::Interrupted
+            if existing.session_id != session_id || existing.generation != generation {
+                return true; // Sessão substituída por geração posterior é tratada como interrompida/obsoleta
+            }
+            existing.state == VoiceSessionState::Interrupted
         } else {
             true // Sessão inexistente ou fechada é tratada como interrompida/inválida
         }

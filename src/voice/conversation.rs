@@ -209,6 +209,7 @@ impl VoiceConversationCoordinator {
             }
             Err(e) => {
                 let err_str = e.to_string();
+                let phase = session.state.to_string();
                 if session.state != VoiceSessionState::Idle {
                     let _ = session.transition_to(VoiceSessionState::Failed(err_str.clone()));
                 }
@@ -216,13 +217,34 @@ impl VoiceConversationCoordinator {
                 self.session_manager.update_session(&session);
                 guard.mark_completed();
 
+                let error_kind = match &e {
+                    VoiceError::TranscriptionFailed(_) => "TranscriptionFailed",
+                    VoiceError::SynthesisFailed(_) => "SynthesisFailed",
+                    VoiceError::UnauthorizedCloudFallback(_) => "UnauthorizedCloudFallback",
+                    VoiceError::ProviderUnavailable(_) => "ProviderUnavailable",
+                    VoiceError::Timeout(_) => "Timeout",
+                    VoiceError::Interrupted => "Interrupted",
+                    VoiceError::SessionConflict(_) => "SessionConflict",
+                    VoiceError::InvalidStateTransition { .. } => "InvalidStateTransition",
+                    VoiceError::PlaybackFailed(_) => "PlaybackFailed",
+                    VoiceError::AudioTooLarge { .. } => "AudioTooLarge",
+                    VoiceError::AudioTooLong { .. } => "AudioTooLong",
+                    VoiceError::DeviceUnavailable(_) => "DeviceUnavailable",
+                    VoiceError::Io(_) => "Io",
+                    _ => "Other",
+                };
+
+                let sanitized_err = sanitize_error_for_audit(&err_str);
+
                 self.record_audit_event(
                     EventType::VoiceProcessingFailed,
                     serde_json::json!({
                         "device_id": device_id,
                         "session_id": session_id,
                         "generation": session.generation,
-                        "error": err_str,
+                        "phase": phase,
+                        "error_kind": error_kind,
+                        "error": sanitized_err,
                     }),
                 )
                 .await;
@@ -246,7 +268,7 @@ impl VoiceConversationCoordinator {
 
         if self
             .session_manager
-            .is_interrupted(device_id, &session.session_id)
+            .is_interrupted(device_id, &session.session_id, session.generation)
         {
             return Err(VoiceError::Interrupted);
         }
@@ -262,7 +284,7 @@ impl VoiceConversationCoordinator {
 
         if self
             .session_manager
-            .is_interrupted(device_id, &session.session_id)
+            .is_interrupted(device_id, &session.session_id, session.generation)
         {
             return Err(VoiceError::Interrupted);
         }
@@ -272,6 +294,8 @@ impl VoiceConversationCoordinator {
             EventType::VoiceInputReceived,
             serde_json::json!({
                 "device_id": device_id,
+                "session_id": session.session_id,
+                "generation": session.generation,
                 "duration_ms": audio_input.duration_ms,
                 "sample_rate": audio_input.format.sample_rate,
                 "text_char_count": transcribed_text.chars().count(),
@@ -294,7 +318,7 @@ impl VoiceConversationCoordinator {
 
         if self
             .session_manager
-            .is_interrupted(device_id, &session.session_id)
+            .is_interrupted(device_id, &session.session_id, session.generation)
         {
             return Err(VoiceError::Interrupted);
         }
@@ -308,7 +332,7 @@ impl VoiceConversationCoordinator {
 
         if self
             .session_manager
-            .is_interrupted(device_id, &session.session_id)
+            .is_interrupted(device_id, &session.session_id, session.generation)
         {
             return Err(VoiceError::Interrupted);
         }
@@ -324,7 +348,7 @@ impl VoiceConversationCoordinator {
 
         if self
             .session_manager
-            .is_interrupted(device_id, &session.session_id)
+            .is_interrupted(device_id, &session.session_id, session.generation)
         {
             return Err(VoiceError::Interrupted);
         }
@@ -334,6 +358,8 @@ impl VoiceConversationCoordinator {
             EventType::VoiceOutputProduced,
             serde_json::json!({
                 "device_id": device_id,
+                "session_id": session.session_id,
+                "generation": session.generation,
                 "duration_ms": audio_output.duration_ms,
                 "voice_name": audio_output.voice_name,
                 "response_char_count": user_output.content.chars().count(),
@@ -344,6 +370,13 @@ impl VoiceConversationCoordinator {
         // 5. Inicia reprodução segura
         session.transition_to(VoiceSessionState::Speaking)?;
         self.session_manager.update_session(session);
+
+        if self
+            .session_manager
+            .is_interrupted(device_id, &session.session_id, session.generation)
+        {
+            return Err(VoiceError::Interrupted);
+        }
 
         self.playback.play(&audio_output)?;
 
@@ -430,4 +463,32 @@ impl Drop for SessionTurnGuard {
             );
         }
     }
+}
+
+/// Sanitiza mensagens de erro técnicas antes da persistência no registro de auditoria,
+/// prevenindo a exposição acidental de credenciais, chaves, senhas ou payloads excessivos.
+fn sanitize_error_for_audit(err: &str) -> String {
+    let mut sanitized = err.to_string();
+    let sensitive_keys = [
+        "bearer ",
+        "password",
+        "api_key",
+        "apikey",
+        "private_key",
+        "secret_key",
+        "access_token",
+        "refresh_token",
+    ];
+    for key in &sensitive_keys {
+        if sanitized.to_lowercase().contains(key) {
+            sanitized = format!("[REDACTED_SENSITIVE: error message contained '{}']", key);
+            break;
+        }
+    }
+    // Trunca mensagens excessivamente longas para evitar exaustão de payload no SQLite
+    if sanitized.len() > 500 {
+        sanitized.truncate(500);
+        sanitized.push_str("... [truncated]");
+    }
+    sanitized
 }

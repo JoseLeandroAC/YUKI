@@ -782,6 +782,7 @@ impl LocalWhisperSttProvider {
         let t_sub_start = std::time::Instant::now();
         let timeout_duration = self.config.timeout;
         let mut cmd = tokio::process::Command::new(bin_path);
+        cmd.kill_on_drop(true);
         cmd.arg("-m")
             .arg(model_path)
             .arg("-f")

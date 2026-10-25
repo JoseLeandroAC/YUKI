@@ -378,6 +378,7 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
 
             let timeout_duration = self.config.timeout;
             let mut cmd = tokio::process::Command::new(bin_path);
+            cmd.kill_on_drop(true);
             cmd.arg("-m").arg(model_path);
             if let Some(ref cfg) = self.config.config_json {
                 if cfg.is_file() {

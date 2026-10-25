@@ -117,9 +117,11 @@ A Yuki concluiu todos os marcos da Research v1 (Marcos 1 a 5), Marco 6 (Expansã
         - **Fencing Monotônico Contra Tarefas Atrasadas:** `VoiceSession` recebeu o campo `generation: u64`, incrementado a cada novo turno. As operações `update_session` e `finish_operation` aplicam verificação de cerca (`existing.session_id == session.session_id && existing.generation == session.generation`), rejeitando e logando advertências caso uma tarefa assíncrona antiga tente atualizar uma sessão de geração posterior;
         - **Guardião RAII (`SessionTurnGuard`):** Estrutura encapsulada no `VoiceConversationCoordinator` que, ao sofrer `drop` prematuro (cancelamento de `Future`, aborto externo de task Tokio ou pânico), chama automaticamente `session_manager.finish_operation` limpando `in_flight` e transicionando a sessão para `Interrupted`, evitando travamentos permanentes do dispositivo;
         - **Tratamento de Transcrição Vazia:** Transcrições vazias ou compostas puramente por espaços em branco retornam a sessão limpa para `VoiceSessionState::Idle` e liberam `in_flight = false`, falhando fechado sem acionar o Core;
-        - **Suíte de Testes de Recuperação (`tests/voice_session_recovery.rs`):** 8 testes rigorosos cobrindo retry imediato pós-STT, Core, TTS, Playback, bloqueio durante `in_flight`, barreira de geração contra tarefas atrasadas, cancelamento via drop da future e auditoria estruturada de erros;
+        - **Suíte de Testes de Recuperação (`tests/voice_session_recovery.rs`):** 9 testes rigorosos cobrindo retry imediato pós-STT, Core, TTS, Playback, bloqueio durante `in_flight`, barreira de geração contra tarefas atrasadas, cancelamento via drop da future, auditoria estruturada de erros e efeitos observáveis de bloqueio de Core e Playback para tarefas defasadas;
+        - **Isolamento de Subprocessos via Kernel (`kill_on_drop`):** `LocalWhisperSttProvider` e `LocalPiperTtsProvider` configurados com `cmd.kill_on_drop(true)`, garantindo cancelamento imediato dos processos de SO (Whisper e Piper) caso a `Future` assíncrona seja descartada;
+        - **Sanitização de Auditoria e Minimização:** Função `sanitize_error_for_audit` higienizando mensagens de erro contra segredos, chaves e tokens, com truncamento seguro em 500 caracteres, além de registro estruturado de `session_id` e `generation` em todos os eventos de voz;
         - **Retificação e Investigação Arquitetural de Wake Word:** Retificação de imprecisões do diagnóstico anterior (distinção entre wall-clock de 27.49s e tempo de CPU, desmistificação da projeção não medida de 200s e comprovação de que a falha em janela de 1s decorria de rigidez temporal e corte de fonemas); pesquisa comparativa aprofundada de motores (sherpa-onnx KWS, openWakeWord, Silero VAD ONNX, WindowedSilenceDetector, Phonetic e STT Whisper); proposta arquitetural para worker desacoplado com ring buffer assíncrono, VAD leve prévio, rate limiting/cooldown e cancelamento seguro;
-        - **Métricas:** 660 testes ativos aprovados no workspace (0 falhas; 5 testes live opt-in ignorados; 71/71 testes adversariais; 18/18 simulados conversacionais e 8/8 recuperação de sessões).
+        - **Métricas:** 661 testes ativos aprovados no workspace (0 falhas; 5 testes live opt-in ignorados; 71/71 testes adversariais; 18/18 simulados conversacionais e 9/9 recuperação de sessões).
 
 A situação atual pode ser resumida como:
 
@@ -137,7 +139,7 @@ IMPLEMENTADOS, HARDENED E PRONTOS PARA HOMOLOGAÇÃO EXTERNA
 
 TESTES DE INTEGRAÇÃO & SEGURANÇA (NEGATIVOS E ADVERSARIAIS)
 ████████████████████████████████████████
-660 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 665 TESTES; 71/71 ADVERSARIAIS; 18/18 CONVERSACIONAIS E WAKE WORD; 8/8 RECUPERAÇÃO DE SESSÕES)
+661 TESTES ATIVOS PASSANDO (0 FALHAS, 5 LIVE OPT-IN IGNORADOS, TOTALIZANDO 666 TESTES; 71/71 ADVERSARIAIS; 18/18 CONVERSACIONAIS E WAKE WORD; 9/9 RECUPERAÇÃO DE SESSÕES)
 
 ---
 
