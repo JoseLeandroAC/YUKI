@@ -2043,6 +2043,51 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 - **Declaração Oficial**:
   - `"Marco 8.1.1 — Fechamento de concorrência, robustez de sessões conversacionais e higienização UTF-8 concluídos; precedência incondicional de in_flight sobre timeout validada; proteção estrita contra sobrescrita de sessões interrompidas implementada; mitigação de corrida de áudio em reprodução ativa comprovada; eliminação definitiva de riscos de pânico por truncamento UTF-8 multibyte em logs de auditoria; 13 testes de recuperação e concorrência aprovados; total de 665 testes ativos no workspace 100% verdes; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE até validação final em campo pelo operador humano."`
 
+---
+
+## 2026-10-25 — Marco 8.1.1: Fechamento Atômico de Turnos, Proteção de Playback Ativo e Testes Determinísticos Concorrentes
+
+- **Contexto e Motivação**:
+  - Na revisão do commit `33c1dfd`, foram identificadas duas condições de concorrência residuais no gerenciamento de turnos e reprodução:
+    1. **Janela de corrida e falso sucesso no encerramento de turno:** no caminho `Ok(output)` de `VoiceConversationCoordinator::process_button_turn`, a sequência de verificação manual (`is_interrupted()`, transição local para `Idle`, chamada a `update_session()` e `guard.mark_completed()`) deixava uma janela TOCTOU aberta onde uma interrupção concorrente tardia resultava em retorno de erro sem liberar `in_flight = false` no manager, ou em caso de rejeição de `update_session()`, podia induzir falso sucesso ou travamento permanente do dispositivo.
+    2. **Vazamento de autorização de playback em `SessionConflict`:** `self.playback.interrupt()` era chamado no início do turno *antes* de `start_session()`. Se um segundo turno ou clique acidental fosse rejeitado por `SessionConflict` devido à concorrência, ele silenciava e interrompia indevidamente o áudio da sessão ativa legítima em reprodução.
+    3. **Necessidade de testes determinísticos concorrentes:** comprovar por barreiras atômicas (`tokio::sync::Notify`), sem depender exclusivamente de sleeps temporais, a integridade da exclusão mútua, desocupação de `in_flight`, proteção de playback ativo e preservação de barge-in intencional.
+
+- **Implementações e Resoluções Técnicas**:
+  1. **Encerramento Atômico de Turno (`src/voice/session.rs` e `src/voice/conversation.rs`):**
+     - Criado o método atômico `VoiceSessionManager::complete_turn(&self, device_id, session_id, generation) -> Result<(), VoiceError>` sob lock exclusivo único do `Mutex<HashMap>`.
+     - Validação atômica estrita:
+       - Verifica se `session_id` e `generation` coincidem rigorosamente com a sessão ativa no dispositivo (rejeita tarefas defasadas com `VoiceError::SessionConflict`).
+       - Se for detectada interrupção concorrente tardia (`state == Interrupted`), desocupa o dispositivo (`in_flight = false`), preserva o estado `Interrupted` e retorna `Err(VoiceError::Interrupted)`.
+       - Se válida e não-interrompida, efetua a transição para `Idle`, limpa `in_flight = false` e retorna `Ok(())`.
+     - Criado o método atômico `VoiceSessionManager::fail_turn(&self, device_id, session_id, generation, error_state)` sob lock exclusivo, garantindo liberação incondicional de `in_flight = false` e preservação de `Interrupted`.
+     - Criado `VoiceSessionManager::interrupt_session(&self, device_id) -> bool` executando a interrupção atômica sob lock.
+     - `VoiceConversationCoordinator::process_button_turn` refatorado para delegar conclusões e falhas integralmente a `complete_turn` e `fail_turn`.
+  2. **Proteção do Playback Ativo contra `SessionConflict` (`src/voice/conversation.rs`):**
+     - A chamada `self.playback.interrupt()` foi movida para ocorrer estritamente *após* `start_session()` validar a ausência de conflitos e reservar a sessão ativa no dispositivo.
+     - Tentativas de início concorrentes rejeitadas por `SessionConflict` falham fechado sem tocar e sem silenciar a reprodução da sessão ativa legítima.
+     - O barge-in deliberado pelo operador via `coordinator.interrupt(device_id)` continua preservado com interrupção atômica de sessão e silenciamento imediato de playback.
+  3. **Preservação de `Idle` em Transcrições Vazias:**
+     - Quando transcrições vazias ou compostas unicamente por espaços em branco ocorrem, a sessão é retornada para `VoiceSessionState::Idle` e `in_flight = false` é liberado sem transição indevida para `Failed`.
+
+- **Testes Concorrentes Determinísticos (`tests/voice_session_recovery.rs`):**
+  - Implementados 3 novos testes determinísticos com sincronização por `tokio::sync::Notify` e flags atômicas (totalizando 16 testes na suíte):
+    - `test_recovery_14_late_interruption_during_turn_completion_releases_in_flight_and_prevents_false_success`: comprova unitariamente e com fluxo coordenador que interrupção tardia durante a conclusão não gera falso sucesso, libera `in_flight = false` e permite início imediato do próximo turno.
+    - `test_recovery_15_rejected_session_conflict_does_not_interrupt_active_playback_or_break_barge_in`: comprova que nova tentativa rejeitada com `SessionConflict` não interrompe o playback em andamento (`interrupted_count() == 0`), enquanto o comando explícito `coordinator.interrupt()` realiza o barge-in intencional (`interrupted_count() == 1`).
+    - `test_recovery_16_atomic_complete_turn_rejects_stale_generation_and_preserves_new_session`: comprova que chamadas de `complete_turn` e `fail_turn` de sessões e gerações obsoletas são rejeitadas com `SessionConflict` e não afetam a sessão nova ativa.
+
+- **Métricas Finais e Portões de Qualidade**:
+  - `cargo fmt --check`: 100% aprovado sem desvios.
+  - `cargo clippy --all-targets -- -D warnings`: 100% limpo com zero avisos.
+  - `cargo test --test voice_session_recovery`: 16/16 testes aprovados (0 falhas).
+  - `cargo test --test voice_conversational_and_wakeword`: 18/18 testes simulados aprovados (0 falhas; 5 físicos ignorados).
+  - `cargo test --tests`: todos os testes de integração aprovados.
+  - `cargo test`: 100% aprovado across all targets.
+
+- **Declaração Oficial**:
+  - `"Marco 8.1.1 — Fechamento atômico de turnos, proteção de playback ativo contra conflitos de sessão e testes determinísticos concorrentes concluídos; complete_turn e fail_turn atômicos sob lock do manager; in_flight rigorosamente liberado em todos os caminhos; interrupção tardia blindada contra falso sucesso; isolamento de playback ativo comprovado; 16 testes de recuperação e concorrência 100% aprovados; STT mantido formalmente como NÃO HOMOLOGADO FISICAMENTE aguardando validação final pelo operador humano."`
+
+
 
 
 

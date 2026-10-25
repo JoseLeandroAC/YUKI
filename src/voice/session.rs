@@ -206,6 +206,87 @@ impl VoiceSessionManager {
         false
     }
 
+    /// Conclui atomicamente um turno conversacional com sucesso sob lock exclusivo.
+    ///
+    /// Validação atômica e invariantes:
+    /// 1. Verifica se `session_id` e `generation` coincidem rigorosamente com a sessão ativa no dispositivo.
+    ///    Se divergir, retorna `Err(VoiceError::SessionConflict)`.
+    /// 2. Se a sessão ativa foi assinalada como `Interrupted` concorrentemente (ex: interrupção tardia ou barge-in),
+    ///    libera `in_flight = false` para desocupar o dispositivo, preserva o estado `Interrupted`
+    ///    e retorna `Err(VoiceError::Interrupted)`.
+    /// 3. Se for válida e não-interrompida, transita para `VoiceSessionState::Idle`, limpa `in_flight = false`
+    ///    e retorna `Ok(())`.
+    pub fn complete_turn(
+        &self,
+        device_id: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<(), VoiceError> {
+        let mut lock = self.active_sessions.lock().unwrap();
+        if let Some(existing) = lock.get_mut(device_id) {
+            if existing.session_id != session_id || existing.generation != generation {
+                return Err(VoiceError::SessionConflict(format!(
+                    "Tentativa de concluir turno obsoleto na sessão '{}' (geração {}), sessão ativa atual é '{}' (geração {})",
+                    session_id, generation, existing.session_id, existing.generation
+                )));
+            }
+
+            if existing.state == VoiceSessionState::Interrupted {
+                // Interrupção tardia detectada na finalização:
+                // Libera in_flight = false para que o dispositivo não fique permanentemente ocupado,
+                // mas preserva o estado Interrupted e sinaliza erro ao coordenador para evitar sucesso falso.
+                existing.in_flight = false;
+                return Err(VoiceError::Interrupted);
+            }
+
+            existing.in_flight = false;
+            existing.transition_to(VoiceSessionState::Idle)?;
+            Ok(())
+        } else {
+            Err(VoiceError::SessionConflict(format!(
+                "Nenhuma sessão ativa encontrada para o dispositivo '{}'",
+                device_id
+            )))
+        }
+    }
+
+    /// Encerra atomicamente um turno conversacional com falha ou cancelamento sob lock exclusivo.
+    ///
+    /// Validação atômica e invariantes:
+    /// 1. Verifica se `session_id` e `generation` coincidem com a sessão ativa.
+    /// 2. Libera `in_flight = false` incondicionalmente para a geração correspondente.
+    /// 3. Se a sessão vigente já estava `Interrupted`, preserva `Interrupted`.
+    ///    Caso contrário, aplica o estado de erro fornecido.
+    pub fn fail_turn(
+        &self,
+        device_id: &str,
+        session_id: &str,
+        generation: u64,
+        error_state: VoiceSessionState,
+    ) {
+        let mut lock = self.active_sessions.lock().unwrap();
+        if let Some(existing) = lock.get_mut(device_id) {
+            if existing.session_id == session_id && existing.generation == generation {
+                existing.in_flight = false;
+                if existing.state != VoiceSessionState::Interrupted {
+                    let _ = existing.transition_to(error_state);
+                }
+            }
+        }
+    }
+
+    /// Interrompe atomicamente a sessão ativa registrada para o dispositivo.
+    /// Retorna `true` se havia sessão ativa e a transição para `Interrupted` foi realizada.
+    pub fn interrupt_session(&self, device_id: &str) -> bool {
+        let mut lock = self.active_sessions.lock().unwrap();
+        if let Some(existing) = lock.get_mut(device_id) {
+            let _ = existing.interrupt();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Marca o encerramento da operação assíncrona em curso, limpando `in_flight`
     /// e aplicando opcionalmente um estado terminal se a geração e o `session_id` coincidirem.
     pub fn finish_operation(
@@ -215,15 +296,12 @@ impl VoiceSessionManager {
         generation: u64,
         final_state: Option<VoiceSessionState>,
     ) {
-        let mut lock = self.active_sessions.lock().unwrap();
-        if let Some(existing) = lock.get_mut(device_id) {
-            if existing.session_id == session_id && existing.generation == generation {
-                existing.in_flight = false;
-                if let Some(state) = final_state {
-                    let _ = existing.transition_to(state);
-                }
-            }
-        }
+        self.fail_turn(
+            device_id,
+            session_id,
+            generation,
+            final_state.unwrap_or(VoiceSessionState::Idle),
+        );
     }
 
     /// Verifica se a sessão ativa para o dispositivo foi sinalizada como `Interrupted`

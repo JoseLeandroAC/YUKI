@@ -171,15 +171,19 @@ impl VoiceConversationCoordinator {
         allow_cloud_stt: bool,
         allow_cloud_tts: bool,
     ) -> Result<(YukiResult, AudioOutput), VoiceError> {
-        // Interrompe reprodução prévia em curso (barge-in do usuário)
-        self.playback.interrupt()?;
-
-        // 1. Inicia sessão governada (geração isolada e in_flight = true)
+        // 1. Inicia sessão governada (geração isolada e in_flight = true).
+        // A validação de conflito de sessão ocorre ANTES de tocar no playback.
+        // Se a tentativa for rejeitada por SessionConflict (ex: turno já em andamento),
+        // o áudio da sessão ativa NÃO É INTERROMPIDO.
         let config = self.router.config().clone();
         let session_id = format!("voice_{}_{}", device_id, uuid_ms());
         let mut session = self
             .session_manager
             .start_session(&session_id, device_id, config)?;
+
+        // Sessão iniciada legitimamente para este dispositivo:
+        // Interrompe qualquer áudio remanescente no sink de turnos anteriores já concluídos.
+        let _ = self.playback.interrupt();
 
         // Guardião RAII que assegura liberação de in_flight caso a future seja abortada/dropada
         let mut guard = SessionTurnGuard::new(
@@ -201,49 +205,74 @@ impl VoiceConversationCoordinator {
 
         match turn_result {
             Ok(output) => {
-                // Se a sessão foi assinalada como Interrupted concorrentemente durante o turno,
-                // cancela o sink de reprodução e rejeita transição para Idle.
-                if self.session_manager.is_interrupted(
+                // Conclusão atômica do turno:
+                // Valida session_id, generation, in_flight e ausência de Interrupted sob lock exclusivo no manager.
+                // Se uma interrupção tardia tiver ocorrido após o último passo de execute_turn_steps,
+                // complete_turn libera in_flight = false, preserva Interrupted e retorna Err(VoiceError::Interrupted).
+                match self.session_manager.complete_turn(
                     device_id,
                     &session.session_id,
                     session.generation,
                 ) {
-                    let _ = self.playback.interrupt();
-                    guard.mark_completed();
-                    return Err(VoiceError::Interrupted);
+                    Ok(()) => {
+                        guard.mark_completed();
+                        Ok(output)
+                    }
+                    Err(e) => {
+                        let _ = self.playback.interrupt();
+                        guard.mark_completed();
+
+                        let phase = session.state.to_string();
+                        let error_kind = match &e {
+                            VoiceError::Interrupted => "Interrupted",
+                            VoiceError::SessionConflict(_) => "SessionConflict",
+                            _ => "Other",
+                        };
+                        let err_str = e.to_string();
+                        let sanitized_err = sanitize_error_for_audit(&err_str);
+
+                        self.record_audit_event(
+                            EventType::VoiceProcessingFailed,
+                            serde_json::json!({
+                                "device_id": device_id,
+                                "session_id": session_id,
+                                "generation": session.generation,
+                                "phase": phase,
+                                "error_kind": error_kind,
+                                "error": sanitized_err,
+                            }),
+                        )
+                        .await;
+
+                        Err(e)
+                    }
                 }
-                session.transition_to(VoiceSessionState::Idle)?;
-                session.in_flight = false;
-                self.session_manager.update_session(&session);
-                guard.mark_completed();
-                Ok(output)
             }
             Err(e) => {
                 let err_str = e.to_string();
                 let phase = session.state.to_string();
-                let is_interrupted_error = matches!(e, VoiceError::Interrupted)
+                let is_interrupted = matches!(e, VoiceError::Interrupted)
                     || self.session_manager.is_interrupted(
                         device_id,
                         &session.session_id,
                         session.generation,
                     );
 
-                if is_interrupted_error {
-                    session.in_flight = false;
-                    let _ = session.transition_to(VoiceSessionState::Interrupted);
-                    self.session_manager.finish_operation(
-                        device_id,
-                        &session_id,
-                        session.generation,
-                        Some(VoiceSessionState::Interrupted),
-                    );
+                let error_state = if is_interrupted {
+                    VoiceSessionState::Interrupted
+                } else if session.state == VoiceSessionState::Idle {
+                    VoiceSessionState::Idle
                 } else {
-                    if session.state != VoiceSessionState::Idle {
-                        let _ = session.transition_to(VoiceSessionState::Failed(err_str.clone()));
-                    }
-                    session.in_flight = false;
-                    self.session_manager.update_session(&session);
-                }
+                    VoiceSessionState::Failed(err_str.clone())
+                };
+
+                // Encerramento atômico com liberação garantida de in_flight
+                self.session_manager.fail_turn(
+                    device_id,
+                    &session_id,
+                    session.generation,
+                    error_state,
+                );
                 guard.mark_completed();
 
                 let error_kind = match &e {
@@ -449,13 +478,10 @@ impl VoiceConversationCoordinator {
         Ok((user_output, audio_output))
     }
 
-    /// Interrompe qualquer fala em andamento.
+    /// Interrompe qualquer fala em andamento e assinala a sessão ativa como interrompida (barge-in intencional).
     pub fn interrupt(&self, device_id: &str) -> Result<(), VoiceError> {
         self.playback.interrupt()?;
-        if let Some(mut session) = self.session_manager.get_session(device_id) {
-            let _ = session.interrupt();
-            self.session_manager.update_session(&session);
-        }
+        self.session_manager.interrupt_session(device_id);
         Ok(())
     }
 
@@ -521,11 +547,11 @@ impl SessionTurnGuard {
 impl Drop for SessionTurnGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.session_manager.finish_operation(
+            self.session_manager.fail_turn(
                 &self.device_id,
                 &self.session_id,
                 self.generation,
-                Some(VoiceSessionState::Interrupted),
+                VoiceSessionState::Interrupted,
             );
         }
     }

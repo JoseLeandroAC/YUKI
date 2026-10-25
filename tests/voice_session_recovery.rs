@@ -1214,3 +1214,316 @@ fn uuid_ms_test() -> String {
         .as_nanos();
     format!("{:x}", ms)
 }
+
+// ============================================================================
+// 14. ENCERRAMENTO ATÔMICO, INTERRUPÇÃO TARDIA E PREVENÇÃO DE SUCESSO FALSO
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_14_late_interruption_during_turn_completion_releases_in_flight_and_prevents_false_success(
+) {
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let dev = "dev-late-interrupt";
+
+    // 1. Validação unitária atômica no VoiceSessionManager
+    let sess = session_mgr
+        .start_session("sess-1", dev, VoiceConfiguration::default())
+        .expect("Sessão inicial deve ser criada");
+    assert_eq!(sess.generation, 1);
+    assert!(sess.in_flight);
+
+    // Operador aciona interrupção concorrente (barge-in / cancelamento)
+    assert!(session_mgr.interrupt_session(dev));
+    let sess_int = session_mgr.get_session(dev).unwrap();
+    assert_eq!(sess_int.state, VoiceSessionState::Interrupted);
+
+    // Tentativa de concluir o turno com complete_turn
+    let res = session_mgr.complete_turn(dev, &sess.session_id, sess.generation);
+
+    // Invariante 1: Não produz falso sucesso
+    assert!(
+        matches!(res, Err(VoiceError::Interrupted)),
+        "complete_turn deve retornar Err(VoiceError::Interrupted), obtido: {:?}",
+        res
+    );
+
+    // Invariante 2: in_flight é liberado (não fica preso) e estado Interrupted é preservado
+    let sess_after = session_mgr.get_session(dev).unwrap();
+    assert!(
+        !sess_after.in_flight,
+        "in_flight deve ser liberado para permitir novo turno"
+    );
+    assert_eq!(
+        sess_after.state,
+        VoiceSessionState::Interrupted,
+        "Estado deve permanecer Interrupted"
+    );
+
+    // Invariante 3: Novo turno no mesmo dispositivo pode iniciar imediatamente sem SessionConflict
+    let sess2 = session_mgr
+        .start_session("sess-2", dev, VoiceConfiguration::default())
+        .expect("Novo turno deve iniciar sem conflito");
+    assert_eq!(sess2.generation, 2);
+    assert!(sess2.in_flight);
+
+    // 2. Validação integrada determinística com VoiceConversationCoordinator
+    let started = Arc::new(AtomicBool::new(false));
+    let step_barrier = Arc::new(tokio::sync::Notify::new());
+
+    struct SyncTtsProvider {
+        meta: VoiceProviderMetadata,
+        started: Arc<AtomicBool>,
+        step_barrier: Arc<tokio::sync::Notify>,
+    }
+    impl yuki::contracts::voice::TextToSpeechProvider for SyncTtsProvider {
+        fn metadata(&self) -> &VoiceProviderMetadata {
+            &self.meta
+        }
+        fn health<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), VoiceError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn synthesize<'a>(
+            &'a self,
+            _text: &'a str,
+            _voice_params: Option<&'a VoiceConfiguration>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<yuki::contracts::voice::AudioOutput, VoiceError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.started.store(true, Ordering::SeqCst);
+            let barrier = self.step_barrier.clone();
+            Box::pin(async move {
+                barrier.notified().await;
+                Ok(yuki::contracts::voice::AudioOutput::new(
+                    vec![0u8; 100],
+                    AudioFormat::default(),
+                    50,
+                    "test",
+                ))
+            })
+        }
+    }
+
+    let sync_tts = Arc::new(SyncTtsProvider {
+        meta: VoiceProviderMetadata::new(
+            "SyncTts",
+            VoiceProviderType::LocalEdge,
+            vec!["pt".to_string()],
+            16000,
+            false,
+            "1.0",
+        ),
+        started: started.clone(),
+        step_barrier: step_barrier.clone(),
+    });
+
+    let (playback, mock_sink) = AudioPlaybackController::mock();
+    let router = Arc::new(GovernedVoiceRouter::new(
+        Arc::new(MockSttProvider::new().with_response("Yuki comando")),
+        None,
+        sync_tts,
+        None,
+        VoiceConfiguration::default(),
+    ));
+
+    let core = Arc::new(YukiCore::new());
+    let coordinator = Arc::new(VoiceConversationCoordinator::new(
+        core,
+        router,
+        session_mgr.clone(),
+        Arc::new(playback),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    ));
+
+    let dev_coord = "dev-coord-late-interrupt";
+    let coord_clone = coordinator.clone();
+    let turn_handle = tokio::spawn(async move {
+        coord_clone
+            .process_button_turn(dev_coord, create_dummy_audio(), false, false)
+            .await
+    });
+
+    // Aguarda deterministicamente a síntese TTS iniciar
+    while !started.load(Ordering::SeqCst) {
+        tokio::task::yield_now().await;
+    }
+
+    // Operador aciona interrupt() no coordenador enquanto o TTS está finalizando
+    coordinator
+        .interrupt(dev_coord)
+        .expect("Interrupção deve ser registrada");
+
+    // Libera a síntese TTS para terminar
+    step_barrier.notify_one();
+    let turn_result = turn_handle.await.unwrap();
+
+    // Comprova que não houve sucesso falso:
+    assert!(
+        matches!(turn_result, Err(VoiceError::Interrupted)),
+        "Turno deve falhar com Interrupted, obtido: {:?}",
+        turn_result
+    );
+
+    // Comprova que in_flight foi liberado:
+    let final_sess = session_mgr.get_session(dev_coord).unwrap();
+    assert!(
+        !final_sess.in_flight,
+        "in_flight no manager deve ser liberado após interrupção tardia"
+    );
+    assert_eq!(final_sess.state, VoiceSessionState::Interrupted);
+
+    // Comprova que playback foi interrompido e não vazou áudio
+    assert_eq!(mock_sink.interrupted_count(), 2); // 1 do coordinator.interrupt() + 1 da finalização do turno
+}
+
+// ============================================================================
+// 15. PLAYBACK VS SESSIONCONFLICT E PRESERVAÇÃO DE BARGE-IN INTENCIONAL
+// ============================================================================
+#[tokio::test]
+async fn test_recovery_15_rejected_session_conflict_does_not_interrupt_active_playback_or_break_barge_in(
+) {
+    let session_mgr = Arc::new(VoiceSessionManager::new());
+    let dev = "dev-playback-conflict";
+
+    let (playback, mock_sink) = AudioPlaybackController::mock();
+    let router = Arc::new(GovernedVoiceRouter::new(
+        Arc::new(MockSttProvider::new().with_response("Yuki")),
+        None,
+        Arc::new(MockTtsProvider::new()),
+        None,
+        VoiceConfiguration::default(),
+    ));
+
+    let core = Arc::new(YukiCore::new());
+    let coordinator = Arc::new(VoiceConversationCoordinator::new(
+        core,
+        router,
+        session_mgr.clone(),
+        Arc::new(playback),
+        Arc::new(tokio::sync::Mutex::new(WakeWordDetector::default())),
+        None,
+    ));
+
+    // 1. Simula que o Turno 1 está ativo e reproduzindo áudio legítimo
+    let sess1 = session_mgr
+        .start_session("sess-active", dev, VoiceConfiguration::default())
+        .expect("Sessão ativa deve iniciar");
+    assert_eq!(sess1.generation, 1);
+    assert!(sess1.in_flight);
+
+    // Inicia reprodução física/mock
+    let valid_audio = yuki::contracts::voice::AudioOutput::new(
+        vec![0u8; 100],
+        AudioFormat::default(),
+        5000,
+        "voice-active",
+    );
+    coordinator
+        .playback()
+        .play(&valid_audio)
+        .expect("Playback deve iniciar");
+    assert_eq!(
+        coordinator.playback().status(),
+        yuki::voice::playback::PlaybackStatus::Playing
+    );
+    assert_eq!(mock_sink.played_count(), 1);
+    assert_eq!(mock_sink.interrupted_count(), 0);
+
+    // 2. Uma tentativa concorrente ou inválida tenta iniciar novo turno no mesmo dispositivo
+    // (ex: toque acidental no botão ou chamada duplicada)
+    let conflict_attempt = coordinator
+        .process_button_turn(dev, create_dummy_audio(), false, false)
+        .await;
+
+    // INVARIANTE CRÍTICA:
+    // A tentativa é rejeitada com SessionConflict...
+    assert!(
+        matches!(conflict_attempt, Err(VoiceError::SessionConflict(_))),
+        "Tentativa concorrente deve ser rejeitada com SessionConflict: {:?}",
+        conflict_attempt
+    );
+
+    // ...E O ÁUDIO ATIVO NÃO FOI INTERROMPIDO!
+    assert_eq!(
+        coordinator.playback().status(),
+        yuki::voice::playback::PlaybackStatus::Playing,
+        "Playback legítimo da sessão ativa DEVE continuar tocando"
+    );
+    assert_eq!(
+        mock_sink.interrupted_count(),
+        0,
+        "Sink de áudio NÃO PODE ter recebido sinal de interrupção em tentativa rejeitada"
+    );
+
+    // 3. BARGE-IN INTENCIONAL:
+    // Agora o operador deliberadamente aciona a interrupção da reprodução
+    coordinator
+        .interrupt(dev)
+        .expect("Interrupção deliberada deve ter sucesso");
+
+    // Comprova que o barge-in intencional interrompeu imediatamente o áudio:
+    assert_eq!(
+        coordinator.playback().status(),
+        yuki::voice::playback::PlaybackStatus::Interrupted
+    );
+    assert_eq!(mock_sink.interrupted_count(), 1);
+
+    // Comprova que o estado da sessão foi marcado como Interrupted:
+    let sess_after_interrupt = session_mgr.get_session(dev).unwrap();
+    assert_eq!(sess_after_interrupt.state, VoiceSessionState::Interrupted);
+}
+
+// ============================================================================
+// 16. ATOMICIDADE DE COMPLETE_TURN CONTRA SESSÃO OBSOLETA / GERAÇÃO SUPERSEDED
+// ============================================================================
+#[test]
+fn test_recovery_16_atomic_complete_turn_rejects_stale_generation_and_preserves_new_session() {
+    let session_mgr = VoiceSessionManager::new();
+    let dev = "dev-stale-fencing";
+
+    // Sessão 1 inicia na Geração 1
+    let sess1 = session_mgr
+        .start_session("sess-1", dev, VoiceConfiguration::default())
+        .unwrap();
+    assert_eq!(sess1.generation, 1);
+
+    // Sessão 1 conclui
+    session_mgr
+        .complete_turn(dev, "sess-1", 1)
+        .expect("Sessão 1 deve concluir normalmente");
+
+    // Sessão 2 inicia na Geração 2 e passa para Transcribing
+    let mut sess2 = session_mgr
+        .start_session("sess-2", dev, VoiceConfiguration::default())
+        .unwrap();
+    assert_eq!(sess2.generation, 2);
+    sess2.transition_to(VoiceSessionState::Capturing).unwrap();
+    sess2
+        .transition_to(VoiceSessionState::Transcribing)
+        .unwrap();
+    assert!(session_mgr.update_session(&sess2));
+
+    // Agora uma tarefa atrasada (zumbi) da Sessão 1 tenta invocar complete_turn ou fail_turn
+    let stale_complete = session_mgr.complete_turn(dev, "sess-1", 1);
+    assert!(
+        matches!(stale_complete, Err(VoiceError::SessionConflict(_))),
+        "complete_turn da Sessão 1 com geração antiga DEVE ser rejeitado com SessionConflict"
+    );
+
+    // Tentativa com fail_turn de geração antiga
+    session_mgr.fail_turn(dev, "sess-1", 1, VoiceSessionState::Idle);
+
+    // INVARIANTE: A Sessão 2 permaneceu 100% íntegra e ativa
+    let active_sess = session_mgr.get_session(dev).unwrap();
+    assert_eq!(active_sess.session_id, "sess-2");
+    assert_eq!(active_sess.generation, 2);
+    assert_eq!(active_sess.state, VoiceSessionState::Transcribing);
+    assert!(active_sess.in_flight);
+}
