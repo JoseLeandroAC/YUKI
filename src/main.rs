@@ -211,6 +211,39 @@ pub enum VoiceCommands {
         #[arg(long, visible_alias = "diag", default_value_t = false)]
         diagnostics: bool,
     },
+    /// Inicia sessão conversacional de voz ao vivo contínua ativada por 'Yuki' (openWakeWord) com janela de follow-up
+    Live {
+        /// Limiar de ativação para a palavra 'Yuki' (0.0 a 1.0, padrão: 0.45)
+        #[arg(long, default_value_t = 0.45)]
+        threshold: f32,
+        /// Duração da janela conversacional de follow-up em segundos (padrão: 7s)
+        #[arg(long, default_value_t = 7)]
+        follow_up_secs: u64,
+        /// Tempo de silêncio contínuo após fala para declarar fim de fala em ms (padrão: 800ms)
+        #[arg(long, default_value_t = 800)]
+        silence_hangover_ms: u64,
+        /// Duração máxima de captura de cada frase em segundos (padrão: 10s)
+        #[arg(long, default_value_t = 10)]
+        max_phrase_secs: u64,
+        /// Identificador ou nome do dispositivo de microfone de entrada (opcional)
+        #[arg(long)]
+        input_device: Option<String>,
+        /// Identificador ou nome do dispositivo de saída de áudio (opcional)
+        #[arg(long)]
+        output_device: Option<String>,
+        /// Reproduz fisicamente a resposta vocal no alto-falante (padrão: true)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        play: bool,
+        /// Ativa modo de decodificação rápida do Whisper (beam=1, best_of=1, no-fallback)
+        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        fast: bool,
+        /// Permite fallback para transcrição em nuvem (STT)
+        #[arg(long, default_value_t = false)]
+        allow_cloud_stt: bool,
+        /// Permite fallback para síntese em nuvem (TTS)
+        #[arg(long, default_value_t = false)]
+        allow_cloud_tts: bool,
+    },
     /// Executa comparação A/B de decodificação STT sobre um mesmo arquivo WAV (Baseline vs Otimizado)
     CompareStt {
         /// Caminho do arquivo WAV para teste
@@ -1504,6 +1537,177 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 let _ = diagnostics;
                 eprintln!(
                     "Erro: Turno conversacional de voz físico não suportado nesta plataforma."
+                );
+            }
+        }
+        VoiceCommands::Live {
+            threshold,
+            follow_up_secs,
+            silence_hangover_ms,
+            max_phrase_secs,
+            input_device,
+            output_device,
+            play,
+            fast,
+            allow_cloud_stt,
+            allow_cloud_tts,
+        } => {
+            #[cfg(windows)]
+            {
+                use yuki::voice::conversation::VoiceConversationCoordinator;
+                use yuki::voice::playback::AudioPlaybackController;
+
+                let target_input_id = if let Some(ref dev_query) = input_device {
+                    match find_device(dev_query, AudioDeviceFlow::Input) {
+                        Ok(dev) => {
+                            println!("Microfone selecionado: {} (ID: {})", dev.name, dev.id);
+                            Some(dev.id)
+                        }
+                        Err(e) => {
+                            eprintln!("Falha ao resolver microfone '{}': {}", dev_query, e);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let target_output_id = if play {
+                    if let Some(ref dev_query) = output_device {
+                        match find_device(dev_query, AudioDeviceFlow::Output) {
+                            Ok(dev) => {
+                                println!(
+                                    "Dispositivo de saída selecionado: {} (ID: {})",
+                                    dev.name, dev.id
+                                );
+                                Some(dev.id)
+                            }
+                            Err(e) => {
+                                eprintln!("Falha ao resolver saída '{}': {}", dev_query, e);
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Provedor de modelo para o YukiCore
+                let model_provider = resolve_model_provider_from_env()
+                    .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
+                let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
+
+                // Configuração do Whisper STT soberano local
+                let mut whisper_cfg =
+                    yuki::voice::stt::LocalWhisperConfig::default().with_language("pt");
+                if fast {
+                    whisper_cfg = whisper_cfg.with_fast_decoding();
+                }
+                let local_stt =
+                    Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
+
+                // Configuração do Piper TTS soberano local
+                let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
+                    if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
+                        Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
+                    } else {
+                        Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
+                    };
+
+                let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
+                    local_stt,
+                    None,
+                    local_tts,
+                    None,
+                    yuki::contracts::voice::VoiceConfiguration::default(),
+                ));
+
+                let playback_controller = if play {
+                    Arc::new(AudioPlaybackController::production_with_device(
+                        target_output_id,
+                    ))
+                } else {
+                    Arc::new(AudioPlaybackController::for_environment(
+                        yuki::voice::playback::PlaybackEnvironment::Disabled,
+                    ))
+                };
+
+                // Motor openWakeWord treinado para "Yuki" (PT-BR)
+                let oww_config = yuki::voice::wakeword::OpenWakeWordConfig {
+                    activation_threshold: threshold,
+                    ..Default::default()
+                };
+                let oww_engine = match yuki::voice::wakeword::OpenWakeWordEngine::new(oww_config) {
+                    Ok(e) => Arc::new(tokio::sync::Mutex::new(e)),
+                    Err(e) => {
+                        eprintln!("Erro ao inicializar motor openWakeWord: {}", e);
+                        eprintln!("Certifique-se de que os modelos estão em models/wakeword/ e a DLL em bin/onnxruntime/");
+                        return;
+                    }
+                };
+
+                let coordinator = Arc::new(VoiceConversationCoordinator::new(
+                    core,
+                    router,
+                    Arc::new(yuki::voice::session::VoiceSessionManager::new()),
+                    playback_controller,
+                    Arc::new(tokio::sync::Mutex::new(
+                        yuki::voice::wakeword::WakeWordDetector::default(),
+                    )),
+                    None,
+                ));
+
+                let listener_config = yuki::voice::live::VoiceLiveListenerConfig {
+                    threshold,
+                    follow_up_secs,
+                    silence_hangover_ms,
+                    max_phrase_secs,
+                    pre_roll_ms: 600,
+                    acoustic_cooldown_ms: 300,
+                    input_device: target_input_id,
+                    output_device: None,
+                    resampler_kind: yuki::contracts::voice::ResamplerKind::FirAntialiasing,
+                    allow_cloud_stt,
+                    allow_cloud_tts,
+                    ..Default::default()
+                };
+
+                let listener = yuki::voice::live::VoiceLiveListener::new(
+                    listener_config,
+                    coordinator,
+                    oww_engine,
+                );
+
+                let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let shutdown_trigger = shutdown_flag.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(()) = tokio::signal::ctrl_c().await {
+                        println!("\n[Sinal] Ctrl+C detectado. Encerrando sessão de voz...");
+                        shutdown_trigger.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+
+                if let Err(e) = listener.run_with_live_mic(shutdown_flag).await {
+                    eprintln!("Erro na execução do listener ao vivo: {}", e);
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = threshold;
+                let _ = follow_up_secs;
+                let _ = silence_hangover_ms;
+                let _ = max_phrase_secs;
+                let _ = input_device;
+                let _ = output_device;
+                let _ = play;
+                let _ = fast;
+                let _ = allow_cloud_stt;
+                let _ = allow_cloud_tts;
+                eprintln!(
+                    "Erro: Conversação de voz contínua ao vivo não suportada nesta plataforma."
                 );
             }
         }

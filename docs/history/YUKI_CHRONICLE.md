@@ -2162,3 +2162,43 @@ Eliminar rigorosamente qualquer bypass de autenticação no portão humano, impl
 
 - **Declaração Oficial**:
   - `"Marco 8.1.2 — Otimização experimental de pré-roll concluída (janela ideal de 200 ms a 400 ms); primeiro modelo personalizado openWakeWord em PT-BR ('yuki_v0.1.onnx') treinado e integrado ao Rust via ort 2.0; invariante de escala do melspectrograma validado; 100% de acurácia física comprovada nos 6 WAVs canônicos (TP 3/3, TN 3/3, FP 0, FN 0); openWakeWord formalmente selecionado como arquitetura definitiva de KWS; ativação contínua por voz mantida formalmente como NÃO HOMOLOGADA FISICAMENTE aguardando testes ao vivo com operador no Marco 8.1.3."`
+
+## 2026-11-04 — Marco 8.1.3: Integração Real da Voz e Preparação para Homologação (openWakeWord PT-BR + Conversação Contínua)
+
+- **Contexto e Missão**:
+  - Transformar a prova de conceito isolada do openWakeWord (`yuki_v0.1.onnx`) em uma experiência conversacional interativa, contínua e governada em tempo real no Windows x64.
+  - Eliminar a obrigatoriedade exclusiva do Push-to-Talk (PTT), permitindo a ativação contínua por voz ("Yuki"), seguida de fala natural, captura por VAD, resposta do Whisper STT, raciocínio contextual no Yuki Core via histórico multi-turno, síntese de voz no Piper TTS e reprodução WASAPI com supressão de auto-eco acústico e janela de follow-up.
+
+- **Componentes e Arquitetura Implementados**:
+  1. **Motor Soberano openWakeWord Integrado (`src/voice/wakeword.rs`):**
+     - Estrutura `OpenWakeWordEngine` integrada ao código de produção com trait `WakeWordEngine`.
+     - Pipeline ONNX de 3 estágios (`melspectrogram.onnx`, `embedding_model.onnx`, `yuki_v0.1.onnx`) carregado dinamicamente via `ort` 2.0 (`onnxruntime.dll`).
+     - Processamento em blocos de 80 ms (1280 amostras @ 16 kHz mono) com warmup de 16 blocos para estabilização de buffers convolucionais.
+  2. **Captura Contínua Multimídia WASAPI (`src/voice/capture.rs`):**
+     - Função `start_wasapi_continuous_stream` e controlador RAII `WasapiStreamController`.
+     - Thread de captura de baixa latência em modo compartilhado emitindo amostras PCM 16 kHz mono resampleadas em tempo real via `FirAntialiasing`.
+  3. **Orquestrador de Conversação Contínua (`src/voice/live.rs`):**
+     - Máquina de estados conversacional contínua em 4 fases: `AwaitingWakeWord` -> `CapturingPhrase` -> `ProcessingTurn` -> `FollowUpWindow`.
+     - Buffer circular de pré-roll de 600 ms (9600 amostras) para preservação do ataque fonético e início da frase do usuário.
+     - Detecção de fim de fala (End of Speech - EOS) por VAD com ressaca de silêncio de 800 ms e teto de segurança de 10 segundos.
+     - Janela conversacional de *follow-up* de 7 segundos: permite que o operador faça perguntas subsequentes sem necessidade de repetir o nome "Yuki".
+     - Supressão de auto-gatilho acústico: descarte incondicional de áudio de microfone durante a reprodução da fala da assistente, com cooldown acústico adicional de 300 ms pós-playback para rejeição de reverberação ambiental.
+     - Reconhecimento automático de frases de despedida e cancelamento (*"tchau"*, *"até logo"*, *"cancelar"*, *"só isso"*, *"obrigado"*, *"dispensada"*, *"pare"*), retornando imediatamente ao estado de espera.
+  4. **Plumbing de Histórico Conversacional no LLM (`src/contracts/input.rs`, `src/core/yuki_core.rs`):**
+     - Campo `conversation_history` conectado no contrato `UserInput`.
+     - `PromptBudgetManager::assemble_with_tools` alimenta o Tier 5 do prompt do modelo ("### HISTÓRICO RECENTE:"), ativando continuidade semântica multi-turno.
+  5. **Instrumentação Temporal e Métricas Estatísticas (`TurnTimings`, `VoiceLatencyStats`):**
+     - Medição precisa de $T_{\text{ww}}$, $T_{\text{eos}}$, $T_{\text{stt}}$, $T_{\text{core}}$, $T_{\text{tts}}$, $T_{\text{playback}}$ e $T_{\text{total\_audible}}$.
+     - Cálculo de percentis p50 e p95 emitidos no encerramento gracioso via Ctrl+C.
+  6. **Interface de Linha de Comando Oficial (`src/main.rs`):**
+     - Novo comando: `yuki voice live` com parâmetros `--threshold`, `--follow-up-secs`, `--silence-hangover-ms`, `--max-phrase-secs`, `--fast`, `--play`, `--input-device`, `--output-device`.
+
+- **Resultados dos Testes e Portões de Qualidade**:
+  - `tests/voice_live_listener.rs`: 6 testes automatizados + 1 teste físico aprovados com 100% de sucesso.
+  - Teste físico `physical_01_open_wakeword_initialization_and_silence_inference` validou carregamento dos modelos ONNX locais e inferência em silêncio com score < 0.10 em 0.19s.
+  - Zero regressões: 18 testes de conversação/wake word e 16 testes de recuperação de sessões aprovados.
+  - `cargo fmt --check` e `cargo clippy --all-targets -- -D warnings` aprovados com zero warnings.
+
+- **Declaração Oficial**:
+  - `"Marco 8.1.3 — Subsistema conversacional contínuo de voz da Yuki 2.0 integrado com sucesso no Windows x64 via openWakeWord PT-BR ('yuki_v0.1.onnx'), streaming WASAPI, máquina de estados de 4 fases, janela de follow-up de 7s, supressão de auto-eco acústico e histórico multi-turno no prompt budget; comando 'yuki voice live' publicado; portões de qualidade 100% aprovados; sistema preparado para a homologação física interativa com o operador."`
+

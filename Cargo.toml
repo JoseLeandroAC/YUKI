@@ -25,6 +25,7 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 getrandom = "0.2"
 rpassword = "=7.0.0"
+ort = { version = "2.0.0-rc.15", features = ["load-dynamic"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

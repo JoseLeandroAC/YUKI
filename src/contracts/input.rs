@@ -8,6 +8,8 @@ pub struct UserInput {
     pub content: String,
     pub timestamp: DateTime<Utc>,
     pub source: String,
+    #[serde(default)]
+    pub conversation_history: Vec<String>,
 }
 
 impl UserInput {
@@ -17,6 +19,7 @@ impl UserInput {
             content: content.into(),
             timestamp: now_utc(),
             source: "user".to_string(),
+            conversation_history: Vec::new(),
         }
     }
 
@@ -26,6 +29,12 @@ impl UserInput {
             content: content.into(),
             timestamp: now_utc(),
             source: "user".to_string(),
+            conversation_history: Vec::new(),
         }
+    }
+
+    pub fn with_history(mut self, history: Vec<String>) -> Self {
+        self.conversation_history = history;
+        self
     }
 }

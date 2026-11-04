@@ -973,6 +973,377 @@ impl AudioCaptureBackend for WindowsAudioCaptureBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Captura Contínua em Streaming WASAPI (Marco 8.1.3)
+// ---------------------------------------------------------------------------
+
+/// Controlador de captura contínua de áudio via WASAPI em segundo plano.
+#[derive(Debug)]
+pub struct WasapiStreamController {
+    is_running: Arc<AtomicBool>,
+    worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl WasapiStreamController {
+    pub fn new(is_running: Arc<AtomicBool>, handle: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            is_running,
+            worker_handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Sinaliza a interrupção da captura contínua e aguarda a finalização limpa da thread WASAPI.
+    pub fn stop(&self) {
+        self.is_running.store(false, Ordering::SeqCst);
+        if let Ok(mut lock) = self.worker_handle.lock() {
+            if let Some(handle) = lock.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Informa se o stream contínuo de captura ainda está ativo.
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for WasapiStreamController {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Inicia a captura contínua de microfone via WASAPI, emitindo amostras PCM mono 16 kHz em tempo real.
+pub fn start_wasapi_continuous_stream(
+    device_id: Option<String>,
+    resampler_kind: ResamplerKind,
+) -> Result<
+    (
+        Arc<WasapiStreamController>,
+        std::sync::mpsc::Receiver<Vec<i16>>,
+    ),
+    VoiceError,
+> {
+    #[cfg(windows)]
+    {
+        use wasapi_ffi::*;
+
+        let is_running = Arc::new(AtomicBool::new(true));
+        let is_running_flag = is_running.clone();
+        let target_device_id = device_id.clone();
+
+        let (tx_ready, rx_ready) = std::sync::mpsc::channel::<Result<(), VoiceError>>();
+        let (tx_samples, rx_samples) = std::sync::mpsc::channel::<Vec<i16>>();
+
+        let handle = std::thread::spawn(move || {
+            unsafe {
+                let hr = CoInitializeEx(std::ptr::null_mut(), 0);
+                if hr != 0 && hr != 1 {
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao inicializar COM no stream contínuo (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let mut p_enum: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr = CoCreateInstance(
+                    &CLSID_MM_DEVICE_ENUMERATOR,
+                    std::ptr::null_mut(),
+                    1 | 2 | 4 | 16,
+                    &IID_IMM_DEVICE_ENUMERATOR,
+                    &mut p_enum,
+                );
+                if hr != 0 || p_enum.is_null() {
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao instanciar MMDeviceEnumerator (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let enum_vtbl = *(p_enum as *mut *const IMMDeviceEnumeratorVtbl);
+                let mut p_dev: *mut std::ffi::c_void = std::ptr::null_mut();
+
+                if let Some(ref dev_id) = target_device_id {
+                    let wide_id: Vec<u16> =
+                        dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                    let hr = ((*enum_vtbl).GetDevice)(p_enum, wide_id.as_ptr(), &mut p_dev);
+                    if hr != 0 || p_dev.is_null() {
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        is_running_flag.store(false, Ordering::SeqCst);
+                        let _ = tx_ready.send(Err(VoiceError::DeviceUnavailable(format!(
+                            "Dispositivo '{}' não encontrado (0x{:08X})",
+                            dev_id, hr
+                        ))));
+                        return;
+                    }
+                } else {
+                    let hr = ((*enum_vtbl).GetDefaultAudioEndpoint)(p_enum, 1, 0, &mut p_dev);
+                    if hr != 0 || p_dev.is_null() {
+                        ((*enum_vtbl).Release)(p_enum);
+                        CoUninitialize();
+                        is_running_flag.store(false, Ordering::SeqCst);
+                        let _ = tx_ready.send(Err(VoiceError::DeviceUnavailable(format!(
+                            "Nenhum microfone padrão disponível (0x{:08X})",
+                            hr
+                        ))));
+                        return;
+                    }
+                }
+
+                let dev_vtbl = *(p_dev as *mut *const IMMDeviceVtbl);
+                let mut p_client: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr = ((*dev_vtbl).Activate)(
+                    p_dev,
+                    &IID_IAUDIO_CLIENT,
+                    1 | 2 | 4 | 16,
+                    std::ptr::null_mut(),
+                    &mut p_client,
+                );
+                if hr != 0 || p_client.is_null() {
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao ativar IAudioClient (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let client_vtbl = *(p_client as *mut *const IAudioClientVtbl);
+                let mut p_format: *mut WAVEFORMATEX = std::ptr::null_mut();
+                let hr = ((*client_vtbl).GetMixFormat)(p_client, &mut p_format);
+                if hr != 0 || p_format.is_null() {
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao obter formato do dispositivo (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let fmt = *p_format;
+                let is_float = if fmt.wFormatTag == 0xFFFE {
+                    let ext = *(p_format as *const WAVEFORMATEXTENSIBLE);
+                    let sub_format = std::ptr::read_unaligned(std::ptr::addr_of!(ext.sub_format));
+                    sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                } else {
+                    fmt.wFormatTag == 3
+                };
+
+                let channels = fmt.nChannels as usize;
+                let native_rate = fmt.nSamplesPerSec;
+                let bits = fmt.wBitsPerSample;
+                let block_align = fmt.nBlockAlign as usize;
+
+                let buffer_duration_100ns = 10_000_000i64; // 1 segundo de buffer
+                let hr = ((*client_vtbl).Initialize)(
+                    p_client,
+                    0, // AUDCLNT_SHAREMODE_SHARED
+                    0,
+                    buffer_duration_100ns,
+                    0,
+                    p_format,
+                    std::ptr::null(),
+                );
+                if hr != 0 {
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao inicializar IAudioClient (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let mut p_capture: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hr = ((*client_vtbl).GetService)(
+                    p_client,
+                    &IID_IAUDIO_CAPTURE_CLIENT,
+                    &mut p_capture,
+                );
+                if hr != 0 || p_capture.is_null() {
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao obter IAudioCaptureClient (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let cap_vtbl = *(p_capture as *mut *const IAudioCaptureClientVtbl);
+                let hr = ((*client_vtbl).Start)(p_client);
+                if hr != 0 {
+                    ((*cap_vtbl).Release)(p_capture);
+                    CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                    ((*client_vtbl).Release)(p_client);
+                    ((*dev_vtbl).Release)(p_dev);
+                    ((*enum_vtbl).Release)(p_enum);
+                    CoUninitialize();
+                    is_running_flag.store(false, Ordering::SeqCst);
+                    let _ = tx_ready.send(Err(VoiceError::CaptureFailed(format!(
+                        "Falha ao iniciar stream WASAPI (0x{:08X})",
+                        hr
+                    ))));
+                    return;
+                }
+
+                let mut resampler = AudioResampler::new(native_rate, 16000, resampler_kind);
+                let _ = tx_ready.send(Ok(()));
+
+                while is_running_flag.load(Ordering::SeqCst) {
+                    let mut packet_size = 0u32;
+                    let _ = ((*cap_vtbl).GetNextPacketSize)(p_capture, &mut packet_size);
+                    while packet_size > 0 {
+                        let mut p_data: *mut u8 = std::ptr::null_mut();
+                        let mut num_frames = 0u32;
+                        let mut flags = 0u32;
+                        let mut dev_pos = 0u64;
+                        let mut qpc_pos = 0u64;
+                        let hr = ((*cap_vtbl).GetBuffer)(
+                            p_capture,
+                            &mut p_data,
+                            &mut num_frames,
+                            &mut flags,
+                            &mut dev_pos,
+                            &mut qpc_pos,
+                        );
+                        if hr == 0 && num_frames > 0 && !p_data.is_null() {
+                            let byte_count = (num_frames as usize) * block_align;
+                            let mut packet_mono = Vec::with_capacity(num_frames as usize);
+
+                            if flags & 2 != 0 {
+                                // Silent buffer
+                                packet_mono.resize(num_frames as usize, 0i16);
+                            } else {
+                                let slice = std::slice::from_raw_parts(p_data, byte_count);
+                                if is_float && bits == 32 {
+                                    let frame_size = channels * 4;
+                                    for frame in slice.chunks_exact(frame_size) {
+                                        let mut sum = 0.0f32;
+                                        for c in 0..channels {
+                                            let b = [
+                                                frame[c * 4],
+                                                frame[c * 4 + 1],
+                                                frame[c * 4 + 2],
+                                                frame[c * 4 + 3],
+                                            ];
+                                            sum += f32::from_le_bytes(b);
+                                        }
+                                        let avg = sum / (channels as f32);
+                                        packet_mono.push((avg.clamp(-1.0, 1.0) * 32767.0) as i16);
+                                    }
+                                } else if bits == 16 {
+                                    let frame_size = channels * 2;
+                                    for frame in slice.chunks_exact(frame_size) {
+                                        let mut sum = 0i32;
+                                        for c in 0..channels {
+                                            let b = [frame[c * 2], frame[c * 2 + 1]];
+                                            sum += i16::from_le_bytes(b) as i32;
+                                        }
+                                        let avg = sum / (channels as i32);
+                                        packet_mono.push(avg.clamp(-32768, 32767) as i16);
+                                    }
+                                } else if bits == 24 {
+                                    let frame_size = channels * 3;
+                                    for frame in slice.chunks_exact(frame_size) {
+                                        let mut sum = 0i32;
+                                        for c in 0..channels {
+                                            let b = &frame[c * 3..c * 3 + 3];
+                                            let sign_ext =
+                                                if b[2] & 0x80 != 0 { 0xFF } else { 0x00 };
+                                            let val =
+                                                i32::from_le_bytes([b[0], b[1], b[2], sign_ext])
+                                                    >> 8;
+                                            sum += val;
+                                        }
+                                        let avg = sum / (channels as i32);
+                                        packet_mono.push(avg.clamp(-32768, 32767) as i16);
+                                    }
+                                } else if bits == 32 {
+                                    let frame_size = channels * 4;
+                                    for frame in slice.chunks_exact(frame_size) {
+                                        let mut sum = 0i64;
+                                        for c in 0..channels {
+                                            let b = [
+                                                frame[c * 4],
+                                                frame[c * 4 + 1],
+                                                frame[c * 4 + 2],
+                                                frame[c * 4 + 3],
+                                            ];
+                                            sum += (i32::from_le_bytes(b) >> 16) as i64;
+                                        }
+                                        let avg = sum / (channels as i64);
+                                        packet_mono.push(avg.clamp(-32768, 32767) as i16);
+                                    }
+                                }
+                            }
+                            let _ = ((*cap_vtbl).ReleaseBuffer)(p_capture, num_frames);
+
+                            let resampled = resampler.process_streaming(&packet_mono);
+                            if !resampled.is_empty() && tx_samples.send(resampled).is_err() {
+                                is_running_flag.store(false, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                        packet_size = 0;
+                        let _ = ((*cap_vtbl).GetNextPacketSize)(p_capture, &mut packet_size);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+
+                let _ = ((*client_vtbl).Stop)(p_client);
+                ((*cap_vtbl).Release)(p_capture);
+                CoTaskMemFree(p_format as *mut std::ffi::c_void);
+                ((*client_vtbl).Release)(p_client);
+                ((*dev_vtbl).Release)(p_dev);
+                ((*enum_vtbl).Release)(p_enum);
+                CoUninitialize();
+            }
+        });
+
+        match rx_ready.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                let controller = Arc::new(WasapiStreamController::new(is_running, handle));
+                Ok((controller, rx_samples))
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(VoiceError::CaptureFailed(
+                "Timeout ao inicializar stream de captura contínua WASAPI".to_string(),
+            )),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device_id;
+        let _ = resampler_kind;
+        Err(VoiceError::DeviceUnavailable(
+            "WASAPI streaming está disponível apenas no Windows".to_string(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Backend Legado MCI Corrigido (MciAudioCaptureBackend)
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,19 @@ use crate::voice::session::{VoiceSession, VoiceSessionManager};
 use crate::voice::wakeword::WakeWordDetector;
 use std::sync::Arc;
 
+/// Métricas detalhadas de latência das fases do turno conversacional.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnTimings {
+    /// Tempo de transcrição STT (Whisper) em milissegundos.
+    pub stt_duration_ms: u64,
+    /// Tempo de processamento semântico no YukiCore (regras, prompt, modelo) em milissegundos.
+    pub core_duration_ms: u64,
+    /// Tempo de síntese acústica TTS (Piper) em milissegundos.
+    pub tts_duration_ms: u64,
+    /// Latência total desde o recebimento do áudio até o início da reprodução no sink em milissegundos.
+    pub total_to_playback_ms: u64,
+}
+
 /// Coordenador governado da conversação por voz da Yuki.
 ///
 /// INTEGRAÇÃO ARQUITETURAL:
@@ -171,6 +184,46 @@ impl VoiceConversationCoordinator {
         allow_cloud_stt: bool,
         allow_cloud_tts: bool,
     ) -> Result<(YukiResult, AudioOutput), VoiceError> {
+        self.process_turn_with_history(
+            device_id,
+            audio_input,
+            Vec::new(),
+            allow_cloud_stt,
+            allow_cloud_tts,
+        )
+        .await
+    }
+
+    /// Processa um turno conversacional por voz com suporte opcional a histórico recente de conversação.
+    pub async fn process_turn_with_history(
+        &self,
+        device_id: &str,
+        audio_input: AudioInput,
+        conversation_history: Vec<String>,
+        allow_cloud_stt: bool,
+        allow_cloud_tts: bool,
+    ) -> Result<(YukiResult, AudioOutput), VoiceError> {
+        let (_text, res, out, _timings) = self
+            .process_turn_instrumented(
+                device_id,
+                audio_input,
+                conversation_history,
+                allow_cloud_stt,
+                allow_cloud_tts,
+            )
+            .await?;
+        Ok((res, out))
+    }
+
+    /// Processa um turno conversacional por voz retornando o texto transcrito, a resposta do core, áudio sintetizado e métricas temporais.
+    pub async fn process_turn_instrumented(
+        &self,
+        device_id: &str,
+        audio_input: AudioInput,
+        conversation_history: Vec<String>,
+        allow_cloud_stt: bool,
+        allow_cloud_tts: bool,
+    ) -> Result<(String, YukiResult, AudioOutput, TurnTimings), VoiceError> {
         // 1. Inicia sessão governada (geração isolada e in_flight = true).
         // A validação de conflito de sessão ocorre ANTES de tocar no playback.
         // Se a tentativa for rejeitada por SessionConflict (ex: turno já em andamento),
@@ -198,6 +251,7 @@ impl VoiceConversationCoordinator {
                 &mut session,
                 device_id,
                 audio_input,
+                conversation_history,
                 allow_cloud_stt,
                 allow_cloud_tts,
             )
@@ -317,9 +371,12 @@ impl VoiceConversationCoordinator {
         session: &mut VoiceSession,
         device_id: &str,
         audio_input: AudioInput,
+        conversation_history: Vec<String>,
         allow_cloud_stt: bool,
         allow_cloud_tts: bool,
-    ) -> Result<(YukiResult, AudioOutput), VoiceError> {
+    ) -> Result<(String, YukiResult, AudioOutput, TurnTimings), VoiceError> {
+        let t_turn_start = std::time::Instant::now();
+
         // 1. Captura
         session.transition_to(VoiceSessionState::Capturing)?;
         if !self.session_manager.update_session(session)
@@ -344,10 +401,12 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        let t_stt_start = std::time::Instant::now();
         let transcribed_text = self
             .router
             .transcribe(&audio_input, allow_cloud_stt)
             .await?;
+        let stt_duration_ms = t_stt_start.elapsed().as_millis() as u64;
 
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -382,7 +441,7 @@ impl VoiceConversationCoordinator {
             ));
         }
 
-        // 3. Processamento no YukiCore
+        // 3. Processamento no YukiCore com suporte a histórico conversacional
         session.transition_to(VoiceSessionState::Processing)?;
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -394,12 +453,14 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
-        let user_input = UserInput::new(&transcribed_text);
+        let t_core_start = std::time::Instant::now();
+        let user_input = UserInput::new(&transcribed_text).with_history(conversation_history);
         let user_output = self
             .core
             .process_input_async(user_input)
             .await
             .map_err(|e| VoiceError::TranscriptionFailed(format!("Erro no Core: {}", e)))?;
+        let core_duration_ms = t_core_start.elapsed().as_millis() as u64;
 
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -423,10 +484,12 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        let t_tts_start = std::time::Instant::now();
         let audio_output = self
             .router
             .synthesize(&user_output.content, allow_cloud_tts)
             .await?;
+        let tts_duration_ms = t_tts_start.elapsed().as_millis() as u64;
 
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -465,6 +528,7 @@ impl VoiceConversationCoordinator {
         }
 
         self.playback.play(&audio_output)?;
+        let total_to_playback_ms = t_turn_start.elapsed().as_millis() as u64;
 
         // Verificação pós-disparo para mitigar corrida entre check e início do playback:
         if self
@@ -475,7 +539,14 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
-        Ok((user_output, audio_output))
+        let timings = TurnTimings {
+            stt_duration_ms,
+            core_duration_ms,
+            tts_duration_ms,
+            total_to_playback_ms,
+        };
+
+        Ok((transcribed_text, user_output, audio_output, timings))
     }
 
     /// Interrompe qualquer fala em andamento e assinala a sessão ativa como interrompida (barge-in intencional).

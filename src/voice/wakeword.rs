@@ -2,6 +2,7 @@ use crate::contracts::voice::{
     AudioFormat, AudioFrame, AudioInput, SpeechToTextProvider, VoiceError,
 };
 use crate::voice::audio::AudioCodec;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -247,6 +248,455 @@ impl WakeWordEngine for PhoneticPatternWakeWordEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Motor openWakeWord Dedicado (OpenWakeWordEngine) - Marco 8.1.3
+// ---------------------------------------------------------------------------
+
+/// Configuração do motor acústico neural openWakeWord para ativação local por palavra-chave ("Yuki").
+#[derive(Debug, Clone)]
+pub struct OpenWakeWordConfig {
+    pub onnxruntime_dll_path: Option<PathBuf>,
+    pub melspec_model_path: Option<PathBuf>,
+    pub embedding_model_path: Option<PathBuf>,
+    pub yuki_model_path: Option<PathBuf>,
+    pub activation_threshold: f32,
+    pub cooldown_frames: usize,
+}
+
+impl Default for OpenWakeWordConfig {
+    fn default() -> Self {
+        Self {
+            onnxruntime_dll_path: default_onnxruntime_dll_path(),
+            melspec_model_path: default_melspec_model_path(),
+            embedding_model_path: default_embedding_model_path(),
+            yuki_model_path: default_yuki_model_path(),
+            activation_threshold: 0.50,
+            cooldown_frames: 18,
+        }
+    }
+}
+
+pub fn default_onnxruntime_dll_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("YUKI_ONNXRUNTIME_DLL").map(PathBuf::from) {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let candidates = [
+        PathBuf::from("bin/onnxruntime/onnxruntime.dll"),
+        PathBuf::from("models/wakeword/onnxruntime.dll"),
+        PathBuf::from(
+            r"C:\Users\Miriã\.gemini\antigravity\brain\db5234b4-9cc4-4f3b-9460-8f9e4174c84d\scratch\kws\oww_exp\.venv\Lib\site-packages\onnxruntime\capi\onnxruntime.dll",
+        ),
+        PathBuf::from(r"C:\Windows\System32\onnxruntime.dll"),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+pub fn default_melspec_model_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("YUKI_OWW_MEL_MODEL").map(PathBuf::from) {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let candidates = [
+        PathBuf::from("models/wakeword/melspectrogram.onnx"),
+        PathBuf::from(
+            r"C:\Users\Miriã\.gemini\antigravity\brain\db5234b4-9cc4-4f3b-9460-8f9e4174c84d\scratch\kws\oww_exp\.venv\Lib\site-packages\openwakeword\resources\models\melspectrogram.onnx",
+        ),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+pub fn default_embedding_model_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("YUKI_OWW_EMB_MODEL").map(PathBuf::from) {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let candidates = [
+        PathBuf::from("models/wakeword/embedding_model.onnx"),
+        PathBuf::from(
+            r"C:\Users\Miriã\.gemini\antigravity\brain\db5234b4-9cc4-4f3b-9460-8f9e4174c84d\scratch\kws\oww_exp\.venv\Lib\site-packages\openwakeword\resources\models\embedding_model.onnx",
+        ),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+pub fn default_yuki_model_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("YUKI_OWW_YUKI_MODEL").map(PathBuf::from) {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let candidates = [
+        PathBuf::from("models/wakeword/yuki_v0.1.onnx"),
+        PathBuf::from(
+            r"C:\Users\Miriã\.gemini\antigravity\brain\db5234b4-9cc4-4f3b-9460-8f9e4174c84d\scratch\kws\oww_exp\models\yuki_v0.1.onnx",
+        ),
+    ];
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+struct OwwEngineInner {
+    mel_session: ort::session::Session,
+    emb_session: ort::session::Session,
+    yuki_session: ort::session::Session,
+    mel_buffer: Vec<f32>,  // 76 frames x 32 mel bins = 2432 floats
+    feat_buffer: Vec<f32>, // 16 frames x 96 embedding dims = 1536 floats
+    raw_buffer: Vec<f32>,  // histórico bruto para janela de 1760 amostras
+    chunk_count: usize,
+}
+
+impl OwwEngineInner {
+    fn reset(&mut self) {
+        self.mel_buffer = vec![1.0; 76 * 32];
+        self.feat_buffer = vec![0.0; 16 * 96];
+        self.raw_buffer.clear();
+        self.chunk_count = 0;
+    }
+
+    fn process_chunk(&mut self, chunk: &[i16]) -> Result<f32, VoiceError> {
+        self.chunk_count += 1;
+
+        // 1. Atualizar buffer de áudio bruto
+        for &s in chunk {
+            self.raw_buffer.push(s as f32);
+        }
+
+        // Janela de áudio de 1760 amostras (1280 do bloco atual de 80ms + 480 de overlap)
+        let window_size = 1280 + 480;
+        let audio_window: Vec<f32> = if self.raw_buffer.len() >= window_size {
+            let start = self.raw_buffer.len() - window_size;
+            self.raw_buffer[start..].to_vec()
+        } else {
+            let mut padded = vec![0.0f32; window_size - self.raw_buffer.len()];
+            padded.extend_from_slice(&self.raw_buffer);
+            padded
+        };
+
+        // Truncar buffer bruto para economizar memória (manter últimas 3200 amostras)
+        if self.raw_buffer.len() > 3200 {
+            let drop_count = self.raw_buffer.len() - window_size;
+            self.raw_buffer.drain(0..drop_count);
+        }
+
+        // 2. Executar melspectrogram.onnx (input: [1, 1760])
+        let mel_input_shape = [1usize, window_size];
+        let mel_tensor =
+            ort::value::TensorRef::from_array_view((mel_input_shape, audio_window.as_slice()))
+                .map_err(|e| {
+                    VoiceError::CaptureFailed(format!("Erro ao criar tensor mel: {}", e))
+                })?;
+        let mel_outputs = self
+            .mel_session
+            .run(ort::inputs![mel_tensor])
+            .map_err(|e| {
+                VoiceError::CaptureFailed(format!("Erro ao executar melspectrogram.onnx: {}", e))
+            })?;
+        let (_mel_out_shape, mel_data) = mel_outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VoiceError::CaptureFailed(format!("Erro ao extrair mels: {}", e)))?;
+
+        // Cada 1280 amostras adicionam exatamente 8 novos frames de mel (8 * 32 = 256 floats)
+        let new_mel_frames_count = 8 * 32;
+        let new_mels_slice = if mel_data.len() >= new_mel_frames_count {
+            &mel_data[mel_data.len() - new_mel_frames_count..]
+        } else {
+            mel_data
+        };
+
+        // Transformação oficial do openWakeWord: x / 10.0 + 2.0 (escala Google Speech Embedding)
+        let transformed_mels: Vec<f32> = new_mels_slice.iter().map(|&x| x / 10.0 + 2.0).collect();
+
+        // Deslocar mel_buffer (76 * 32 = 2432) descartando os 256 mais antigos
+        self.mel_buffer.drain(0..transformed_mels.len());
+        self.mel_buffer.extend_from_slice(&transformed_mels);
+
+        // 3. Executar embedding_model.onnx (input: [1, 76, 32, 1])
+        let emb_input_shape = [1usize, 76, 32, 1];
+        let emb_tensor = ort::value::TensorRef::from_array_view((
+            emb_input_shape,
+            self.mel_buffer.as_slice(),
+        ))
+        .map_err(|e| VoiceError::CaptureFailed(format!("Erro ao criar tensor emb: {}", e)))?;
+        let emb_outputs = self
+            .emb_session
+            .run(ort::inputs![emb_tensor])
+            .map_err(|e| {
+                VoiceError::CaptureFailed(format!("Erro ao executar embedding_model.onnx: {}", e))
+            })?;
+        let (_emb_out_shape, emb_data) = emb_outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VoiceError::CaptureFailed(format!("Erro ao extrair embedding: {}", e)))?;
+
+        // Vetor de embedding de 96 dimensões
+        let new_embedding = &emb_data[..96];
+
+        // 4. Deslocar feat_buffer (16 * 96 = 1536) descartando 1 frame (96 floats)
+        self.feat_buffer.drain(0..96);
+        self.feat_buffer.extend_from_slice(new_embedding);
+
+        // Warmup: requer pelo menos 16 blocos (1.28s) para preencher a janela temporal de 16 frames
+        if self.chunk_count < 16 {
+            return Ok(0.0);
+        }
+
+        // 5. Executar yuki_v0.1.onnx (input: [1, 16, 96])
+        let yuki_input_shape = [1usize, 16, 96];
+        let yuki_tensor =
+            ort::value::TensorRef::from_array_view((yuki_input_shape, self.feat_buffer.as_slice()))
+                .map_err(|e| {
+                    VoiceError::CaptureFailed(format!("Erro ao criar tensor yuki: {}", e))
+                })?;
+        let yuki_outputs = self
+            .yuki_session
+            .run(ort::inputs![yuki_tensor])
+            .map_err(|e| {
+                VoiceError::CaptureFailed(format!("Erro ao executar yuki_v0.1.onnx: {}", e))
+            })?;
+        let (_yuki_out_shape, yuki_data) = yuki_outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VoiceError::CaptureFailed(format!("Erro ao extrair score: {}", e)))?;
+
+        let score = yuki_data[0];
+        Ok(score)
+    }
+}
+
+/// Motor de Keyword Spotting baseado na arquitetura oficial openWakeWord com modelo personalizado 'yuki_v0.1.onnx'.
+/// Executa a inferência em 3 estágios ONNX (Melspectrograma -> Google Speech Embedding -> Classificador FCN PT-BR).
+pub struct OpenWakeWordEngine {
+    config: OpenWakeWordConfig,
+    inner: Mutex<OwwEngineInner>,
+}
+
+impl std::fmt::Debug for OpenWakeWordEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OpenWakeWordEngine(model={:?}, threshold={})",
+            self.config.yuki_model_path, self.config.activation_threshold
+        )
+    }
+}
+
+impl OpenWakeWordEngine {
+    /// Verifica se os artefatos ONNX necessários e a biblioteca ONNX Runtime estão presentes no ambiente.
+    pub fn is_available() -> bool {
+        let config = OpenWakeWordConfig::default();
+        config.onnxruntime_dll_path.is_some()
+            && config.melspec_model_path.is_some()
+            && config.embedding_model_path.is_some()
+            && config.yuki_model_path.is_some()
+    }
+
+    /// Inicializa o motor a partir dos caminhos padrão de produção/desenvolvimento.
+    pub fn from_default_paths() -> Result<Self, VoiceError> {
+        Self::new(OpenWakeWordConfig::default())
+    }
+
+    /// Inicializa o motor com configuração customizada.
+    pub fn new(config: OpenWakeWordConfig) -> Result<Self, VoiceError> {
+        let dll_path = config.onnxruntime_dll_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable("onnxruntime.dll não encontrada".to_string())
+        })?;
+        let mel_path = config.melspec_model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable("melspectrogram.onnx não encontrado".to_string())
+        })?;
+        let emb_path = config.embedding_model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable("embedding_model.onnx não encontrado".to_string())
+        })?;
+        let yuki_path = config.yuki_model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable("yuki_v0.1.onnx não encontrado".to_string())
+        })?;
+
+        if !dll_path.exists() {
+            return Err(VoiceError::ProviderUnavailable(format!(
+                "Arquivo não existe: {}",
+                dll_path.display()
+            )));
+        }
+        if !mel_path.exists() {
+            return Err(VoiceError::ProviderUnavailable(format!(
+                "Arquivo não existe: {}",
+                mel_path.display()
+            )));
+        }
+        if !emb_path.exists() {
+            return Err(VoiceError::ProviderUnavailable(format!(
+                "Arquivo não existe: {}",
+                emb_path.display()
+            )));
+        }
+        if !yuki_path.exists() {
+            return Err(VoiceError::ProviderUnavailable(format!(
+                "Arquivo não existe: {}",
+                yuki_path.display()
+            )));
+        }
+
+        let env = ort::init_from(dll_path.to_str().unwrap_or_default())
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha ao inicializar ONNX Runtime a partir de '{}': {}",
+                    dll_path.display(),
+                    e
+                ))
+            })?
+            .build()
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha ao construir ambiente ONNX Runtime: {}",
+                    e
+                ))
+            })?;
+
+        let mel_session = ort::session::Session::builder(&env)
+            .map_err(|e| VoiceError::ProviderUnavailable(format!("Falha no builder mel: {}", e)))?
+            .commit_from_file(mel_path)
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha ao carregar {}: {}",
+                    mel_path.display(),
+                    e
+                ))
+            })?;
+
+        let emb_session = ort::session::Session::builder(&env)
+            .map_err(|e| VoiceError::ProviderUnavailable(format!("Falha no builder emb: {}", e)))?
+            .commit_from_file(emb_path)
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha ao carregar {}: {}",
+                    emb_path.display(),
+                    e
+                ))
+            })?;
+
+        let yuki_session = ort::session::Session::builder(&env)
+            .map_err(|e| VoiceError::ProviderUnavailable(format!("Falha no builder yuki: {}", e)))?
+            .commit_from_file(yuki_path)
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha ao carregar {}: {}",
+                    yuki_path.display(),
+                    e
+                ))
+            })?;
+
+        let mut inner = OwwEngineInner {
+            mel_session,
+            emb_session,
+            yuki_session,
+            mel_buffer: vec![1.0; 76 * 32],
+            feat_buffer: vec![0.0; 16 * 96],
+            raw_buffer: Vec::with_capacity(3200),
+            chunk_count: 0,
+        };
+        inner.reset();
+
+        Ok(Self {
+            config,
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Processa um bloco de áudio de 1280 amostras (80 ms @ 16 kHz mono) em streaming contínuo.
+    pub fn process_chunk(&self, chunk: &[i16]) -> Result<f32, VoiceError> {
+        let mut inner = self.inner.lock().map_err(|_| {
+            VoiceError::CaptureFailed(
+                "Falha de concorrência ao adquirir lock do motor openWakeWord".to_string(),
+            )
+        })?;
+        inner.process_chunk(chunk)
+    }
+
+    /// Reseta buffers internos para estado inicial.
+    pub fn reset(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.reset();
+        }
+    }
+
+    /// Retorna a configuração ativa do motor openWakeWord.
+    pub fn config(&self) -> &OpenWakeWordConfig {
+        &self.config
+    }
+}
+
+impl WakeWordEngine for OpenWakeWordEngine {
+    fn verify_keyword(
+        &self,
+        frames: &[AudioFrame],
+        keyword: &str,
+    ) -> Result<Option<f32>, VoiceError> {
+        if keyword.to_lowercase() != "yuki" {
+            return Ok(None);
+        }
+        let mut all_samples = Vec::new();
+        for f in frames {
+            all_samples.extend_from_slice(&f.samples);
+        }
+        if all_samples.is_empty() {
+            return Ok(None);
+        }
+
+        let mut inner = self.inner.lock().map_err(|_| {
+            VoiceError::CaptureFailed(
+                "Falha de concorrência ao adquirir lock do motor openWakeWord".to_string(),
+            )
+        })?;
+        inner.reset();
+
+        let chunk_size = 1280;
+        let n_chunks = all_samples.len() / chunk_size;
+        let mut max_score = 0.0f32;
+
+        for i in 0..n_chunks {
+            let chunk = &all_samples[i * chunk_size..(i + 1) * chunk_size];
+            let score = inner.process_chunk(chunk)?;
+            if score > max_score {
+                max_score = score;
+            }
+        }
+
+        if max_score >= self.config.activation_threshold {
+            Ok(Some(max_score))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OpenWakeWordEngine (PT-BR yuki_v0.1)"
+    }
+
+    fn status(&self) -> WakeWordEngineStatus {
+        WakeWordEngineStatus::Ready
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Motor STT Local (SttWakeWordEngine)
 // ---------------------------------------------------------------------------
 
@@ -462,6 +912,17 @@ impl WakeWordDetector {
             vad: VoiceActivityDetector::default(),
             engine,
         }
+    }
+
+    /// Inicializa o detector utilizando o modelo neural personalizado openWakeWord ('yuki_v0.1.onnx').
+    pub fn open_wakeword() -> Result<Self, VoiceError> {
+        let engine = Arc::new(OpenWakeWordEngine::from_default_paths()?);
+        Ok(Self::with_engine("yuki", 0.5, true, engine))
+    }
+
+    /// Inicializa o detector com uma instância customizada do motor openWakeWord.
+    pub fn with_open_wakeword_engine(sensitivity: f32, engine: Arc<OpenWakeWordEngine>) -> Self {
+        Self::with_engine("yuki", sensitivity, true, engine)
     }
 
     pub fn mock(keyword: impl Into<String>) -> (Self, Arc<MockWakeWordEngine>) {

@@ -425,7 +425,7 @@ impl YukiCore {
                 &input.content,
                 raw_personal_context.as_deref(),
                 None,
-                &[],
+                &input.conversation_history,
                 tool_declarations_chars,
             )
             .map_err(|e| {
