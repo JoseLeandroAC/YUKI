@@ -1,12 +1,13 @@
 use crate::contracts::identifiers::generate_unique_id;
 use crate::contracts::voice::{
-    AudioFormat, AudioOutput, TextToSpeechProvider, VoiceConfiguration, VoiceError,
-    VoiceProviderMetadata, VoiceProviderType,
+    AudioFormat, AudioOutput, TextToSpeechProvider, TtsSynthesisKind, VoiceConfiguration,
+    VoiceError, VoiceProviderMetadata, VoiceProviderType,
 };
 use crate::voice::audio::AudioCodec;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuração do adaptador local Piper TTS.
@@ -68,7 +69,10 @@ fn find_local_piper_bin() -> Option<PathBuf> {
 
 fn find_local_piper_model() -> Option<PathBuf> {
     let local_dirs = [PathBuf::from("models/piper"), PathBuf::from("models")];
+    // Prioriza vozes neurais femininas em PT-BR compatíveis com a identidade vocal da Yuki
     let preferred = [
+        "pt_BR-dii-female.onnx",
+        "dii_pt-BR.onnx",
         "pt_BR-faber-medium.onnx",
         "pt_BR-cadu-medium.onnx",
         "pt_BR-edresson-low.onnx",
@@ -81,11 +85,13 @@ fn find_local_piper_model() -> Option<PathBuf> {
                 return Some(p);
             }
         }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("onnx") {
-                    return Some(path);
+        if dir.ends_with("piper") {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("onnx") {
+                        return Some(path);
+                    }
                 }
             }
         }
@@ -103,6 +109,73 @@ fn find_local_piper_config(model_path: &std::path::Path) -> Option<PathBuf> {
         return Some(p2);
     }
     None
+}
+
+fn find_espeak_data_dir(bin_path: &std::path::Path) -> Option<PathBuf> {
+    if let Some(env_dir) = std::env::var_os("YUKI_PIPER_ESPEAK_DATA") {
+        let p = PathBuf::from(env_dir);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Some(parent) = bin_path.parent() {
+        let sibling = parent.join("espeak-ng-data");
+        if sibling.is_dir() {
+            return Some(sibling);
+        }
+    }
+    let fallback = PathBuf::from("bin/piper/espeak-ng-data");
+    if fallback.is_dir() {
+        return Some(fallback);
+    }
+    None
+}
+
+/// Converte um caminho para forma segura em ASCII para executáveis C/C++ legados no Windows
+/// (como `espeak-ng` dentro do `piper.exe`, que falha em diretórios com acentos como `Miriã` ou `JOSÉ`).
+pub fn to_ascii_safe_cli_path(path: &std::path::Path) -> PathBuf {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(rel) = path.strip_prefix(&cwd) {
+            if !rel.as_os_str().is_empty() && rel.to_string_lossy().is_ascii() {
+                return rel.to_path_buf();
+            }
+        }
+    }
+
+    if path.to_string_lossy().is_ascii() {
+        return path.to_path_buf();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        extern "system" {
+            fn GetShortPathNameW(
+                lpszLongPath: *const u16,
+                lpszShortPath: *mut u16,
+                cchBuffer: u32,
+            ) -> u32;
+        }
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let len = GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
+            if len > 0 {
+                let mut buf = vec![0u16; len as usize];
+                let written = GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), len);
+                if written > 0 && (written as usize) < buf.len() {
+                    let short_os = std::ffi::OsString::from_wide(&buf[..written as usize]);
+                    return PathBuf::from(short_os);
+                }
+            }
+        }
+    }
+
+    path.to_path_buf()
 }
 
 fn which_piper() -> Option<PathBuf> {
@@ -236,15 +309,34 @@ pub fn get_piper_voice_catalog() -> Vec<PiperVoiceModelInfo> {
     catalog
 }
 
+struct PiperWarmDaemon {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    length_scale_key: u32,
+}
+
+fn select_ascii_temp_wav_path() -> PathBuf {
+    let fname = format!("yuki_tts_{}.wav", generate_unique_id("tts"));
+    let local_cache_dir = PathBuf::from("data/tts_cache");
+    if std::fs::create_dir_all(&local_cache_dir).is_ok() {
+        return local_cache_dir.join(fname);
+    }
+    to_ascii_safe_cli_path(&std::env::temp_dir()).join(fname)
+}
+
 /// Provedor local de síntese de voz (TTS) baseado no Piper.
 ///
 /// ARQUITETURA LOCAL-FIRST:
-/// - Soberano: síntese local de altíssima velocidade (< 150ms).
-/// - Respeita a identidade vocal da Yuki.
-/// - Instruções claras de instalação sem downloads silenciosos.
+/// - Soberano: síntese neural local sem egresso de dados.
+/// - Respeita a identidade vocal da Yuki (prioriza voz feminina PT-BR quando presente).
+/// - Mantém processo quente (`--json-input`) sob lock assíncrono com `kill_on_drop(true)`,
+///   evitando recarregar o modelo ONNX a cada turno (~350-450ms por frase).
+/// - Converte diretórios com acentuação no Windows (`espeak-ng-data`) para caminhos ASCII/8.3 seguros.
 pub struct LocalPiperTtsProvider {
     metadata: VoiceProviderMetadata,
     config: LocalPiperConfig,
+    daemon: tokio::sync::Mutex<Option<PiperWarmDaemon>>,
 }
 
 impl LocalPiperTtsProvider {
@@ -256,8 +348,28 @@ impl LocalPiperTtsProvider {
             22050,
             false,
             "1.0.0",
-        );
-        Self { metadata, config }
+        )
+        .with_synthesis_kind(TtsSynthesisKind::NeuralSpeech);
+
+        Self {
+            metadata,
+            config,
+            daemon: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn active_voice_id(&self) -> String {
+        self.config
+            .model_path
+            .as_deref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("yuki-piper-ptbr")
+            .to_string()
+    }
+
+    pub fn config(&self) -> &LocalPiperConfig {
+        &self.config
     }
 
     pub fn installation_instructions() -> &'static str {
@@ -266,27 +378,18 @@ impl LocalPiperTtsProvider {
 
     pub fn download_instructions() -> &'static str {
         "Para ativar a síntese de voz neural local com Piper na Yuki:\n\
-         1. Baixe o executável oficial do Piper para sua plataforma:\n\
+         1. Baixe o executável oficial do Piper para Windows x64:\n\
             Repositório: https://github.com/rhasspy/piper/releases\n\
-            Windows x64: piper_windows_amd64.zip -> extrair executável piper.exe em ./bin/piper/ ou no PATH.\n\
-         2. Baixe o modelo neural pt-BR (.onnx) e respectivo metadado (.onnx.json):\n\
-            Catálogo Hugging Face: https://huggingface.co/rhasspy/piper-voices/tree/main/pt/pt_BR\n\
-            Candidatas oficiais:\n\
-            - pt_BR-faber-medium.onnx (maior clareza fonêmica)\n\
-            - pt_BR-cadu-medium.onnx (entonação coloquial brasileira)\n\
-            - pt_BR-edresson-low.onnx (ultraleve de baixa latência)\n\
-            Destino dos modelos: ./models/piper/\n\
-         3. Script PowerShell para download manual (zero downloads automáticos):\n\
-            Invoke-WebRequest -Uri \"https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/pt_BR-faber-medium.onnx\" -OutFile \"models/piper/pt_BR-faber-medium.onnx\"\n\
-            Invoke-WebRequest -Uri \"https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/pt_BR-faber-medium.onnx.json\" -OutFile \"models/piper/pt_BR-faber-medium.onnx.json\"\n\
-         4. Variáveis de ambiente opcionais:\n\
-            set YUKI_PIPER_BIN=C:\\caminho\\para\\piper.exe\n\
-            set YUKI_PIPER_MODEL=C:\\caminho\\para\\pt_BR-faber-medium.onnx\n\
-         \n\
-         LIMITAÇÃO TÉCNICA E TRANSPARÊNCIA:\n\
-         O catálogo upstream da Rhasspy para pt-BR possui modelos com locutores masculinos.\n\
-         Para usar voz feminina nativa com a Yuki, posicione um modelo ONNX comunitário em ./models/piper/\n\
-         ou mantenha o sintetizador acústico de diagnóstico padrão com F0=220Hz (tom afável melódico)."
+            Extraia piper.exe e espeak-ng-data em ./bin/piper/.\n\
+         2. Baixe um modelo neural pt-BR (.onnx e .onnx.json) em ./models/piper/:\n\
+            - Voz neural feminina PT-BR recomendada para a identidade da Yuki (OpenVoiceOS/pipertts_pt-BR_dii):\n\
+              Invoke-WebRequest -Uri \"https://huggingface.co/OpenVoiceOS/pipertts_pt-BR_dii/resolve/main/dii_pt-BR.onnx\" -OutFile \"models/piper/pt_BR-dii-female.onnx\"\n\
+              Invoke-WebRequest -Uri \"https://huggingface.co/OpenVoiceOS/pipertts_pt-BR_dii/resolve/main/dii_pt-BR.onnx.json\" -OutFile \"models/piper/pt_BR-dii-female.onnx.json\"\n\
+            - Nota de transparência: os locutores oficiais de rhasspy/piper-voices para pt-BR (faber, cadu, edresson, jeff) são masculinos:\n\
+              Invoke-WebRequest -Uri \"https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/pt_BR-faber-medium.onnx\" -OutFile \"models/piper/pt_BR-faber-medium.onnx\"\n\
+         3. Variáveis de ambiente opcionais:\n\
+            $env:YUKI_PIPER_BIN = \"bin\\piper\\piper.exe\"\n\
+            $env:YUKI_PIPER_MODEL = \"models\\piper\\pt_BR-dii-female.onnx\""
     }
 
     pub fn is_environment_ready(&self) -> bool {
@@ -303,6 +406,172 @@ impl LocalPiperTtsProvider {
             .map(|p| p.is_file())
             .unwrap_or(false);
         bin_ok && model_ok
+    }
+
+    fn spawn_warm_daemon(&self, length_scale: f32) -> Result<PiperWarmDaemon, VoiceError> {
+        let bin_path = self.config.binary_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Executável piper local não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+        let model_path = self.config.model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Modelo piper não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+
+        let safe_bin = to_ascii_safe_cli_path(bin_path);
+        let safe_model = to_ascii_safe_cli_path(model_path);
+
+        let mut cmd = tokio::process::Command::new(&safe_bin);
+        cmd.kill_on_drop(true);
+        cmd.arg("-m").arg(&safe_model);
+        if let Some(ref cfg) = self.config.config_json {
+            if cfg.is_file() {
+                cmd.arg("-c").arg(to_ascii_safe_cli_path(cfg));
+            }
+        }
+        if let Some(espeak_dir) = find_espeak_data_dir(bin_path) {
+            cmd.arg("--espeak_data")
+                .arg(to_ascii_safe_cli_path(&espeak_dir));
+        }
+        cmd.arg("--json-input");
+        cmd.arg("--length_scale")
+            .arg(format!("{:.2}", length_scale));
+        cmd.arg("--noise_scale")
+            .arg(format!("{:.2}", self.config.noise_scale));
+        cmd.arg("--noise_w")
+            .arg(format!("{:.2}", self.config.noise_w));
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            VoiceError::SynthesisFailed(format!("Falha ao iniciar processo piper: {}", e))
+        })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            VoiceError::SynthesisFailed("Stdin do processo piper não capturado".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            VoiceError::SynthesisFailed("Stdout do processo piper não capturado".to_string())
+        })?;
+
+        let scale_key = (length_scale * 100.0).round() as u32;
+        Ok(PiperWarmDaemon {
+            child,
+            stdin,
+            stdout,
+            length_scale_key: scale_key,
+        })
+    }
+
+    /// Pré-aquece o motor neural Piper carregando o modelo ONNX antes do primeiro turno conversacional.
+    pub async fn warmup(&self) -> Result<(), VoiceError> {
+        let _ = self.synthesize("Olá.", None).await?;
+        Ok(())
+    }
+
+    async fn synthesize_oneshot(
+        &self,
+        text: &str,
+        effective_length_scale: f32,
+        temp_out: &std::path::Path,
+    ) -> Result<(), VoiceError> {
+        let bin_path = self.config.binary_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Executável piper local não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+        let model_path = self.config.model_path.as_ref().ok_or_else(|| {
+            VoiceError::ProviderUnavailable(format!(
+                "Modelo piper não configurado. {}",
+                Self::installation_instructions()
+            ))
+        })?;
+
+        let safe_bin = to_ascii_safe_cli_path(bin_path);
+        let safe_model = to_ascii_safe_cli_path(model_path);
+        let safe_out = to_ascii_safe_cli_path(temp_out);
+
+        let timeout_duration = self.config.timeout;
+        let mut cmd = tokio::process::Command::new(&safe_bin);
+        cmd.kill_on_drop(true);
+        cmd.arg("-m").arg(&safe_model);
+        if let Some(ref cfg) = self.config.config_json {
+            if cfg.is_file() {
+                cmd.arg("-c").arg(to_ascii_safe_cli_path(cfg));
+            }
+        }
+        if let Some(espeak_dir) = find_espeak_data_dir(bin_path) {
+            cmd.arg("--espeak_data")
+                .arg(to_ascii_safe_cli_path(&espeak_dir));
+        }
+        cmd.arg("-f").arg(&safe_out);
+        cmd.arg("--length_scale")
+            .arg(format!("{:.2}", effective_length_scale));
+        cmd.arg("--noise_scale")
+            .arg(format!("{:.2}", self.config.noise_scale));
+        cmd.arg("--noise_w")
+            .arg(format!("{:.2}", self.config.noise_w));
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            VoiceError::SynthesisFailed(format!("Falha ao iniciar processo piper: {}", e))
+        })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let mut payload = text.replace(['\r', '\n'], " ");
+            payload.push('\n');
+            let _ = stdin.write_all(payload.as_bytes()).await;
+        }
+
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            VoiceError::SynthesisFailed("Stderr do processo piper não capturado".to_string())
+        })?;
+        let mut stderr_bytes = Vec::new();
+
+        let status_res = tokio::time::timeout(timeout_duration, async {
+            use tokio::io::AsyncReadExt;
+            let read_err = stderr.read_to_end(&mut stderr_bytes);
+            let wait_child = child.wait();
+            let (_, status) = tokio::try_join!(read_err, wait_child)?;
+            Ok::<std::process::ExitStatus, std::io::Error>(status)
+        })
+        .await;
+
+        let status = match status_res {
+            Ok(Ok(st)) => st,
+            Ok(Err(e)) => {
+                return Err(VoiceError::SynthesisFailed(format!(
+                    "Erro ao aguardar processo piper: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(VoiceError::Timeout(
+                    "Síntese de voz excedeu tempo limite".to_string(),
+                ));
+            }
+        };
+
+        if !status.success() {
+            let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+            return Err(VoiceError::SynthesisFailed(format!(
+                "Piper finalizou com erro: {}",
+                stderr_str.trim()
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -340,8 +609,6 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
         } else {
             self.config.length_scale
         };
-        let effective_noise_scale = self.config.noise_scale;
-        let effective_noise_w = self.config.noise_w;
 
         Box::pin(async move {
             if text_owned.trim().is_empty() {
@@ -350,24 +617,26 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
                 ));
             }
 
-            let bin_path = self.config.binary_path.as_ref().ok_or_else(|| {
-                VoiceError::ProviderUnavailable(format!(
-                    "Executável piper local não configurado. {}",
+            if !self.is_environment_ready() {
+                let bin_missing = self
+                    .config
+                    .binary_path
+                    .as_ref()
+                    .map(|p| !p.is_file())
+                    .unwrap_or(true);
+                let reason = if bin_missing {
+                    "Executável piper local não configurado."
+                } else {
+                    "Modelo piper não configurado."
+                };
+                return Err(VoiceError::ProviderUnavailable(format!(
+                    "{} {}",
+                    reason,
                     Self::installation_instructions()
-                ))
-            })?;
+                )));
+            }
 
-            let model_path = self.config.model_path.as_ref().ok_or_else(|| {
-                VoiceError::ProviderUnavailable(format!(
-                    "Modelo piper não configurado. {}",
-                    Self::installation_instructions()
-                ))
-            })?;
-
-            let temp_dir = std::env::temp_dir();
-            let temp_out = temp_dir.join(format!("yuki_tts_{}.wav", generate_unique_id("tts")));
-
-            // Limpa o arquivo temporário ao final da execução (Drop garantido)
+            let temp_out = select_ascii_temp_wav_path();
             struct TempCleaner(PathBuf);
             impl Drop for TempCleaner {
                 fn drop(&mut self) {
@@ -375,75 +644,103 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
                 }
             }
             let _cleaner = TempCleaner(temp_out.clone());
+            let safe_out = to_ascii_safe_cli_path(&temp_out);
 
-            let timeout_duration = self.config.timeout;
-            let mut cmd = tokio::process::Command::new(bin_path);
-            cmd.kill_on_drop(true);
-            cmd.arg("-m").arg(model_path);
-            if let Some(ref cfg) = self.config.config_json {
-                if cfg.is_file() {
-                    cmd.arg("-c").arg(cfg);
-                }
-            }
-            cmd.arg("-f").arg(&temp_out);
-            cmd.arg("--length_scale")
-                .arg(format!("{:.2}", effective_length_scale));
-            cmd.arg("--noise_scale")
-                .arg(format!("{:.2}", effective_noise_scale));
-            cmd.arg("--noise_w")
-                .arg(format!("{:.2}", effective_noise_w));
-            cmd.stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped());
+            let desired_scale_key = (effective_length_scale * 100.0).round() as u32;
+            let clean_text = text_owned.replace(['\r', '\n'], " ");
 
-            let mut child = cmd.spawn().map_err(|e| {
-                VoiceError::SynthesisFailed(format!("Falha ao iniciar processo piper: {}", e))
-            })?;
+            // Tenta síntese de baixa latência via processo Piper quente (--json-input).
+            // Retiramos o daemon do slot antes do `.await` para garantir segurança total de cancelamento:
+            // se a Future for cancelada/dropada no meio da síntese, `PiperWarmDaemon` sofre Drop e encerra
+            // o processo filho via `kill_on_drop(true)`, sem deixar estado parcial nos pipes.
+            let daemon_attempt: Result<(), VoiceError> = {
+                let mut slot = self.daemon.lock().await;
+                let mut daemon = match slot.take() {
+                    Some(mut existing) => {
+                        if existing.length_scale_key == desired_scale_key
+                            && matches!(existing.child.try_wait(), Ok(None))
+                        {
+                            existing
+                        } else {
+                            let _ = existing.child.start_kill();
+                            self.spawn_warm_daemon(effective_length_scale)?
+                        }
+                    }
+                    None => self.spawn_warm_daemon(effective_length_scale)?,
+                };
 
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(text_owned.as_bytes()).await;
-            }
+                let req_json = serde_json::json!({
+                    "text": clean_text,
+                    "output_file": safe_out.to_string_lossy(),
+                });
+                let mut line_bytes = req_json.to_string().into_bytes();
+                line_bytes.push(b'\n');
 
-            let mut stderr = child.stderr.take().ok_or_else(|| {
-                VoiceError::SynthesisFailed("Stderr do processo piper não capturado".to_string())
-            })?;
+                let timeout_duration = self.config.timeout;
+                let io_res = tokio::time::timeout(timeout_duration, async {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    daemon.stdin.write_all(&line_bytes).await?;
+                    daemon.stdin.flush().await?;
 
-            let mut stderr_bytes = Vec::new();
+                    let mut ack = Vec::with_capacity(128);
+                    let mut byte = [0u8; 1];
+                    loop {
+                        let n = daemon.stdout.read(&mut byte).await?;
+                        if n == 0 {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Processo piper encerrou inesperadamente",
+                            ));
+                        }
+                        if byte[0] == b'\n' {
+                            break;
+                        }
+                        if ack.len() < 4096 {
+                            ack.push(byte[0]);
+                        }
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
 
-            let status_res = tokio::time::timeout(timeout_duration, async {
-                use tokio::io::AsyncReadExt;
-                let read_err = stderr.read_to_end(&mut stderr_bytes);
-                let wait_child = child.wait();
-                let (_, status) = tokio::try_join!(read_err, wait_child)?;
-                Ok::<std::process::ExitStatus, std::io::Error>(status)
-            })
-            .await;
-
-            let status = match status_res {
-                Ok(Ok(st)) => st,
-                Ok(Err(e)) => {
-                    return Err(VoiceError::SynthesisFailed(format!(
-                        "Erro ao aguardar processo piper: {}",
-                        e
-                    )));
-                }
-                Err(_) => {
-                    // Previne processos órfãos: encerra imediatamente o processo filho
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(VoiceError::Timeout(
-                        "Síntese de voz excedeu tempo limite".to_string(),
-                    ));
+                match io_res {
+                    Ok(Ok(())) if temp_out.is_file() => {
+                        *slot = Some(daemon);
+                        Ok(())
+                    }
+                    Ok(Ok(())) => {
+                        let _ = daemon.child.kill().await;
+                        Err(VoiceError::SynthesisFailed(
+                            "Piper não produziu arquivo de saída esperado".to_string(),
+                        ))
+                    }
+                    Ok(Err(e)) => {
+                        let _ = daemon.child.kill().await;
+                        Err(VoiceError::SynthesisFailed(format!(
+                            "Falha de comunicação com processo piper: {}",
+                            e
+                        )))
+                    }
+                    Err(_) => {
+                        let _ = daemon.child.kill().await;
+                        let _ = daemon.child.wait().await;
+                        Err(VoiceError::Timeout(
+                            "Síntese de voz excedeu tempo limite".to_string(),
+                        ))
+                    }
                 }
             };
 
-            if !status.success() {
-                let stderr_str = String::from_utf8_lossy(&stderr_bytes);
-                return Err(VoiceError::SynthesisFailed(format!(
-                    "Piper finalizou com erro: {}",
-                    stderr_str.trim()
-                )));
+            if let Err(e) = daemon_attempt {
+                if matches!(e, VoiceError::Timeout(_)) {
+                    return Err(e);
+                }
+                tracing::debug!(
+                    "Fallback para execução Piper one-shot após falha no daemon ({})",
+                    e
+                );
+                self.synthesize_oneshot(&clean_text, effective_length_scale, &temp_out)
+                    .await?;
             }
 
             let wav_bytes = std::fs::read(&temp_out).map_err(|e| {
@@ -458,19 +755,17 @@ impl TextToSpeechProvider for LocalPiperTtsProvider {
                 wav_bytes,
                 format,
                 duration_ms,
-                "yuki-piper-ptbr",
+                self.active_voice_id(),
             ))
         })
     }
 }
 
-/// Gerador acústico determinístico soberano de diagnóstico e fallback offline da Yuki.
+/// Gerador acústico determinístico soberano estritamente para diagnóstico de hardware da Yuki.
 ///
-/// Produz formas de onda WAV canônicas com entonação melódica harmônica feminina (F0 ~ 210-230 Hz),
-/// permitindo execução, diagnóstico de hardware e testes ponta-a-ponta em ambientes sem o motor Piper instalado.
-///
-/// NOTA DE TRANSPARÊNCIA: Este provedor sintetiza tons senoidais puros com envelopes de amplitude
-/// para validação de integridade acústica; não produz fala fonêmica neural inteligível.
+/// Produz formas de onda WAV canônicas com entonação melódica harmônica (F0 ~ 210-230 Hz)
+/// exclusivamente para validar sinks e dispositivos de áudio; NÃO produz fala inteligível
+/// (`TtsSynthesisKind::DiagnosticAcoustic`) e é bloqueado nos modos conversacionais reais.
 pub struct LocalAcousticTtsProvider {
     metadata: VoiceProviderMetadata,
     sample_rate: u32,
@@ -491,7 +786,8 @@ impl LocalAcousticTtsProvider {
             sample_rate,
             false,
             "1.0.0",
-        );
+        )
+        .with_synthesis_kind(TtsSynthesisKind::DiagnosticAcoustic);
         Self {
             metadata,
             sample_rate,
@@ -577,4 +873,38 @@ impl TextToSpeechProvider for LocalAcousticTtsProvider {
             ))
         })
     }
+}
+
+/// Resolve o provedor TTS local padrão.
+///
+/// Se `allow_diagnostic_acoustic` for `false` (padrão conversacional real), NUNCA substitui
+/// silenciosamente o Piper por ondas harmônicas artificiais (`DiagnosticAcoustic`).
+pub fn resolve_default_local_tts(allow_diagnostic_acoustic: bool) -> Arc<dyn TextToSpeechProvider> {
+    let piper = LocalPiperTtsProvider::default();
+    if piper.is_environment_ready() || !allow_diagnostic_acoustic {
+        Arc::new(piper)
+    } else {
+        Arc::new(LocalAcousticTtsProvider::default())
+    }
+}
+
+/// Resolve e valida estritamente um provedor TTS local para conversação real.
+///
+/// Falha fechado (`Err(VoiceError::ProviderUnavailable)`) se apenas o gerador diagnóstico estiver
+/// disponível e `allow_diagnostic_acoustic` não tiver sido solicitado explicitamente.
+pub fn resolve_conversational_local_tts(
+    allow_diagnostic_acoustic: bool,
+) -> Result<Arc<dyn TextToSpeechProvider>, VoiceError> {
+    if allow_diagnostic_acoustic {
+        return Ok(Arc::new(LocalAcousticTtsProvider::default()));
+    }
+    let piper = LocalPiperTtsProvider::default();
+    if !piper.is_environment_ready() {
+        return Err(VoiceError::ProviderUnavailable(format!(
+            "Nenhum motor TTS neural inteligível (NeuralSpeech) está pronto para conversação real. \
+             O fallback acústico diagnóstico (ondas harmônicas) está bloqueado em produção.\n{}",
+            LocalPiperTtsProvider::installation_instructions()
+        )));
+    }
+    Ok(Arc::new(piper))
 }

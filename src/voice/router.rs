@@ -158,6 +158,18 @@ pub struct GovernedVoiceRouter {
     local_tts: Arc<dyn TextToSpeechProvider>,
     cloud_tts: Option<Arc<dyn TextToSpeechProvider>>,
     config: VoiceConfiguration,
+    require_intelligible_tts: bool,
+}
+
+fn sanitize_router_cause(err: &VoiceError) -> String {
+    let raw = err.to_string();
+    let max_chars = 240;
+    if raw.chars().count() > max_chars {
+        let truncated: String = raw.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    } else {
+        raw
+    }
 }
 
 impl GovernedVoiceRouter {
@@ -174,19 +186,37 @@ impl GovernedVoiceRouter {
             local_tts,
             cloud_tts,
             config,
+            require_intelligible_tts: false,
         }
+    }
+
+    /// Exige que o provedor TTS sintetize fala inteligível (`NeuralSpeech`), bloqueando tons diagnósticos (`DiagnosticAcoustic`).
+    pub fn with_require_intelligible_tts(mut self, required: bool) -> Self {
+        self.require_intelligible_tts = required;
+        self
+    }
+
+    pub fn requires_intelligible_tts(&self) -> bool {
+        self.require_intelligible_tts
+    }
+
+    pub fn local_stt(&self) -> &Arc<dyn SpeechToTextProvider> {
+        &self.local_stt
+    }
+
+    pub fn local_tts(&self) -> &Arc<dyn TextToSpeechProvider> {
+        &self.local_tts
+    }
+
+    pub fn last_stt_timings(&self) -> Option<crate::contracts::voice::SttTimingMetrics> {
+        self.local_stt.last_timings()
     }
 
     /// Cria uma instância do roteador configurada com os provedores locais soberanos padrão da Yuki.
     pub fn default_local(config: VoiceConfiguration) -> Self {
         let local_stt = Arc::new(crate::voice::stt::LocalWhisperSttProvider::default());
-        let local_tts: Arc<dyn TextToSpeechProvider> =
-            if crate::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
-                Arc::new(crate::voice::tts::LocalPiperTtsProvider::default())
-            } else {
-                Arc::new(crate::voice::tts::LocalAcousticTtsProvider::default())
-            };
-        Self::new(local_stt, None, local_tts, None, config)
+        let local_tts = crate::voice::tts::resolve_default_local_tts(false);
+        Self::new(local_stt, None, local_tts, None, config).with_require_intelligible_tts(true)
     }
 
     pub fn config(&self) -> &VoiceConfiguration {
@@ -203,25 +233,45 @@ impl GovernedVoiceRouter {
         audio: &AudioInput,
         auth: A,
     ) -> Result<String, VoiceError> {
-        // 1. Tenta provedor local soberano
-        if self.local_stt.health().await.is_ok() {
-            match self.local_stt.transcribe(audio).await {
+        // 1. Tenta provedor local soberano e preserva a causa primária em caso de falha
+        let local_err = match self.local_stt.health().await {
+            Ok(()) => match self.local_stt.transcribe(audio).await {
                 Ok(text) => return Ok(text),
                 Err(err) => {
                     tracing::warn!(
-                        "Falha transitória no provedor STT local ({}). Avaliando política de fallback...",
-                        err
+                        provider = %self.local_stt.metadata().provider_name,
+                        "Falha no provedor STT local ({}). Avaliando política de fallback...",
+                        sanitize_router_cause(&err)
                     );
+                    err
                 }
+            },
+            Err(health_err) => {
+                tracing::warn!(
+                    provider = %self.local_stt.metadata().provider_name,
+                    "Provedor STT local indisponível ({}). Avaliando política de fallback...",
+                    sanitize_router_cause(&health_err)
+                );
+                health_err
             }
+        };
+
+        // Se nenhum provedor cloud foi sequer configurado, retorna diretamente a causa primária local
+        // informando explicitamente que o fallback em nuvem está desabilitado/ausente.
+        if self.cloud_stt.is_none() && !self.config.cloud_fallback_allowed {
+            return Err(local_err.with_fallback_context(
+                "Fallback em nuvem desabilitado: nenhum provedor externo foi acionado",
+            ));
         }
 
-        // 2. Se local indisponível, avalia política estrita de fallback
+        let primary_cause = sanitize_router_cause(&local_err);
+
+        // 2. Se local falhou e há configuração/avaliação de fallback, aplica governança estrita preservando a causa primária
         if !self.config.cloud_fallback_allowed {
-            return Err(VoiceError::UnauthorizedCloudFallback(
-                "Fallback para STT em nuvem rejeitado: desativado na política de privacidade da Yuki"
-                    .to_string(),
-            ));
+            return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                "Causa primária no STT local: {}. Fallback em nuvem não executado: desativado na política de privacidade da Yuki",
+                primary_cause
+            )));
         }
 
         let egress_auth = auth.into_auth(VoiceEgressAuthorization::CAPABILITY_STT, "operator");
@@ -232,23 +282,23 @@ impl GovernedVoiceRouter {
                 // Autorização verificada e válida
             }
             Some(_) => {
-                return Err(VoiceError::UnauthorizedCloudFallback(
-                    "Fallback para STT em nuvem rejeitado: autorização de saída expirada ou com capability/operador divergente"
-                        .to_string(),
-                ));
+                return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                    "Causa primária no STT local: {}. Fallback em nuvem rejeitado: autorização de saída expirada ou com capability/operador divergente",
+                    primary_cause
+                )));
             }
             None => {
-                return Err(VoiceError::UnauthorizedCloudFallback(
-                    "Fallback para STT em nuvem rejeitado: permissão 'egress:voice_cloud_stt' não autorizada pelo operador"
-                        .to_string(),
-                ));
+                return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                    "Causa primária no STT local: {}. Fallback em nuvem rejeitado: permissão 'egress:voice_cloud_stt' não autorizada pelo operador",
+                    primary_cause
+                )));
             }
         }
 
         // 3. Executa provedor cloud se configurado
         let cloud = self.cloud_stt.as_ref().ok_or_else(|| {
-            VoiceError::ProviderUnavailable(
-                "Nenhum provedor STT em nuvem configurado para fallback".to_string(),
+            local_err.with_fallback_context(
+                "Nenhum provedor STT em nuvem configurado para fallback autorizado",
             )
         })?;
 
@@ -261,25 +311,52 @@ impl GovernedVoiceRouter {
         text: &str,
         auth: A,
     ) -> Result<AudioOutput, VoiceError> {
-        // 1. Tenta provedor local soberano
-        if self.local_tts.health().await.is_ok() {
-            match self.local_tts.synthesize(text, Some(&self.config)).await {
-                Ok(audio) => return Ok(audio),
-                Err(err) => {
-                    tracing::warn!(
-                        "Falha no provedor TTS local ({}). Avaliando política de fallback...",
+        // 1. Verifica bloqueio estrito contra gerador acústico diagnóstico em modo conversacional real
+        let local_err = if self.require_intelligible_tts
+            && self.local_tts.metadata().is_diagnostic_acoustic()
+        {
+            VoiceError::ProviderUnavailable(format!(
+                "Provedor TTS '{}' é apenas diagnóstico acústico (DiagnosticAcoustic) e não sintetiza fala inteligível (NeuralSpeech). Configure o Piper TTS em bin/piper/ e models/piper/ ou use --diagnostic-acoustic apenas para testes de hardware",
+                self.local_tts.metadata().provider_name
+            ))
+        } else {
+            match self.local_tts.health().await {
+                Ok(()) => match self.local_tts.synthesize(text, Some(&self.config)).await {
+                    Ok(audio) => return Ok(audio),
+                    Err(err) => {
+                        tracing::warn!(
+                            provider = %self.local_tts.metadata().provider_name,
+                            "Falha no provedor TTS local ({}). Avaliando política de fallback...",
+                            sanitize_router_cause(&err)
+                        );
                         err
+                    }
+                },
+                Err(health_err) => {
+                    tracing::warn!(
+                        provider = %self.local_tts.metadata().provider_name,
+                        "Provedor TTS local indisponível ({}). Avaliando política de fallback...",
+                        sanitize_router_cause(&health_err)
                     );
+                    health_err
                 }
             }
+        };
+
+        if self.cloud_tts.is_none() && !self.config.cloud_fallback_allowed {
+            return Err(local_err.with_fallback_context(
+                "Fallback em nuvem desabilitado: nenhum provedor externo foi acionado",
+            ));
         }
 
-        // 2. Se local indisponível, avalia política estrita de fallback
+        let primary_cause = sanitize_router_cause(&local_err);
+
+        // 2. Se local indisponível, avalia política estrita de fallback preservando a causa primária
         if !self.config.cloud_fallback_allowed {
-            return Err(VoiceError::UnauthorizedCloudFallback(
-                "Fallback para TTS em nuvem rejeitado: desativado na política de privacidade da Yuki"
-                    .to_string(),
-            ));
+            return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                "Causa primária no TTS local: {}. Fallback em nuvem não executado: desativado na política de privacidade da Yuki",
+                primary_cause
+            )));
         }
 
         let egress_auth = auth.into_auth(VoiceEgressAuthorization::CAPABILITY_TTS, "operator");
@@ -290,23 +367,23 @@ impl GovernedVoiceRouter {
                 // Autorização verificada e válida
             }
             Some(_) => {
-                return Err(VoiceError::UnauthorizedCloudFallback(
-                    "Fallback para TTS em nuvem rejeitado: autorização de saída expirada ou com capability/operador divergente"
-                        .to_string(),
-                ));
+                return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                    "Causa primária no TTS local: {}. Fallback em nuvem rejeitado: autorização de saída expirada ou com capability/operador divergente",
+                    primary_cause
+                )));
             }
             None => {
-                return Err(VoiceError::UnauthorizedCloudFallback(
-                    "Fallback para TTS em nuvem rejeitado: permissão 'egress:voice_cloud_tts' não autorizada pelo operador"
-                        .to_string(),
-                ));
+                return Err(VoiceError::UnauthorizedCloudFallback(format!(
+                    "Causa primária no TTS local: {}. Fallback em nuvem rejeitado: permissão 'egress:voice_cloud_tts' não autorizada pelo operador",
+                    primary_cause
+                )));
             }
         }
 
         // 3. Executa provedor cloud se configurado
         let cloud = self.cloud_tts.as_ref().ok_or_else(|| {
-            VoiceError::ProviderUnavailable(
-                "Nenhum provedor TTS em nuvem configurado para fallback".to_string(),
+            local_err.with_fallback_context(
+                "Nenhum provedor TTS em nuvem configurado para fallback autorizado",
             )
         })?;
 

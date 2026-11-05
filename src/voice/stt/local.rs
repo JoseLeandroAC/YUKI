@@ -80,6 +80,12 @@ pub struct LocalWhisperConfig {
     pub best_of: Option<u32>,
     /// Desativa o fallback de temperatura ao decodificar (-nf / --no-fallback)
     pub no_fallback: bool,
+    /// Janela explícita de contexto de áudio do encoder Whisper (-ac / --audio-ctx, 0..=1500)
+    pub audio_ctx: Option<u32>,
+    /// Calcula automaticamente `--audio-ctx` proporcional à duração real da fala (elimina padding fixo de 30s)
+    pub auto_audio_ctx: bool,
+    /// Remove bordas silenciosas no início e no fim antes do envio ao Whisper (preservando margem de segurança)
+    pub trim_silence: bool,
     /// Estratégia de detecção de silêncio acústico pré-normalização (padrão: Legacy / `is_silent_pcm`).
     pub silence_detector: crate::voice::stt::silence::SilenceDetectorKind,
     /// Teto máximo de ganho em dB para normalização de amplitude (None = sem teto, padrão).
@@ -164,11 +170,49 @@ impl LocalWhisperConfig {
         self
     }
 
-    /// Ativa modo experimental de baixa latência (greedy search com beam_size=1, best_of=1 e sem fallback).
+    /// Define janela explícita de contexto do encoder (`--audio-ctx`).
+    pub fn with_audio_ctx(mut self, audio_ctx: Option<u32>) -> Self {
+        self.audio_ctx = audio_ctx.map(|v| v.clamp(128, 1500));
+        self
+    }
+
+    /// Ativa ou desativa ajuste dinâmico de `--audio-ctx` conforme a duração do áudio.
+    pub fn with_auto_audio_ctx(mut self, enabled: bool) -> Self {
+        self.auto_audio_ctx = enabled;
+        self
+    }
+
+    /// Ativa ou desativa corte conservador de bordas silenciosas antes da decodificação.
+    pub fn with_silence_trimming(mut self, enabled: bool) -> Self {
+        self.trim_silence = enabled;
+        self
+    }
+
+    /// Ativa modo de baixa latência (greedy search com beam_size=1, best_of=1 e sem fallback).
     pub fn with_fast_decoding(mut self) -> Self {
         self.beam_size = Some(1);
         self.best_of = Some(1);
         self.no_fallback = true;
+        self
+    }
+
+    /// Ativa o perfil completo de baixa latência para conversação ao vivo (`voice live`):
+    /// - Greedy search sem fallback de temperatura (`-bs 1 -bo 1 --no-fallback`)
+    /// - Recorte conservador de bordas silenciosas (preservando 250ms de margem)
+    /// - Escalonamento dinâmico de `--audio-ctx` proporcional à fala real (elimina padding de 30s no encoder)
+    /// - Paralelismo ótimo de CPU (`threads` entre 4 e 8 se não especificado)
+    /// - Sem injeção automática de prompt lexical para evitar alucinações em falas curtas.
+    pub fn with_live_optimizations(mut self) -> Self {
+        self = self.with_fast_decoding();
+        self.auto_audio_ctx = true;
+        self.trim_silence = true;
+        if self.threads.is_none() {
+            let hw = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+                .clamp(4, 8);
+            self.threads = Some(hw);
+        }
         self
     }
 
@@ -245,6 +289,11 @@ impl Default for LocalWhisperConfig {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let audio_ctx = std::env::var("YUKI_WHISPER_AUDIO_CTX")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|v| v.clamp(128, 1500));
+
         let silence_detector = match std::env::var("YUKI_VOICE_SILENCE_DETECTOR").as_deref() {
             Ok("windowed") => crate::voice::stt::silence::SilenceDetectorKind::Windowed(
                 crate::voice::stt::silence::WindowedSilenceConfig::default(),
@@ -268,6 +317,9 @@ impl Default for LocalWhisperConfig {
             beam_size,
             best_of,
             no_fallback,
+            audio_ctx,
+            auto_audio_ctx: false,
+            trim_silence: false,
             silence_detector,
             max_gain_db,
         }
@@ -362,6 +414,75 @@ pub fn is_silent_pcm(samples: &[i16]) -> bool {
     }
     let rms = (sum_sq / samples.len() as f64).sqrt();
     rms < 120.0 && max_abs < 250
+}
+
+/// Remove margens de silêncio inicial e final preservando folga acústica (`pad_ms`)
+/// para não amputar consoantes iniciais ou finais antes de alimentar o encoder do Whisper.
+pub fn trim_silence_edges(
+    samples: &[i16],
+    sample_rate: u32,
+    min_rms: f32,
+    pad_ms: u32,
+) -> Vec<i16> {
+    if samples.is_empty() || sample_rate == 0 {
+        return samples.to_vec();
+    }
+    let window_len = ((sample_rate as usize) * 20 / 1000).max(1);
+    if samples.len() <= window_len * 2 {
+        return samples.to_vec();
+    }
+
+    let mut first_active_sample: Option<usize> = None;
+    let mut last_active_end: usize = 0;
+
+    let mut offset = 0usize;
+    while offset < samples.len() {
+        let end = (offset + window_len).min(samples.len());
+        let win = &samples[offset..end];
+        let sum_sq: f64 = win.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        let rms = (sum_sq / (win.len() as f64)).sqrt() as f32;
+        if rms >= min_rms {
+            if first_active_sample.is_none() {
+                first_active_sample = Some(offset);
+            }
+            last_active_end = end;
+        }
+        offset = end;
+    }
+
+    let Some(first) = first_active_sample else {
+        return samples.to_vec();
+    };
+
+    let pad_samples = ((sample_rate as usize) * (pad_ms as usize)) / 1000;
+    let mut start_idx = first.saturating_sub(pad_samples);
+    let mut end_idx = (last_active_end + pad_samples).min(samples.len());
+
+    let min_keep = ((sample_rate as usize) / 2).min(samples.len());
+    if end_idx.saturating_sub(start_idx) < min_keep {
+        let deficit = min_keep - (end_idx - start_idx);
+        let add_before = deficit / 2;
+        start_idx = start_idx.saturating_sub(add_before);
+        end_idx = (start_idx + min_keep).min(samples.len());
+    }
+
+    samples[start_idx..end_idx].to_vec()
+}
+
+/// Calcula o `--audio-ctx` (`-ac`) proporcional à duração real da fala em 16 kHz.
+///
+/// O encoder do Whisper opera com 1500 tokens para 30s (50 tokens/segundo).
+/// Sem `-ac`, frases curtas de 1.5s–3s sofrem zero-padding para 30s completos,
+/// desperdiçando ~7.5s de CPU. Esta função adiciona folga de 128 tokens (~2.56s),
+/// arredonda para múltiplo de 64 (alinhamento SIMD/BLAS) e limita a `[256, 1500]`.
+pub fn compute_dynamic_audio_ctx(samples_len: usize, sample_rate: u32) -> u32 {
+    if sample_rate == 0 || samples_len == 0 {
+        return 256;
+    }
+    let duration_secs = (samples_len as f64) / (sample_rate as f64);
+    let needed = (duration_secs * 50.0).ceil() as u32 + 128;
+    let rounded = needed.div_ceil(64).saturating_mul(64);
+    rounded.clamp(256, 1500)
 }
 
 /// Remove formatações de tempo e tags especiais (ex: `[00:00.000 --> 00:02.000]`, `[BLANK_AUDIO]`).
@@ -575,6 +696,7 @@ fn which_whisper() -> Option<PathBuf> {
 pub struct LocalWhisperSttProvider {
     metadata: VoiceProviderMetadata,
     config: LocalWhisperConfig,
+    last_timings: std::sync::Mutex<Option<SttTimingMetrics>>,
 }
 
 impl LocalWhisperSttProvider {
@@ -587,7 +709,16 @@ impl LocalWhisperSttProvider {
             false,
             "1.0.0",
         );
-        Self { metadata, config }
+        Self {
+            metadata,
+            config,
+            last_timings: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Retorna as métricas de tempo detalhadas da última transcrição executada.
+    pub fn get_last_timings(&self) -> Option<SttTimingMetrics> {
+        self.last_timings.lock().ok().and_then(|g| g.clone())
     }
 
     /// Retorna instruções claras de instalação para o operador caso os recursos locais estejam ausentes.
@@ -686,14 +817,17 @@ impl LocalWhisperSttProvider {
 
         // 4. Converte para mono
         let mut mono_samples = AudioCodec::to_mono(&samples, format.channels);
-        let audio_prep_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
 
         let decoding_config_summary = SttDecodingConfigSummary {
             language_requested: self.config.language.clone(),
             prompt_configured: self.config.initial_prompt.is_some(),
             prompt_preview: self.config.initial_prompt.as_ref().map(|p| {
                 if p.len() > 60 {
-                    format!("{}...", &p[..57])
+                    let mut end = 57;
+                    while end > 0 && !p.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &p[..end])
                 } else {
                     p.clone()
                 }
@@ -715,6 +849,7 @@ impl LocalWhisperSttProvider {
         };
 
         if is_silent {
+            let audio_prep_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
             tracing::debug!(
                 "Áudio identificado como silêncio acústico; transcrição concluída vazia."
             );
@@ -724,6 +859,9 @@ impl LocalWhisperSttProvider {
                 total_stt_wall_ms,
                 ..Default::default()
             };
+            if let Ok(mut guard) = self.last_timings.lock() {
+                *guard = Some(timings.clone());
+            }
             return Ok(LocalTranscriptionResult {
                 text: String::new(),
                 language_requested: self.config.language.clone(),
@@ -737,6 +875,12 @@ impl LocalWhisperSttProvider {
                 decoding_config: decoding_config_summary,
             });
         }
+
+        // 5b. Recorte conservador das margens de silêncio antes de normalizar e codificar
+        if self.config.trim_silence {
+            mono_samples = trim_silence_edges(&mono_samples, 16000, 160.0, 250);
+        }
+        let audio_prep_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
 
         // 6. Normaliza amplitude com margem de segurança contra saturação (clipping)
         let t_norm_start = std::time::Instant::now();
@@ -760,10 +904,15 @@ impl LocalWhisperSttProvider {
             );
         }
 
-        // 7. Cria arquivo temporário atômico para o áudio com alta entropia
+        // 7. Cria arquivo temporário atômico em diretório ASCII-safe (evita falhas ANSI em paths com acento no Windows)
         let t_write_start = std::time::Instant::now();
-        let temp_dir = std::env::temp_dir();
-        let temp_wav_path = temp_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")));
+        let cache_dir = PathBuf::from("data/stt_cache");
+        let temp_wav_path = if std::fs::create_dir_all(&cache_dir).is_ok() {
+            cache_dir.join(format!("yuki_stt_{}.wav", generate_unique_id("stt")))
+        } else {
+            crate::voice::tts::to_ascii_safe_cli_path(&std::env::temp_dir())
+                .join(format!("yuki_stt_{}.wav", generate_unique_id("stt")))
+        };
 
         std::fs::write(&temp_wav_path, &normalized_wav)
             .map_err(|e| VoiceError::Io(format!("Falha ao gravar WAV temporário: {}", e)))?;
@@ -781,12 +930,16 @@ impl LocalWhisperSttProvider {
         // 8. Executa processo Whisper de forma assíncrona com controle de timeout e término garantido
         let t_sub_start = std::time::Instant::now();
         let timeout_duration = self.config.timeout;
-        let mut cmd = tokio::process::Command::new(bin_path);
+        let cli_bin = crate::voice::tts::to_ascii_safe_cli_path(bin_path);
+        let cli_model = crate::voice::tts::to_ascii_safe_cli_path(model_path);
+        let cli_wav = crate::voice::tts::to_ascii_safe_cli_path(&temp_wav_path);
+
+        let mut cmd = tokio::process::Command::new(&cli_bin);
         cmd.kill_on_drop(true);
         cmd.arg("-m")
-            .arg(model_path)
+            .arg(&cli_model)
             .arg("-f")
-            .arg(&temp_wav_path)
+            .arg(&cli_wav)
             .arg("-l")
             .arg(&self.config.language)
             .arg("--no-timestamps");
@@ -811,6 +964,19 @@ impl LocalWhisperSttProvider {
 
         if self.config.no_fallback {
             cmd.arg("--no-fallback");
+        }
+
+        let effective_audio_ctx = self.config.audio_ctx.or_else(|| {
+            if self.config.auto_audio_ctx {
+                Some(compute_dynamic_audio_ctx(mono_samples.len(), 16000))
+            } else {
+                None
+            }
+        });
+        if let Some(ac) = effective_audio_ctx {
+            if ac > 0 && ac < 1500 {
+                cmd.arg("-ac").arg(ac.to_string());
+            }
         }
 
         cmd.stdout(std::process::Stdio::piped())
@@ -898,6 +1064,10 @@ impl LocalWhisperSttProvider {
             total_stt_wall_ms,
         };
 
+        if let Ok(mut guard) = self.last_timings.lock() {
+            *guard = Some(timings.clone());
+        }
+
         if let Some(ref mut diag) = diag_opt {
             let _ = crate::voice::diag::update_diagnostic_with_stt(
                 diag,
@@ -907,11 +1077,12 @@ impl LocalWhisperSttProvider {
         }
 
         tracing::info!(
-            "Transcrição local Whisper concluída em {:?}: \"{}\" (solicitado: {}, detectado: {:?})",
+            "Transcrição local Whisper concluída em {:?}: \"{}\" (solicitado: {}, detectado: {:?}, audio_ctx: {:?})",
             elapsed,
             sanitized,
             self.config.language,
-            detection_meta.detected_language
+            detection_meta.detected_language,
+            effective_audio_ctx
         );
 
         Ok(LocalTranscriptionResult {
@@ -964,5 +1135,9 @@ impl SpeechToTextProvider for LocalWhisperSttProvider {
             let res = self.transcribe_with_metadata(audio).await?;
             Ok(res.text)
         })
+    }
+
+    fn last_timings(&self) -> Option<SttTimingMetrics> {
+        self.get_last_timings()
     }
 }

@@ -53,13 +53,22 @@ async fn test_recovery_01_immediate_retry_after_stt_failure() {
         .process_button_turn(dev, create_dummy_audio(), false, false)
         .await;
 
-    // 1. Erro original é preservado
+    // 1. Erro original é preservado (MockSttProvider::health retorna ProviderUnavailable("Mock STT offline"))
+    let err1 = res1.unwrap_err();
     assert!(
         matches!(
-            res1.unwrap_err(),
-            VoiceError::TranscriptionFailed(_) | VoiceError::UnauthorizedCloudFallback(_)
+            err1,
+            VoiceError::ProviderUnavailable(_)
+                | VoiceError::TranscriptionFailed(_)
+                | VoiceError::UnauthorizedCloudFallback(_)
         ),
-        "Erro de STT original deve ser preservado e propagado"
+        "Erro de STT original deve ser preservado e propagado: {:?}",
+        err1
+    );
+    assert!(
+        err1.to_string().contains("Mock STT offline"),
+        "Causa primária do Mock STT deve ser preservada: {}",
+        err1
     );
 
     // 2. Sessão transita para Failed e in_flight é liberado
@@ -205,12 +214,21 @@ async fn test_recovery_03_immediate_retry_after_tts_failure() {
     let res1 = coord_fail
         .process_button_turn(dev, create_dummy_audio(), false, false)
         .await;
+    let err1 = res1.unwrap_err();
     assert!(
         matches!(
-            res1.unwrap_err(),
-            VoiceError::SynthesisFailed(_) | VoiceError::UnauthorizedCloudFallback(_)
+            err1,
+            VoiceError::ProviderUnavailable(_)
+                | VoiceError::SynthesisFailed(_)
+                | VoiceError::UnauthorizedCloudFallback(_)
         ),
-        "Erro de síntese ou roteamento deve ser preservado"
+        "Erro de síntese ou roteamento deve ser preservado: {:?}",
+        err1
+    );
+    assert!(
+        err1.to_string().contains("Mock TTS offline"),
+        "Causa primária do Mock TTS deve ser preservada: {}",
+        err1
     );
 
     let sess1 = session_mgr.get_session(dev).unwrap();
@@ -619,13 +637,21 @@ async fn test_recovery_08_audit_events_and_original_error_preservation() {
         .await;
 
     // 1. Preservação do erro original
+    let err = res.expect_err("Deve retornar erro de STT");
     assert!(
         matches!(
-            res.as_ref().err(),
-            Some(VoiceError::TranscriptionFailed(_) | VoiceError::UnauthorizedCloudFallback(_))
+            err,
+            VoiceError::ProviderUnavailable(_)
+                | VoiceError::TranscriptionFailed(_)
+                | VoiceError::UnauthorizedCloudFallback(_)
         ),
         "Erro original deve ser preservado: {:?}",
-        res.err()
+        err
+    );
+    assert!(
+        err.to_string().contains("Mock STT offline"),
+        "Causa primária do Mock STT deve ser preservada: {}",
+        err
     );
 
     // 2. Registro de evento de auditoria VoiceProcessingFailed

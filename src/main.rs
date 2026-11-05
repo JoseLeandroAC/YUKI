@@ -119,7 +119,7 @@ pub enum VoiceCommands {
         #[arg(short, long, default_value_t = false)]
         all: bool,
     },
-    /// Sintetiza uma mensagem usando a voz da Yuki e salva em WAV (opcionalmente reproduz no alto-falante)
+    /// Sintetiza uma mensagem usando a voz neural da Yuki e salva em WAV (opcionalmente reproduz no alto-falante)
     Speak {
         /// Texto a ser sintetizado pela Yuki
         text: String,
@@ -132,6 +132,9 @@ pub enum VoiceCommands {
         /// Identificador ou nome do dispositivo de saída para reprodução (opcional)
         #[arg(long)]
         output_device: Option<String>,
+        /// Usa deliberadamente o gerador harmônico diagnóstico (220Hz) em vez de síntese de fala neural
+        #[arg(long, default_value_t = false)]
+        diagnostic_acoustic: bool,
     },
     /// Transcreve áudio usando STT local (do microfone ou de arquivo WAV)
     Listen {
@@ -210,6 +213,12 @@ pub enum VoiceCommands {
         /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
         #[arg(long, visible_alias = "diag", default_value_t = false)]
         diagnostics: bool,
+        /// Autoriza explicitamente o uso do MockModelProvider para testes locais de pipeline sem LLM real
+        #[arg(long, default_value_t = false)]
+        mock: bool,
+        /// Autoriza explicitamente o uso do gerador harmônico diagnóstico no lugar de fala neural
+        #[arg(long, default_value_t = false)]
+        diagnostic_acoustic: bool,
     },
     /// Inicia sessão conversacional de voz ao vivo contínua ativada por 'Yuki' (openWakeWord) com janela de follow-up
     Live {
@@ -219,8 +228,8 @@ pub enum VoiceCommands {
         /// Duração da janela conversacional de follow-up em segundos (padrão: 7s)
         #[arg(long, default_value_t = 7)]
         follow_up_secs: u64,
-        /// Tempo de silêncio contínuo após fala para declarar fim de fala em ms (padrão: 800ms)
-        #[arg(long, default_value_t = 800)]
+        /// Tempo de silêncio contínuo após fala para declarar fim de fala em ms (padrão: 650ms)
+        #[arg(long, default_value_t = 650)]
         silence_hangover_ms: u64,
         /// Duração máxima de captura de cada frase em segundos (padrão: 10s)
         #[arg(long, default_value_t = 10)]
@@ -234,8 +243,8 @@ pub enum VoiceCommands {
         /// Reproduz fisicamente a resposta vocal no alto-falante (padrão: true)
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         play: bool,
-        /// Ativa modo de decodificação rápida do Whisper (beam=1, best_of=1, no-fallback)
-        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        /// Ativa otimizações de baixa latência do Whisper ao vivo (audio-ctx dinâmico, trim de silêncio, greedy)
+        #[arg(long, visible_alias = "fast-stt", default_value_t = true, action = clap::ArgAction::Set)]
         fast: bool,
         /// Permite fallback para transcrição em nuvem (STT)
         #[arg(long, default_value_t = false)]
@@ -243,6 +252,12 @@ pub enum VoiceCommands {
         /// Permite fallback para síntese em nuvem (TTS)
         #[arg(long, default_value_t = false)]
         allow_cloud_tts: bool,
+        /// Autoriza explicitamente o uso do MockModelProvider para testes locais de pipeline sem LLM real
+        #[arg(long, default_value_t = false)]
+        mock: bool,
+        /// Autoriza explicitamente o uso do gerador harmônico diagnóstico no lugar de fala neural
+        #[arg(long, default_value_t = false)]
+        diagnostic_acoustic: bool,
     },
     /// Executa comparação A/B de decodificação STT sobre um mesmo arquivo WAV (Baseline vs Otimizado)
     CompareStt {
@@ -781,42 +796,93 @@ async fn handle_mission_command(cmd: MissionCommands, db_path: &str) {
 }
 
 async fn handle_voice_command(cmd: VoiceCommands) {
-    use yuki::contracts::voice::{AudioInput, TextToSpeechProvider};
+    use yuki::contracts::voice::AudioInput;
     use yuki::voice::audio::AudioCodec;
     use yuki::voice::devices::{
         find_device, get_default_device, list_audio_devices, AudioDeviceFlow,
     };
     use yuki::voice::playback::AudioPlaybackController;
     use yuki::voice::stt::LocalWhisperSttProvider;
-    use yuki::voice::tts::{LocalAcousticTtsProvider, LocalPiperTtsProvider, VoiceIdentity};
+    use yuki::voice::tts::{
+        resolve_conversational_local_tts, LocalAcousticTtsProvider, LocalPiperTtsProvider,
+        VoiceIdentity,
+    };
 
     match cmd {
         VoiceCommands::Status => {
             println!("=== Diagnóstico do Subsistema de Voz da Yuki ===");
-            let whisper_ready = LocalWhisperSttProvider::default().is_environment_ready();
+            let whisper = LocalWhisperSttProvider::default();
+            let whisper_ready = whisper.is_environment_ready();
+            let whisper_model = whisper
+                .config()
+                .model_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("não detectado");
             println!(
                 "STT Local (Whisper.cpp / CLI): {}",
                 if whisper_ready {
-                    "DISPONÍVEL"
+                    format!("DISPONÍVEL (modelo: {})", whisper_model)
                 } else {
-                    "NÃO INSTALADO / NÃO CONFIGURADO (instruções em docs/)"
+                    "NÃO INSTALADO / NÃO CONFIGURADO (instruções em docs/)".to_string()
                 }
             );
 
-            let piper_ready = LocalPiperTtsProvider::default().is_environment_ready();
+            let piper = LocalPiperTtsProvider::default();
+            let piper_ready = piper.is_environment_ready();
+            let piper_meta = yuki::contracts::voice::TextToSpeechProvider::metadata(&piper);
             println!(
-                "TTS Local (Piper Neural):     {}",
+                "TTS Neural (Piper PT-BR):      {}",
                 if piper_ready {
-                    "DISPONÍVEL"
+                    format!(
+                        "DISPONÍVEL [{}] (voz ativa: {}, {}Hz mono 16-bit)",
+                        piper_meta.synthesis_kind,
+                        piper.active_voice_id(),
+                        piper_meta.sample_rate
+                    )
                 } else {
-                    "NÃO INSTALADO (instruções em docs/)"
+                    format!(
+                        "NÃO INSTALADO [{}] (bloqueia conversação sem --diagnostic-acoustic)",
+                        piper_meta.synthesis_kind
+                    )
                 }
             );
 
-            println!("TTS Local Acústico (Fallback): DISPONÍVEL (Embarcado, F0=220Hz, voz feminina afável)");
+            let acoustic = LocalAcousticTtsProvider::default();
+            let acoustic_meta = yuki::contracts::voice::TextToSpeechProvider::metadata(&acoustic);
+            println!(
+                "TTS Diagnóstico (220Hz):       DISPONÍVEL [{}] (apenas opt-in via --diagnostic-acoustic)",
+                acoustic_meta.synthesis_kind
+            );
+
+            let oww_ready = yuki::voice::wakeword::OpenWakeWordEngine::is_available();
+            println!(
+                "Wake Word (openWakeWord):      {}",
+                if oww_ready {
+                    "DISPONÍVEL (PT-BR yuki_v0.1.onnx)"
+                } else {
+                    "NÃO CONFIGURADO (models/wakeword/ + bin/onnxruntime/)"
+                }
+            );
+
+            match yuki::models::resolve_conversational_model_provider_from_env(false) {
+                Ok(provider) => {
+                    println!(
+                        "Modelo Cognitivo (Conversa):   PRONTO — {}",
+                        yuki::models::format_active_model_provider_banner(provider.as_ref())
+                    );
+                }
+                Err(_) => {
+                    println!(
+                        "Modelo Cognitivo (Conversa):   BLOQUEADO (Fail-Closed: configure YUKI_MODEL_PROVIDER=gemini + credencial)"
+                    );
+                }
+            }
+
             let voice_id = VoiceIdentity::default();
             println!(
-                "Identidade Vocal da Yuki:     {} ({}, idioma: {}, tom: {:?})",
+                "Identidade Vocal da Yuki:      {} ({}, idioma: {}, tom: {:?})",
                 voice_id.name, voice_id.gender, voice_id.language, voice_id.tone
             );
 
@@ -907,17 +973,37 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             output,
             play,
             output_device,
+            diagnostic_acoustic,
         } => {
-            let acoustic = LocalAcousticTtsProvider::default();
+            let tts_provider = match resolve_conversational_local_tts(diagnostic_acoustic) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Erro de configuração TTS (Fail-Closed): {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let meta = tts_provider.metadata();
+            println!(
+                "Provedor TTS selecionado: {} [categoria: {}, taxa base: {}Hz]",
+                meta.provider_name, meta.synthesis_kind, meta.sample_rate
+            );
             println!("Sintetizando voz da Yuki para o texto: \"{}\"...", text);
-            match acoustic.synthesize(&text, None).await {
+            let t_synth = std::time::Instant::now();
+            match tts_provider.synthesize(&text, None).await {
                 Ok(audio_out) => {
+                    let synth_ms = t_synth.elapsed().as_millis();
                     if let Err(e) = std::fs::write(&output, &audio_out.payload) {
                         eprintln!("Erro ao salvar arquivo '{}': {}", output, e);
+                        std::process::exit(1);
                     } else {
                         println!("Áudio sintetizado com sucesso salvo em: {}", output);
                         println!(
-                            "Duração aproximada: {:.2}s ({} bytes)",
+                            "Voz: {} | Formato WAV: {}Hz, {}-bit, {} canal(is) | Síntese: {}ms | Duração: {:.2}s ({} bytes)",
+                            audio_out.voice_name,
+                            audio_out.format.sample_rate,
+                            audio_out.format.bits_per_sample,
+                            audio_out.format.channels,
+                            synth_ms,
                             audio_out.duration_ms as f64 / 1000.0,
                             audio_out.payload.len()
                         );
@@ -938,7 +1024,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                                         "Falha ao resolver dispositivo de saída '{}': {}",
                                         dev_query, e
                                     );
-                                    return;
+                                    std::process::exit(1);
                                 }
                             }
                         } else {
@@ -962,9 +1048,10 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                             );
                             if let Err(e) = playback.play(&audio_out) {
                                 eprintln!("Erro na reprodução física de áudio: {}", e);
+                                std::process::exit(1);
                             } else {
                                 let duration = std::time::Duration::from_millis(
-                                    audio_out.duration_ms.max(100),
+                                    audio_out.duration_ms.max(100) + 150,
                                 );
                                 tokio::time::sleep(duration).await;
                                 println!("Reprodução concluída.");
@@ -972,7 +1059,10 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         }
                     }
                 }
-                Err(e) => eprintln!("Erro ao sintetizar áudio: {}", e),
+                Err(e) => {
+                    eprintln!("Erro ao sintetizar áudio: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         VoiceCommands::Listen {
@@ -1298,6 +1388,8 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             no_fallback,
             fast_stt,
             diagnostics,
+            mock,
+            diagnostic_acoustic,
         } => {
             #[cfg(windows)]
             {
@@ -1311,7 +1403,43 @@ async fn handle_voice_command(cmd: VoiceCommands) {
 
                 let is_diag_active = diagnostics || yuki::voice::diag::is_diagnostics_enabled();
 
-                // 1. Resolução do microfone de entrada (fail-closed se indisponível)
+                // 1. Pré-validação Fail-Closed do provedor cognitivo e TTS neural ANTES de abrir o microfone
+                let model_provider =
+                    match yuki::models::resolve_conversational_model_provider_from_env(mock) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!(
+                            "\n[Yuki] Bloqueio de segurança (Fail-Closed) no Provedor Cognitivo:\n{}",
+                            e
+                        );
+                            std::process::exit(1);
+                        }
+                    };
+                let local_tts = match yuki::voice::tts::resolve_conversational_local_tts(
+                    diagnostic_acoustic,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "\n[Yuki] Bloqueio de segurança (Fail-Closed) na Síntese Vocal (TTS):\n{}",
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                };
+
+                println!(
+                    "Modelo Cognitivo Ativo: {}",
+                    yuki::models::format_active_model_provider_banner(model_provider.as_ref())
+                );
+                println!(
+                    "Síntese Vocal Ativa   : {} [categoria: {}, {}Hz]",
+                    local_tts.metadata().provider_name,
+                    local_tts.metadata().synthesis_kind,
+                    local_tts.metadata().sample_rate
+                );
+
+                // 2. Resolução do microfone de entrada (fail-closed se indisponível)
                 let target_input_id = if let Some(ref dev_query) = input_device {
                     match find_device(dev_query, AudioDeviceFlow::Input) {
                         Ok(dev) => {
@@ -1326,7 +1454,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                                 "Falha ao resolver microfone de entrada '{}': {}",
                                 dev_query, e
                             );
-                            return;
+                            std::process::exit(1);
                         }
                     }
                 } else {
@@ -1336,17 +1464,17 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         }
                         Ok(None) => {
                             eprintln!("Erro: Nenhum microfone de entrada está ativo ou disponível no sistema.");
-                            return;
+                            std::process::exit(1);
                         }
                         Err(e) => {
                             eprintln!("Erro ao verificar microfone padrão: {}", e);
-                            return;
+                            std::process::exit(1);
                         }
                     }
                     None
                 };
 
-                // 2. Resolução do endpoint de saída se reprodução requerida
+                // 3. Resolução do endpoint de saída se reprodução requerida
                 let target_output_id = if play {
                     if let Some(ref dev_query) = output_device {
                         match find_device(dev_query, AudioDeviceFlow::Output) {
@@ -1362,7 +1490,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                                     "Falha ao resolver dispositivo de saída '{}': {}",
                                     dev_query, e
                                 );
-                                return;
+                                std::process::exit(1);
                             }
                         }
                     } else {
@@ -1392,14 +1520,14 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     eprintln!(
                         "Erro: O microfone selecionado não está acessível no Windows WASAPI."
                     );
-                    return;
+                    std::process::exit(1);
                 }
                 let capture_backend: Arc<dyn AudioCaptureBackend> = Arc::new(win);
 
                 let ptt = PushToTalkController::new(capture_backend);
                 if let Err(e) = ptt.press() {
                     eprintln!("Falha ao iniciar captura de microfone: {}", e);
-                    return;
+                    std::process::exit(1);
                 }
 
                 println!(
@@ -1422,13 +1550,10 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     }
                     Err(e) => {
                         eprintln!("Falha ao encerrar captura de áudio: {}", e);
-                        return;
+                        std::process::exit(1);
                     }
                 };
 
-                // Inicializa modelo para o Core (Mock fallback limpo se não configurado)
-                let model_provider = resolve_model_provider_from_env()
-                    .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
                 let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
 
                 let playback_controller = if play {
@@ -1448,7 +1573,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 let mut whisper_cfg =
                     yuki::voice::stt::LocalWhisperConfig::default().with_language(effective_lang);
                 if fast_stt {
-                    whisper_cfg = whisper_cfg.with_fast_decoding();
+                    whisper_cfg = whisper_cfg.with_live_optimizations();
                 }
                 if let Some(t) = threads {
                     if let Err(e) = whisper_cfg.set_threads(t) {
@@ -1473,20 +1598,17 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
                 let local_stt =
                     Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
-                let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
-                    if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
-                        Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
-                    } else {
-                        Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
-                    };
 
-                let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
-                    local_stt,
-                    None,
-                    local_tts,
-                    None,
-                    yuki::contracts::voice::VoiceConfiguration::default(),
-                ));
+                let router = Arc::new(
+                    yuki::voice::router::GovernedVoiceRouter::new(
+                        local_stt,
+                        None,
+                        local_tts,
+                        None,
+                        yuki::contracts::voice::VoiceConfiguration::default(),
+                    )
+                    .with_require_intelligible_tts(!diagnostic_acoustic),
+                );
 
                 let coordinator = VoiceConversationCoordinator::new(
                     core,
@@ -1501,24 +1623,32 @@ async fn handle_voice_command(cmd: VoiceCommands) {
 
                 println!("Processando turno de conversação governado...");
                 match coordinator
-                    .process_button_turn("cli-turn", audio_input, false, false)
+                    .process_turn_instrumented("cli-turn", audio_input, Vec::new(), false, false)
                     .await
                 {
-                    Ok((yuki_res, audio_out)) => {
-                        println!("\nResposta da Yuki:");
-                        println!("\"{}\"", yuki_res.content);
+                    Ok((transcribed, yuki_res, audio_out, timings)) => {
+                        println!("\nUsuário: \"{}\"", transcribed);
+                        println!("Yuki:    \"{}\"", yuki_res.content);
                         println!(
-                            "Áudio de resposta gerado: {:.2}s ({} bytes).",
+                            "Métricas: STT: {}ms | Core: {}ms | TTS: {}ms | Até som: {}ms | Áudio: {:.2}s ({} bytes)",
+                            timings.stt_duration_ms,
+                            timings.core_duration_ms,
+                            timings.tts_duration_ms,
+                            timings.total_to_playback_ms,
                             audio_out.duration_ms as f64 / 1000.0,
                             audio_out.payload.len()
                         );
                         if play {
-                            let duration =
-                                std::time::Duration::from_millis(audio_out.duration_ms.max(100));
+                            let duration = std::time::Duration::from_millis(
+                                audio_out.duration_ms.max(100) + 150,
+                            );
                             tokio::time::sleep(duration).await;
                         }
                     }
-                    Err(e) => eprintln!("Erro ao processar turno de voz: {}", e),
+                    Err(e) => {
+                        eprintln!("Erro ao processar turno de voz: {}", e);
+                        std::process::exit(1);
+                    }
                 }
             }
             #[cfg(not(windows))]
@@ -1535,6 +1665,8 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 let _ = no_fallback;
                 let _ = fast_stt;
                 let _ = diagnostics;
+                let _ = mock;
+                let _ = diagnostic_acoustic;
                 eprintln!(
                     "Erro: Turno conversacional de voz físico não suportado nesta plataforma."
                 );
@@ -1551,78 +1683,160 @@ async fn handle_voice_command(cmd: VoiceCommands) {
             fast,
             allow_cloud_stt,
             allow_cloud_tts,
+            mock,
+            diagnostic_acoustic,
         } => {
             #[cfg(windows)]
             {
                 use yuki::voice::conversation::VoiceConversationCoordinator;
                 use yuki::voice::playback::AudioPlaybackController;
 
-                let target_input_id = if let Some(ref dev_query) = input_device {
-                    match find_device(dev_query, AudioDeviceFlow::Input) {
-                        Ok(dev) => {
-                            println!("Microfone selecionado: {} (ID: {})", dev.name, dev.id);
-                            Some(dev.id)
-                        }
+                // 1. Provedor de modelo cognitivo com bloqueio Fail-Closed contra Mock silencioso
+                let model_provider =
+                    match yuki::models::resolve_conversational_model_provider_from_env(mock) {
+                        Ok(p) => p,
                         Err(e) => {
-                            eprintln!("Falha ao resolver microfone '{}': {}", dev_query, e);
-                            return;
+                            eprintln!(
+                            "\n[Yuki] Bloqueio de segurança (Fail-Closed) no Provedor Cognitivo:\n{}",
+                            e
+                        );
+                            std::process::exit(1);
                         }
-                    }
-                } else {
-                    None
-                };
-
-                let target_output_id = if play {
-                    if let Some(ref dev_query) = output_device {
-                        match find_device(dev_query, AudioDeviceFlow::Output) {
-                            Ok(dev) => {
-                                println!(
-                                    "Dispositivo de saída selecionado: {} (ID: {})",
-                                    dev.name, dev.id
-                                );
-                                Some(dev.id)
-                            }
-                            Err(e) => {
-                                eprintln!("Falha ao resolver saída '{}': {}", dev_query, e);
-                                return;
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Provedor de modelo para o YukiCore
-                let model_provider = resolve_model_provider_from_env()
-                    .unwrap_or_else(|_| Arc::new(yuki::models::MockModelProvider::new()));
+                    };
+                let model_banner =
+                    yuki::models::format_active_model_provider_banner(model_provider.as_ref());
                 let core = Arc::new(YukiCore::new().with_model_provider(model_provider));
 
-                // Configuração do Whisper STT soberano local
+                // 2. Configuração do Whisper STT soberano local
                 let mut whisper_cfg =
                     yuki::voice::stt::LocalWhisperConfig::default().with_language("pt");
                 if fast {
-                    whisper_cfg = whisper_cfg.with_fast_decoding();
+                    whisper_cfg = whisper_cfg.with_live_optimizations();
                 }
+                let whisper_model_label = whisper_cfg
+                    .model_path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("não detectado")
+                    .to_string();
                 let local_stt =
                     Arc::new(yuki::voice::stt::LocalWhisperSttProvider::new(whisper_cfg));
+                if !local_stt.is_environment_ready() && !allow_cloud_stt {
+                    eprintln!(
+                        "\n[Yuki] Bloqueio de segurança (Fail-Closed) no STT Local:\nWhisper local não está pronto. {}",
+                        yuki::voice::stt::LocalWhisperSttProvider::installation_instructions()
+                    );
+                    std::process::exit(1);
+                }
 
-                // Configuração do Piper TTS soberano local
-                let local_tts: Arc<dyn yuki::contracts::voice::TextToSpeechProvider> =
-                    if yuki::voice::tts::LocalPiperTtsProvider::default().is_environment_ready() {
-                        Arc::new(yuki::voice::tts::LocalPiperTtsProvider::default())
+                // 3. Configuração do TTS local com separação estrita NeuralSpeech vs DiagnosticAcoustic
+                let (local_tts, tts_voice_label): (
+                    Arc<dyn yuki::contracts::voice::TextToSpeechProvider>,
+                    String,
+                ) = if diagnostic_acoustic {
+                    let acoustic = yuki::voice::tts::LocalAcousticTtsProvider::default();
+                    (
+                        Arc::new(acoustic),
+                        "yuki-acoustic-ptbr (DIAGNÓSTICO 220Hz)".to_string(),
+                    )
+                } else {
+                    let piper = yuki::voice::tts::LocalPiperTtsProvider::default();
+                    if !piper.is_environment_ready() && !allow_cloud_tts {
+                        eprintln!(
+                            "\n[Yuki] Bloqueio de segurança (Fail-Closed) na Síntese Vocal (TTS):\nPiper Neural PT-BR não encontrado.\n{}",
+                            yuki::voice::tts::LocalPiperTtsProvider::download_instructions()
+                        );
+                        std::process::exit(1);
+                    }
+                    let voice_id = piper.active_voice_id();
+                    if piper.is_environment_ready() {
+                        if let Err(e) = piper.warmup().await {
+                            eprintln!(
+                                "[Yuki] Aviso: falha ao pré-aquecer daemon Piper (operará em modo subprocesso sob demanda): {}",
+                                e
+                            );
+                        }
+                    }
+                    (Arc::new(piper), voice_id)
+                };
+                let tts_meta = local_tts.metadata().clone();
+
+                // 4. Resolução explícita dos endpoints WASAPI de entrada e saída
+                let (target_input_id, input_banner) = if let Some(ref dev_query) = input_device {
+                    match find_device(dev_query, AudioDeviceFlow::Input) {
+                        Ok(dev) => {
+                            let label = format!("{} (ID: {})", dev.name, dev.id);
+                            (Some(dev.id), label)
+                        }
+                        Err(e) => {
+                            eprintln!("Falha ao resolver microfone '{}': {}", dev_query, e);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    match get_default_device(AudioDeviceFlow::Input) {
+                        Ok(Some(def)) => (None, format!("{} [PADRÃO] (ID: {})", def.name, def.id)),
+                        Ok(None) => {
+                            eprintln!("Erro: Nenhum microfone ativo detectado no Windows WASAPI.");
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Erro ao consultar microfone padrão WASAPI: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                let (target_output_id, output_banner) = if play {
+                    if let Some(ref dev_query) = output_device {
+                        match find_device(dev_query, AudioDeviceFlow::Output) {
+                            Ok(dev) => {
+                                let label = format!("{} (ID: {})", dev.name, dev.id);
+                                (Some(dev.id), label)
+                            }
+                            Err(e) => {
+                                eprintln!("Falha ao resolver saída '{}': {}", dev_query, e);
+                                std::process::exit(1);
+                            }
+                        }
                     } else {
-                        Arc::new(yuki::voice::tts::LocalAcousticTtsProvider::default())
-                    };
+                        match get_default_device(AudioDeviceFlow::Output) {
+                            Ok(Some(def)) => {
+                                (None, format!("{} [PADRÃO] (ID: {})", def.name, def.id))
+                            }
+                            Ok(None) => (None, "Nenhum dispositivo ativo detectado".to_string()),
+                            Err(e) => (None, format!("Erro ao consultar saída padrão: {}", e)),
+                        }
+                    }
+                } else {
+                    (None, "Desabilitado (--play false)".to_string())
+                };
 
-                let router = Arc::new(yuki::voice::router::GovernedVoiceRouter::new(
-                    local_stt,
-                    None,
-                    local_tts,
-                    None,
-                    yuki::contracts::voice::VoiceConfiguration::default(),
-                ));
+                // 5. Motor openWakeWord treinado para "Yuki" (PT-BR)
+                let oww_config = yuki::voice::wakeword::OpenWakeWordConfig {
+                    activation_threshold: threshold,
+                    ..Default::default()
+                };
+                let oww_engine = match yuki::voice::wakeword::OpenWakeWordEngine::new(oww_config) {
+                    Ok(e) => Arc::new(tokio::sync::Mutex::new(e)),
+                    Err(e) => {
+                        eprintln!("Erro ao inicializar motor openWakeWord: {}", e);
+                        eprintln!("Certifique-se de que os modelos estão em models/wakeword/ e a DLL em bin/onnxruntime/");
+                        std::process::exit(1);
+                    }
+                };
+
+                let router = Arc::new(
+                    yuki::voice::router::GovernedVoiceRouter::new(
+                        local_stt,
+                        None,
+                        local_tts,
+                        None,
+                        yuki::contracts::voice::VoiceConfiguration::default(),
+                    )
+                    .with_require_intelligible_tts(!diagnostic_acoustic),
+                );
 
                 let playback_controller = if play {
                     Arc::new(AudioPlaybackController::production_with_device(
@@ -1634,19 +1848,37 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     ))
                 };
 
-                // Motor openWakeWord treinado para "Yuki" (PT-BR)
-                let oww_config = yuki::voice::wakeword::OpenWakeWordConfig {
-                    activation_threshold: threshold,
-                    ..Default::default()
-                };
-                let oww_engine = match yuki::voice::wakeword::OpenWakeWordEngine::new(oww_config) {
-                    Ok(e) => Arc::new(tokio::sync::Mutex::new(e)),
-                    Err(e) => {
-                        eprintln!("Erro ao inicializar motor openWakeWord: {}", e);
-                        eprintln!("Certifique-se de que os modelos estão em models/wakeword/ e a DLL em bin/onnxruntime/");
-                        return;
+                println!("========================================================");
+                println!("        DIAGNÓSTICO DE SESSÃO VOCAL AO VIVO (YUKI)");
+                println!("========================================================");
+                println!("  Modelo Cognitivo : {}", model_banner);
+                println!(
+                    "  STT Local        : Whisper-Local (modelo: {}, modo: {})",
+                    whisper_model_label,
+                    if fast {
+                        "live-otimizado [audio-ctx dinâmico + trim + greedy]"
+                    } else {
+                        "padrão [beam=5]"
                     }
-                };
+                );
+                println!(
+                    "  TTS Local        : {} [{}] (voz: {}, {}Hz mono 16-bit)",
+                    tts_meta.provider_name,
+                    tts_meta.synthesis_kind,
+                    tts_voice_label,
+                    tts_meta.sample_rate
+                );
+                println!(
+                    "  Wake Word        : OpenWakeWordEngine (PT-BR yuki_v0.1, threshold: {:.2})",
+                    threshold
+                );
+                println!("  Entrada WASAPI   : {}", input_banner);
+                println!(
+                    "  Saída WASAPI     : {} (sink: {})",
+                    output_banner,
+                    playback_controller.sink().name()
+                );
+                println!("========================================================");
 
                 let coordinator = Arc::new(VoiceConversationCoordinator::new(
                     core,
@@ -1692,6 +1924,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
 
                 if let Err(e) = listener.run_with_live_mic(shutdown_flag).await {
                     eprintln!("Erro na execução do listener ao vivo: {}", e);
+                    std::process::exit(1);
                 }
             }
             #[cfg(not(windows))]
@@ -1706,6 +1939,8 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 let _ = fast;
                 let _ = allow_cloud_stt;
                 let _ = allow_cloud_tts;
+                let _ = mock;
+                let _ = diagnostic_acoustic;
                 eprintln!(
                     "Erro: Conversação de voz contínua ao vivo não suportada nesta plataforma."
                 );

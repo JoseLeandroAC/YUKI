@@ -160,6 +160,14 @@ impl VoiceConversationCoordinator {
         &self.playback
     }
 
+    pub fn router(&self) -> &Arc<GovernedVoiceRouter> {
+        &self.router
+    }
+
+    pub fn core(&self) -> &Arc<YukiCore> {
+        &self.core
+    }
+
     pub fn session_manager(&self) -> &VoiceSessionManager {
         &self.session_manager
     }
@@ -459,7 +467,12 @@ impl VoiceConversationCoordinator {
             .core
             .process_input_async(user_input)
             .await
-            .map_err(|e| VoiceError::TranscriptionFailed(format!("Erro no Core: {}", e)))?;
+            .map_err(|e| {
+                VoiceError::ProviderUnavailable(format!(
+                    "Falha no provedor cognitivo (YukiCore): {}",
+                    e
+                ))
+            })?;
         let core_duration_ms = t_core_start.elapsed().as_millis() as u64;
 
         if !self.session_manager.update_session(session)

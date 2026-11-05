@@ -25,11 +25,13 @@ pub use resample::*;
 pub use router::*;
 pub use session::*;
 pub use stt::{
-    is_silent_pcm, list_local_whisper_models, sanitize_whisper_transcript, CloudSttProvider,
-    LocalWhisperConfig, LocalWhisperSttProvider, MockSttProvider,
+    compute_dynamic_audio_ctx, is_silent_pcm, list_local_whisper_models,
+    sanitize_whisper_transcript, trim_silence_edges, CloudSttProvider, LocalWhisperConfig,
+    LocalWhisperSttProvider, MockSttProvider,
 };
 pub use tts::{
-    get_piper_voice_catalog, CloudTtsProvider, LocalAcousticTtsProvider, LocalPiperConfig,
+    get_piper_voice_catalog, resolve_conversational_local_tts, resolve_default_local_tts,
+    to_ascii_safe_cli_path, CloudTtsProvider, LocalAcousticTtsProvider, LocalPiperConfig,
     LocalPiperTtsProvider, MockTtsProvider, PiperVoiceModelInfo, VocalTone, VoiceIdentity,
 };
 pub use wakeword::*;

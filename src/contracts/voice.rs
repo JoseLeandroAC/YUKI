@@ -305,6 +305,25 @@ pub enum VoiceProviderType {
     Mock,
 }
 
+/// Natureza acústica da síntese de voz, separando fala inteligível real de sinais diagnósticos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TtsSynthesisKind {
+    /// Síntese fonêmica inteligível (neural local, voz nativa do sistema ou nuvem governada).
+    #[default]
+    NeuralSpeech,
+    /// Gerador harmônico artificial para diagnóstico acústico de hardware (NÃO é fala inteligível).
+    DiagnosticAcoustic,
+}
+
+impl fmt::Display for TtsSynthesisKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NeuralSpeech => write!(f, "NeuralSpeech"),
+            Self::DiagnosticAcoustic => write!(f, "DiagnosticAcoustic"),
+        }
+    }
+}
+
 /// Metadados descritivos de um provedor de STT ou TTS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceProviderMetadata {
@@ -314,6 +333,8 @@ pub struct VoiceProviderMetadata {
     pub sample_rate: u32,
     pub supports_streaming: bool,
     pub version: String,
+    #[serde(default)]
+    pub synthesis_kind: TtsSynthesisKind,
 }
 
 impl VoiceProviderMetadata {
@@ -332,7 +353,21 @@ impl VoiceProviderMetadata {
             sample_rate,
             supports_streaming,
             version: version.into(),
+            synthesis_kind: TtsSynthesisKind::NeuralSpeech,
         }
+    }
+
+    pub fn with_synthesis_kind(mut self, kind: TtsSynthesisKind) -> Self {
+        self.synthesis_kind = kind;
+        self
+    }
+
+    pub fn is_diagnostic_acoustic(&self) -> bool {
+        self.synthesis_kind == TtsSynthesisKind::DiagnosticAcoustic
+    }
+
+    pub fn is_intelligible_speech(&self) -> bool {
+        self.synthesis_kind == TtsSynthesisKind::NeuralSpeech
     }
 
     pub fn is_offline(&self) -> bool {
@@ -502,6 +537,36 @@ pub enum VoiceError {
     Io(String),
 }
 
+impl VoiceError {
+    /// Anexa contexto explicativo sobre a política de fallback sem mascarar a variante primária do erro local.
+    pub fn with_fallback_context(self, fallback_note: &str) -> Self {
+        match self {
+            Self::InvalidAudioFormat(m) => {
+                Self::InvalidAudioFormat(format!("{} [{}]", m, fallback_note))
+            }
+            Self::ProviderUnavailable(m) => {
+                Self::ProviderUnavailable(format!("{} [{}]", m, fallback_note))
+            }
+            Self::TranscriptionFailed(m) => {
+                Self::TranscriptionFailed(format!("{} [{}]", m, fallback_note))
+            }
+            Self::SynthesisFailed(m) => Self::SynthesisFailed(format!("{} [{}]", m, fallback_note)),
+            Self::CaptureFailed(m) => Self::CaptureFailed(format!("{} [{}]", m, fallback_note)),
+            Self::PlaybackFailed(m) => Self::PlaybackFailed(format!("{} [{}]", m, fallback_note)),
+            Self::DeviceUnavailable(m) => {
+                Self::DeviceUnavailable(format!("{} [{}]", m, fallback_note))
+            }
+            Self::SessionConflict(m) => Self::SessionConflict(format!("{} [{}]", m, fallback_note)),
+            Self::UnauthorizedCloudFallback(m) => {
+                Self::UnauthorizedCloudFallback(format!("{} [{}]", m, fallback_note))
+            }
+            Self::Timeout(m) => Self::Timeout(format!("{} [{}]", m, fallback_note)),
+            Self::Io(m) => Self::Io(format!("{} [{}]", m, fallback_note)),
+            other => other,
+        }
+    }
+}
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -513,6 +578,9 @@ pub trait SpeechToTextProvider: Send + Sync {
         &'a self,
         audio: &'a AudioInput,
     ) -> Pin<Box<dyn Future<Output = Result<String, VoiceError>> + Send + 'a>>;
+    fn last_timings(&self) -> Option<SttTimingMetrics> {
+        None
+    }
 }
 
 /// Contrato para provedores de Síntese de Fala (TTS).

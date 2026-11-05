@@ -638,9 +638,44 @@ impl OpenWakeWordEngine {
         }
     }
 
+    /// Retorna o contador atual de blocos processados desde a última inicialização ou `reset()`.
+    pub fn chunk_count(&self) -> usize {
+        self.inner.lock().map(|g| g.chunk_count).unwrap_or(0)
+    }
+
     /// Retorna a configuração ativa do motor openWakeWord.
     pub fn config(&self) -> &OpenWakeWordConfig {
         &self.config
+    }
+}
+
+/// Contrato de streaming em blocos de 80 ms (1280 amostras @ 16 kHz mono) para escuta contínua ao vivo.
+///
+/// Permite acoplar `OpenWakeWordEngine` em produção e motores determinísticos com memória de
+/// embeddings em testes automatizados de regressão (mesmo em ambientes CI sem `onnxruntime.dll`).
+pub trait LiveWakeWordSpotter: Send + Sync {
+    /// Processa um bloco de 1280 amostras (80 ms @ 16 kHz mono) e retorna score `[0.0 .. 1.0]`.
+    fn process_chunk(&self, chunk: &[i16]) -> Result<f32, VoiceError>;
+
+    /// Limpa completamente os buffers de melspectrograma, embeddings e áudio bruto,
+    /// exigindo novo preenchimento da janela de warmup antes de habilitar novo disparo.
+    fn reset(&self);
+
+    /// Nome identificador do motor de Wake Word em streaming.
+    fn name(&self) -> &str;
+}
+
+impl LiveWakeWordSpotter for OpenWakeWordEngine {
+    fn process_chunk(&self, chunk: &[i16]) -> Result<f32, VoiceError> {
+        OpenWakeWordEngine::process_chunk(self, chunk)
+    }
+
+    fn reset(&self) {
+        OpenWakeWordEngine::reset(self);
+    }
+
+    fn name(&self) -> &str {
+        "OpenWakeWordEngine (PT-BR yuki_v0.1)"
     }
 }
 
