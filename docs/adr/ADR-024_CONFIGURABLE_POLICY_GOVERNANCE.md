@@ -67,11 +67,26 @@ A execução de capacidades pela Yuki é governada por três faixas de impacto:
 | **Médio Impacto (Contextual)** | Requisições HTTP externas de pesquisa, indexação de novos diretórios locais, atualização de perfil do operador. | **Confirmação Contextual**, verbal ou interativa no diálogo. |
 | **Crítico (Alto Risco)** | Escrita ou exclusão física destrutiva de arquivos, mutação de chaves no Vault, comandos com impacto físico ou financeiro. | **Autorização Explícita** com verificação de identidade e registro auditável imutável. |
 
+### 3.1 Integração com a Hierarquia de Autoridade do Trust Core (N0 a N4)
+
+A autorização contextual é intrinsicamente acoplada à identidade validada pelo **Yuki Trust Core** (especificado em `10_SECURITY.md`, Seções 89–91):
+
+- **Nível 0 (Proprietário / Owner — José Leandro):** Raiz de confiança incondicional, com prerrogativa exclusiva para autorizar ações de Faixa Crítica, gerenciar o Credential Vault e redefinir políticas de governança.
+- **Nível 1 (Futura Esposa / Confiança Máxima):** Autorizada para ações de Baixo e Médio Impacto no escopo cotidiano compartilhado, via delegação explícita, individual e unilateralmente revogável pelo N0.
+- **Nível 2 (Futuros Filhos):** Ações restritas por salvaguardas rigorosas de proteção infantil (*Child Safety by Design*), sem permissão para comandos de sistema, redes externas não autorizadas ou controle de dispositivos de risco.
+- **Nível 3 (Familiares Próximos):** Ações estritamente informativas e de convivência utilitária em ambientes comuns, sem acesso administrativo ou a memórias privadas de outros níveis.
+- **Nível 4 (Visitantes e Convidados):** Modo Convidado transitório em sessão isolada, com acesso efêmero e zero retenção de dados pessoais.
+
+### 3.2 Invariantes Complementares de Autorização
+1. **Não-Privilégio por Parentesco:** O vínculo familiar ou relacional não confere privilégio ou conta automática. Todo privilégio é individual, explícito e auditável.
+2. **Proibição de Autorização Crítica Exclusivamente por Voz:** Ações de Faixa Crítica (Alto Risco) jamais serão autorizadas unicamente por comando de voz, exigindo segundo fator independente (hardware confiável, chave criptográfica FIDO2 ou confirmação interativa com prova de vivacidade).
+
 ---
 
 ## 4. Invariantes de Governança Preservados
 
 ```text
+«Capacity != Privilege»
 «Capability != Permission != Authorization != Execution»
 «Model Output != Command != Authorization»
 «Data != Instruction»

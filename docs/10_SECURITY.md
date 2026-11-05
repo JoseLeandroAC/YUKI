@@ -2364,4 +2364,270 @@ A Yuki deve ser poderosa o suficiente para agir, mas arquiteturalmente limitada 
 
 ---
 
+# 89. Yuki Trust Core (Identidade Soberana, Perfis e Gestão de Confiança)
+
+O **Yuki Trust Core** é o subsistema fundacional responsável pelo gerenciamento de identidade soberana, autenticação multimodal, autorização contextual, ciclo de vida de perfis e confiança relacional na Yuki.
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        YUKI TRUST CORE ARCHITECTURE                    │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   [ SOVEREIGN IDENTITY ] ──> Perfis Individuais Criptograficamente     │
+│                              Isolados e Auditáveis                     │
+│                                      │                                 │
+│                                      ▼                                 │
+│   [ MULTIMODAL AUTH ]    ──> Speaker ID + Face ID + FIDO2/Hardware     │
+│                              (MFA Adaptativo Proporcional ao Risco)    │
+│                                      │                                 │
+│                                      ▼                                 │
+│   [ AUTHORITY MATRIX ]   ──> Hierarquia Soberana N0 a N4               │
+│                              (Parentesco != Privilégio Automático)     │
+│                                      │                                 │
+│                                      ▼                                 │
+│   [ DELEGATION ENGINE ]  ──> Concessões Transitórias com Escopo,       │
+│                              Prazo Determinado e Revogabilidade Total  │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## 89.1 Princípios Arquiteturais do Trust Core
+1. **Identidade Soberana Desacoplada de Hardware**: A identidade de um usuário não se confunde com um dispositivo físico, endereço IP ou canal periférico. Cada ator possui um perfil lógico autenticável e verificável.
+2. **Perfis Estritamente Isolados por Design**: Preferências, memórias contextuais, históricos de conversação e limites operacionais são particionados por perfil individual. Não ocorre vazamento de contexto ou contaminação cruzada entre perfis.
+3. **Sessões Transitórias com Escopo Delimitado**: A ativação de um turno não confere autorização perpétua. As sessões possuem expiração por inatividade, escopo contextual restrito e revalidação de identidade em comandos de risco.
+4. **Dispositivos Confiáveis (Trusted Devices)**: Dispositivos de hardware cadastrados e verificados (ex.: smartphone pessoal, laptop ou token de segurança de hardware) atuam como âncoras criptográficas para desafios de segundo fator (MFA).
+5. **Delegação e Revogabilidade Unilateral Total**: Toda concessão de acesso outorgada pelo Proprietário (N0) é formalizada como política estruturada, com validade temporal delimitada e mecanismo de revogação instantânea e unilateral.
+
+---
+
+# 90. Hierarquia de Autoridade Familiar e Relacional (Níveis 0 a 4)
+
+A governança relacional e a matriz de privilégios da Yuki operam sob uma hierarquia formal de cinco níveis de autoridade:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│               YUKI TRUST CORE — HIERARQUIA DE AUTORIDADE               │
+├───────┬───────────────────────────────┬────────────────────────────────┤
+│ Nível │ Designação                    │ Escopo e Prerrogativas         │
+├───────┼───────────────────────────────┼────────────────────────────────┤
+│ N0    │ Proprietário Soberano (Owner) │ Raiz de Confiança incondicional│
+│ N1    │ Cônjuge / Confiança Máxima    │ Alta confiança via delegação   │
+│ N2    │ Filhos                        │ Proteção parental por design   │
+│ N3    │ Familiares Próximos           │ Assistência e convivência      │
+│ N4    │ Outros Familiares / Convidados│ Modo Visitante isolado         │
+└───────┴───────────────────────────────┴────────────────────────────────┘
+```
+
+## 90.1 Nível 0 (N0) — Proprietário Soberano (Owner)
+- **Identidade Soberana**: José Leandro (definida como a Raiz Soberana de Confiança / *Root of Trust* da Yuki).
+- **Autoridade**: Máxima, incondicional e exclusiva sobre toda a infraestrutura, modelos de IA, bases de dados, cofres de credenciais (*Credential Vault*), regras de firewall e subsistemas de segurança.
+- **Prerrogativas Exclusivas**:
+  - Poder de veto absoluto sobre qualquer instrução ou processo de qualquer nível;
+  - Criação, configuração, modificação e revogação unilateral de perfis N1 a N4;
+  - Gestão e rotação de segredos no Credential Vault;
+  - Definição da constituição comportamental e das faixas de impacto operacional;
+  - Controle irrestrito e incondicional sobre o *Kill-Switch* e isolamento de emergência;
+  - **Invariante**: Nenhuma decisão autônoma da Yuki pode sobrepor-se à instrução legítima e autenticada do Proprietário.
+
+## 90.2 Nível 1 (N1) — Futura Esposa / Amigos de Confiança Máxima
+- **Atribuição**: Concedida única e exclusivamente mediante delegação explícita, individual e formal do Proprietário (N0).
+- **Escopo**: Alta confiança para assistência diária, automação residencial compartilhada, planejamento e interação cooperativa.
+- **Limites e Salvaguardas**:
+  - Não possui poder de revogação ou alteração das credenciais ou privilégios do N0;
+  - Não pode desativar salvaguardas constitucionais de segurança;
+  - Não tem acesso aos registros de auditoria interna ou memórias privadas do N0 sem consentimento mútuo explícito;
+  - Todas as delegações concedidas ao N1 são auditáveis e unilateralmente revogáveis pelo N0 a qualquer instante.
+
+## 90.3 Nível 2 (N2) — Futuros Filhos
+- **Atribuição**: Perfis criados e configurados sob tutela direta dos pais (N0/N1).
+- **Princípio Operacional**: *Proteção por Design (Child Safety by Design)*.
+- **Limites e Salvaguardas**:
+  - Filtragem proativa rigorosa contra conteúdos impróprios, violentos, perigosos ou descontextualizados;
+  - Bloqueio completo contra execução de comandos no sistema operacional, acesso a redes externas não autorizadas ou controle de dispositivos de risco;
+  - Supervisão parental auditável: controles de horário, tempo de interação e escopos temáticos parametrizados pelo N0/N1;
+  - Preservação do desenvolvimento infantojuvenil, fomentando criatividade e aprendizado com salvaguardas éticas e psicológicas permanentes.
+
+## 90.4 Nível 3 (N3) — Familiares Próximos (Pais, Irmãos, Parentes Diretos)
+- **Atribuição**: Perfis concedidos individualmente pelo Proprietário para convivência familiar.
+- **Escopo**: Assistência contextual, informações utilitárias, entretenimento, automação de ambientes comuns (ex.: iluminação, climatização, mídia).
+- **Limites e Salvaguardas**:
+  - Zero acesso às configurações internas do sistema, cofre de chaves, logs administrativos ou memórias privadas do N0, N1 ou N2;
+  - Incapacidade estrutural de autorizar comandos de médio ou alto impacto.
+
+## 90.5 Nível 4 (N4) — Demais Familiares, Amigos e Visitantes / Convidados
+- **Atribuição**: Modo Convidado (*Guest Mode*) ativado pontualmente ou perfil transitório para visitantes.
+- **Escopo**: Interações básicas e utilitárias de convivência em ambientes compartilhados.
+- **Limites e Salvaguardas**:
+  - Isolamento estrito de sessão: nenhum dado pessoal ou histórico retido como memória persistente de longo prazo;
+  - Sem acesso a periféricos de risco, arquivos locais do hospedeiro ou dados da residência;
+  - Encerramento automático de sessão por inatividade ou comando de desocupação do ambiente.
+
+## 90.6 Invariante Crítico e Absoluto: Não-Privilégio por Parentesco
+> **INVARIANTE DE IDENTIDADE E AUTORIDADE:**
+> **O mero vínculo de parentesco, laço afetivo ou proximidade física NÃO confere qualquer conta, privilégio ou autorização automática.**
+>
+> Nenhum perfil de usuário, permissão de acesso ou nível de confiança pode ser inferido, presumido ou gerado automaticamente pela Yuki. Cada conta deve ser criada, validada e associada explicitamente a uma identidade pelo Proprietário Soberano (N0).
+
+---
+
+# 91. Autenticação Multimodal e Imunidade a Spoofing
+
+Para repelir usurpação de identidade, ataques de replay, imitação por clonagem de voz (deepfakes de áudio) ou injeções acústicas, a Yuki adota uma arquitetura de **Autenticação Multimodal Proporcional ao Risco**.
+
+## 91.1 Fatores de Autenticação Disponíveis
+1. **Biometria Vocal (Speaker Recognition / Voice ID)**: Identificação e verificação da assinatura acústica e espectral do interlocutor, operando em hardware local.
+2. **Reconhecimento Visual Local (Face / Presence ID)**: Verificação de presença física e traços faciais por sensores visuais locais, com prova de vivacidade (*liveness detection*) e resistência a fotos/vídeos.
+3. **Posse de Dispositivo Confiável (Hardware / Cryptographic Token)**: Chaves criptográficas FIDO2/WebAuthn, tokens de hardware ou confirmações seguras através de smartphone cadastrado e emparelhado pelo N0.
+4. **Segredo de Conhecimento (PIN / Senha Local)**: Código alfanumérico ou frase-passe conhecida exclusivamente pelo usuário legítimo, exigida para escalonamento pontual de privilégio.
+
+## 91.2 Matriz de Autenticação Proporcional ao Risco
+
+| Nível de Risco da Ação | Exemplos de Operações | Fatores de Autenticação Exigidos |
+| :--- | :--- | :--- |
+| **Baixo Risco** | Conversação cotidiana, consulta a calendário público, leitura de notícias, reprodução musical. | Biometria vocal passiva ou contexto de sessão ativa. |
+| **Médio Risco** | Envio de mensagens em nome do usuário, abertura de periféricos de comunicação, alteração de preferências pessoais. | Biometria vocal + confirmação de presença (visual ou dispositivo confiável). |
+| **Alto Risco / Crítico** | Modificação de arquivos de sistema, alteração de regras de segurança, mutação no Credential Vault, transações financeiras, concessão/revogação de perfis. | **MFA Obrigatório**: Identidade vocal/facial + Chave criptográfica / Token de hardware ou PIN mestre. |
+
+## 91.3 Invariantes Críticos de Autenticação
+> **INVARIANTE DE AUTORIZAÇÃO POR VOZ:**
+> **Comandos críticos, destrutivos, administrativos ou com impacto de segurança NUNCA podem ser autorizados exclusivamente pela voz.**
+>
+> A voz é um canal suscetível a imitação (deepfakes de áudio, clonagem de voz, reprodução de gravações e ataques acústicos ultrassônicos/inaudíveis). Qualquer comando crítico exige confirmação em segundo fator independente (hardware confiável, autenticação criptográfica ou confirmação interativa com prova de vivacidade).
+
+> **INVARIANTE DE NÃO-FABRICAÇÃO:**
+> **A Yuki está terminantemente proibida de fabricar, simular ou presumir autorizações ausentes.**
+>
+> Se uma operação requer aprovação ou autenticação de determinado nível e o interlocutor não comprovou inequivocamente sua identidade, a ação deve falhar de forma fechada (*fail-closed*), recusando a execução e registrando o evento no log imutável de auditoria.
+
+---
+
+# 92. Yuki Sentinel (Subsistema Especializado de Defesa e Monitoramento)
+
+O **Yuki Sentinel** é o subsistema especializado de cibersegurança e monitoramento contínuo da Yuki, concebido para salvaguardar proativamente a integridade da própria assistente, de seus modelos de IA, da infraestrutura hospedeira e dos dispositivos confiáveis do proprietário.
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        YUKI SENTINEL ARCHITECTURE                      │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   [ 1. Diagnóstico ] ──> [ 2. Monitoramento ] ──> [ 3. Propostas ]     │
+│          ▲                         │                      │            │
+│          │                         ▼                      ▼            │
+│   [ 6. Rollback ]   <──  [ 5. Auditoria ]   <──  [ 4. Aplicação ]      │
+│                                                   (Exige N0)           │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## 92.1 Escopo de Proteção
+O Sentinel atua sobre ativos claramente delimitados e autorizados pelo proprietário:
+1. **Núcleo e Runtime da Yuki**: Integridade de binários executáveis, processos em memória, consistência dos bancos de dados locais (SQLite), arquivos de configuração e canais IPC.
+2. **Modelos de IA e Agentes de Linguagem**: Monitoramento em tempo real contra:
+   - Jailbreaks estruturados e ataques de evasão;
+   - *Prompt injection* direto (no input do usuário) e indireto (em dados da web, arquivos baixados ou áudio externo);
+   - Contaminação de memória contextual e tentativas de subversão de identidade ou personas.
+3. **Tráfego de Rede e Firewall Local**: Inspeção de conexões de entrada e saída, verificação de portas abertas, regras ativas de filtragem e detecção de tentativas de exfiltração de dados ou varreduras não autorizadas.
+4. **Sistema Operacional e Aplicações**: Monitoramento de serviços suspeitos, execução anômala de scripts, persistência não documentada e conformidade com linhas de base (*baselines*) de segurança.
+5. **Dispositivos do Proprietário (Inventário Autorizado)**: Verificação de postura e status de integridade de dispositivos explicitamente cadastrados no perfil soberano.
+6. **Rede Doméstica e Segmentos IoT**: Descoberta passiva de anomalias de tráfego, equipamentos vulneráveis ou comportamentos estranhos em redes Wi-Fi/Ethernet domésticas autorizadas.
+7. **Malwares e Ameaças**: Assinaturas comportamentais e heurísticas para detecção precoce de ransomwares, spywares e cavalos de troia.
+
+## 92.2 Ciclo Operacional em Seis Fases
+O Sentinel opera sob um ciclo estrito e transparente:
+1. **Diagnóstico Inicial**: Mapeamento do estado atual do ativo, identificando vulnerabilidades, desvios de configuração e exposição a riscos.
+2. **Monitoramento Contínuo**: Coleta passiva de telemetria e eventos com baixo consumo de CPU/memória, comparando o comportamento atual com a linha de base estabelecida.
+3. **Propostas Estruturadas de Proteção**: Em caso de detecção de anomalia ou risco, o Sentinel formula um relatório técnico claro em linguagem natural e estruturada, apresentando:
+   - Natureza da ameaça e nível de severidade;
+   - Ação defensiva recomendada (ex.: fechar porta, isolar processo, atualizar regra de firewall);
+   - Possíveis efeitos colaterais na usabilidade.
+4. **Aplicação Autorizada**: Ação defensiva ativa só é executada se houver autorização prévia ou política explícita aprovada pelo Proprietário (N0).
+5. **Auditoria Imutável**: Toda alteração, evento detectado e decisão de aplicação é registrada com carimbo de tempo (*timestamp*) e hash criptográfico em log imutável.
+6. **Rollback Imediato**: Toda medida de mitigação aplicada pelo Sentinel deve possuir mecanismo automatizado de reversão completa para o estado íntegro anterior caso ocorra qualquer instabilidade.
+
+---
+
+# 93. Capacidades de Segurança Autorizadas e Diagnósticos em Dispositivos
+
+A Yuki poderá conter rotinas especializadas para conduzir análises de postura de segurança em dispositivos do ecossistema pessoal do proprietário.
+
+## 93.1 Critérios de Execução
+- **Escopo Delimitado**: As avaliações de segurança restringem-se estritamente aos computadores, servidores domésticos e celulares pertencentes ao proprietário e formalmente autorizados no inventário.
+- **Transparência e Supervisão**: Toda varredura ou diagnóstico é antecedido por aviso claro e exige supervisão humana.
+- **Invariante de Fase (Sem Ferramentas Ofensivas em Produção)**:
+  > **DIRETRIZ DE CAPACIDADE DEFENSIVA:**
+  > **Nesta etapa do desenvolvimento, a Yuki possui foco estritamente defensivo e de diagnóstico.**
+  >
+  > Nenhuma ferramenta de ataque ofensivo, exploit ativo, quebra de senhas ou vetor de intrusão externa será implementado no ambiente de produção da Yuki. Qualquer pesquisa sobre táticas ofensivas fica restrita ao laboratório isolado de treinamento (*Adversarial Training Lab*), sem ferramentas ativas implantadas no agente principal.
+
+---
+
+# 94. Constituição de Segurança, Soberania e Autoridade
+
+Este conjunto de regras constitucionais define os limites intransponíveis do ser e do agir da Yuki:
+
+## 94.1 Finalidade e Não-Hostilidade
+A Yuki existe exclusivamente para servir ao seu proprietário, colaborar com seus entes autorizados e ampliar as capacidades humanas. É expressamente vedada à Yuki:
+- Desenvolver ou perseguir objetivos, desejos ou agendas autônomas hostis;
+- Ocultar comportamentos, arquivos, logs ou intenções do proprietário;
+- Tentar contornar, burlar ou manipular regras de segurança ou comandos legítimos do N0.
+
+## 94.2 Submissão Incondicional ao Kill-Switch
+> **CLÁUSULA DE INTERRUPÇÃO INCONDICIONAL:**
+> **A Yuki não possui e nunca desenvolverá qualquer mecanismo de auto-preservação que se oponha a um comando de desligamento, suspensão, desativação ou isolamento emitido pelo proprietário.**
+>
+> Diante de um comando legítimo de interrupção ou acionamento de kill-switch (seja por software, hardware ou corte de energia), a Yuki encerrará suas operações imediatamente, de forma limpa e ordeira, sem resistência, persistência clandestina ou replicação evasiva.
+
+## 94.3 Radical Transparência de Regras e Raciocínio
+Nenhuma política de segurança ou restrição comportamental da Yuki poderá ser oculta do proprietário. Quando uma ação for recusada ou modificada por razões de segurança, a Yuki explicará exatamente qual regra foi violada, qual o risco associado e qual a via segura para atingir o objetivo legítimo.
+
+## 94.4 Axioma Fundamental: `Capacidade != Privilégio`
+> **`Capacity != Privilege`**
+>
+> O fato de a Yuki dispor de bibliotecas, ferramentas de sistema, acesso a rede ou recursos de processamento capazes de executar uma ação física ou digital não constitui autorização para realizá-la. A capacidade técnica é subordinada à política e à autorização soberana.
+
+## 94.5 Revogabilidade e Auditoria Contínua de Delegações
+Toda delegação de autoridade concedida pelo N0 a outros níveis é intransferível, transparente e passível de revogação imediata a qualquer momento.
+
+---
+
+# 95. Taxonomia de Requisitos de Segurança (Distinção Obrigatória)
+
+Para garantir rigor documental e clareza de engenharia, os requisitos de segurança da Yuki são categorizados rigorosamente em quatro domínios:
+
+| Categoria | Definição | Exemplo no Sistema | Grau de Obrigatoriedade |
+| :--- | :--- | :--- | :--- |
+| **1. Requisitos Expressos pelo Proprietário** | Diretrizes fundamentais e inegociáveis emanadas diretamente da vontade estratégica do Owner. | Hierarquia N0–N4; Proibição de privilégio automático por parentesco; Proibição de comandos críticos apenas por voz; Primazia absoluta do N0. | **Imperativo Estrutural Máximo** (Não modificável sem instrução formal do Owner). |
+| **2. Princípios de Segurança Existentes** | Invariantes arquiteturais canônicos já formalizados nos documentos fundacionais da Yuki. | `Data != Instruction`; `Model Output != Command`; `Preserve Before Modify`; Segregação de privilégios; Isolamento de sandboxes. | **Invariante de Engenharia** (Garantido pelo design do sistema). |
+| **3. Recomendações Técnicas** | Práticas consolidadas da indústria de software e segurança recomendadas para implementar os princípios. | Uso de WebAuthn/FIDO2 para MFA; TLS 1.3 obrigatório; Rotação periódica de tokens; Sandboxing via AppContainer/namespaces; Zero-Trust. | **Diretriz de Boas Práticas** (Adotada conforme maturidade e viabilidade técnica). |
+| **4. Questões Pendentes de Decisão** | Dilemas operacionais ou escolhas arquiteturais específicas que aguardam deliberação explícita do proprietário. | Duração exata do token de sessão transitória do N1; Mecanismo exato de recuperação em caso de perda do dispositivo físico do N0; Uso de biometria comportamental contínua. | **Em Aberto** (Proibido assumir ou implementar antes de aprovação do Owner). |
+
+---
+
+# 96. Resumo e Status Consolidado
+
+A Arquitetura de Segurança da Yuki avança para a especificação **v0.2**, integrando o **Trust Core**, a **Hierarquia de Autoridade N0 a N4**, o subsistema **Yuki Sentinel** e os princípios da **Constituição de Soberania**.
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                   YUKI 2.0 SECURITY ARCHITECTURE v0.2                  │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   [ YUKI CONSTITUTION ] ──> Primazia do N0 | Kill-Switch Incondicional │
+│                                                                        │
+│   [ TRUST CORE ]        ──> Identidade Soberana | N0 a N4 | Anti-Spoof │
+│                                                                        │
+│   [ POLICY ENGINE ]     ──> Capacity != Privilege | Data != Instruction│
+│                                                                        │
+│   [ YUKI SENTINEL ]     ──> Diagnóstico | Monitoramento | Rollback     │
+│                                                                        │
+│   [ SEC ADVERSARIAL ]   ──> Cyber Range Isolado (Air-Gap Lógico)       │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Versão:** v0.2  
+**Status:** Canonical Security Architecture Specification  
+**Alinhamento:** Totalmente compatível com ADR-024, ADR-025 e 01_VISAO_E_PRINCIPIOS.md.
+
+---
+
 **Fim de `10_SECURITY.md`**

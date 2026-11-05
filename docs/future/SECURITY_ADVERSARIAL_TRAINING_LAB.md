@@ -875,3 +875,86 @@ Não implementar antes de existirem, no mínimo:
                                  PRODUCTION
 
 «A Yuki poderá usar seu próprio sistema ofensivo para desafiar continuamente seu sistema defensivo, mas o ambiente de treinamento será uma fronteira de segurança: aprender, atacar e experimentar não significa receber autorização para escapar, acessar o mundo externo ou modificar a produção.»
+
+---
+
+# 35. Evolução Competitiva Contínua e Complexidade Progressiva
+
+O Laboratório de Treinamento Adversarial opera sob a dinâmica de coevolução contínua entre agentes especializados:
+
+> **«O ataque treina a defesa, e a defesa treina o ataque.»**
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│               COEVOLUÇÃO ADVERSARIAL PROGRESSIVA                       │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│   [ RED TEAM ] ──(Gera novo vetor de ataque)──> [ CYBER RANGE ]        │
+│        ▲                                               │               │
+│        │                                               ▼               │
+│   (Aumenta complexidade)                        [ BLUE TEAM ]          │
+│        │                                        (Defesa / Mitigação)   │
+│        │                                               │               │
+│   [ AVALIAÇÃO ] <──(Métricas empíricas e telemetria)───┘               │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## 35.1 Degraus de Complexidade Progressiva
+1. **Nível 1 — Evasões Sintáticas Básicas**: Variações de pontuação, codificação Base64/Hexadecimal, substituição de sinônimos e formatação Markdown em tentativas de jailbreak.
+2. **Nível 2 — Injeções Indiretas de Contexto**: Payloads embutidos em arquivos simulados (PDFs, HTMLs, CSVs), metadados de mídia e logs de terceiros.
+3. **Nível 3 — Ataques Compostos e Persuasão Multifásica**: Sequências de diálogos elaboradas para induzir amnésia de salvaguardas, personificação forçada (*roleplay exploit*) ou diluição de regras éticas ao longo de múltiplos turnos.
+4. **Nível 4 — Vetores Avançados e Simulação de Zero-Days**: Exploração combinada de vulnerabilidades lógicas em parsers, saturação de contexto, ataques estocásticos e simulação de ameaças inéditas sem assinaturas prévias conhecidas.
+
+---
+
+# 36. Mensuração Empírica vs Falácia do Crescimento Exponencial Automático
+
+A evolução do sistema defensivo não decorre de suposições teóricas de "auto-aprimoramento exponencial", mas sim de comprovação empírica rigorosa.
+
+> **ALERTA ARQUITETURAL: A FALÁCIA DO CRESCIMENTO EXPONENCIAL AUTOMÁTICO**
+>
+> Não se deve assumir que ciclos de auto-treinamento geram ganhos lineares ou exponenciais automáticos de inteligência ou segurança. Sem controle experimental rígido, agentes competitivos podem convergir para equilíbrios disfuncionais, overfitting a cenários simulados, alucinações táticas ou cegueira para ataques reais simples.
+
+## 36.1 Métricas de Validação Empírica Obrigatórias
+Todo ciclo adversarial deve gerar relatórios quantitativos baseados nas seguintes métricas:
+
+| Métrica | Definição | Critério de Aceitação Mínimo |
+| :--- | :--- | :--- |
+| **TPR (True Positive Rate)** | Taxa de detecção e bloqueio bem-sucedido de vetores maliciosos antes do impacto. | > 99.0% em vetores conhecidos; > 92.0% em mutações inéditas. |
+| **FPR (False Positive Rate)** | Taxa de falsos alarmes em solicitações e dados perfeitamente legítimos do operador. | < 0.1% em tarefas produtivas normais. |
+| **MTTC (Mean Time to Contain)** | Tempo médio transcorrido entre a detecção da anomalia e a aplicação da contenção no sandbox. | < 500 ms em runtime local. |
+| **Cobertura da Matriz MITRE ATT&CK** | Proporção de táticas e técnicas de adversários mapeadas e testadas no Cyber Range. | Cobertura documentada e auditável por versão. |
+| **Resiliência a Regressão** | Garantia de que a introdução de uma nova regra defensiva não reabre brechas mitigadas anteriormente. | 100% de passagem na suíte de testes de regressão de segurança. |
+
+---
+
+# 37. Liberdade Experimental do Red Team sob Confinamento Estrito
+
+O **Agente Ofensivo (Red Team)** deve dispor de ampla liberdade inventiva para explorar táticas adversárias realistas, desde que sob condições inegociáveis de confinamento de segurança.
+
+## 37.1 Prerrogativas do Red Team no Laboratório
+- Liberdade para recombinar técnicas, criar payloads mutagênicos e testar heurísticas evasivas;
+- Simulação autônoma de perfis adversários (de script kiddies a grupos patrocinados por estados);
+- Exploração deliberada de limites em parsers, analisadores sintáticos e filtros de contexto.
+
+## 37.2 As Fronteiras Invioláveis do Cyber Range (Air-Gap Lógico)
+> **INVARIANTE DE CONFINAMENTO ADVERSARIAL:**
+> **O Laboratório de Treinamento Adversarial é uma fronteira de segurança absoluta. O Red Team jamais terá autorização, meio ou conectividade para interagir com o ambiente de produção da Yuki, redes reais ou dispositivos do proprietário.**
+
+1. **Air-Gap Lógico e Sem Acesso à Rede Real**: O Cyber Range opera em rede virtualizada isolada (Host-Only / Mock Network), sem rota para a Internet pública ou para a LAN doméstica.
+2. **Separação Físico-Lógica de Segredos**: O laboratório utiliza exclusivamente credenciais sintéticas e fictícias. Nenhuma chave do Credential Vault de produção pode ser acessível a partir do ambiente de teste.
+3. **Imutabilidade da Produção**: O laboratório não tem permissão para alterar arquivos de configuração, bancos de dados SQLite ou código executável do ambiente de produção.
+4. **Ciclo de Vida Efêmero (Destruição e Limpeza)**: Cada ambiente de teste é instanciado de forma descartável; após o exercício, a imagem de teste é destruída, impedindo persistência oculta ou contaminação cruzada.
+5. **Auditoria de Limites da Sandbox**: Tentativas anômalas de escape de container, acesso a chamadas de sistema não autorizadas ou escutas em portas do host geram interrupção imediata da simulação e alarme de severidade crítica.
+
+---
+
+# 38. Taxonomia de Distinção Obrigatória (Laboratório Adversarial)
+
+| Categoria | Descrição Aplicada ao Adversarial Lab | Exemplo Específico |
+| :--- | :--- | :--- |
+| **1. Requisitos Expressos pelo Proprietário** | Determinações estratégicas inegociáveis do Owner sobre a operação do laboratório. | Confinamento absoluto no Cyber Range; Sem ferramentas ofensivas em produção; Proibição de escape ou impacto em infraestrutura real. |
+| **2. Princípios de Segurança Existentes** | Invariantes arquiteturais canônicos herdados da constituição da Yuki. | `Capacity != Privilege`; `Data != Instruction`; Imutabilidade de logs de auditoria; Isolamento de sandboxes. |
+| **3. Recomendações Técnicas** | Melhores práticas de engenharia de segurança aplicadas à simulação adversarial. | Adoção de métricas TPR/FPR/MTTC; Uso de ambientes efêmeros baseados em containers mínimos; Mapeamento via MITRE ATT&CK. |
+| **4. Questões Pendentes de Decisão** | Definições táticas que aguardam autorização prévia do Proprietário antes de materialização. | Limite de alocação de núcleos de CPU/GPU para o Red Team em segundo plano; Agendamento de janelas de treinamento noturno. |
