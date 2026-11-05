@@ -196,9 +196,11 @@ impl LocalWhisperConfig {
         self
     }
 
-    /// Ativa o perfil completo de baixa latência para conversação ao vivo (`voice live`):
+    /// Ativa o perfil completo de baixa latência e robustez acústica para conversação ao vivo (`voice live`):
     /// - Greedy search sem fallback de temperatura (`-bs 1 -bo 1 --no-fallback`)
-    /// - Recorte conservador de bordas silenciosas (preservando 250ms de margem)
+    /// - Detecção janelada de silêncio calibrada para preservar fala baixa e comandos curtos (~55 RMS) e descartar cliques/ruído estacionário
+    /// - Recorte adaptativo de bordas pelo piso de ruído real (preservando sílabas finais suaves e números) + cauda limpa de 160ms
+    /// - Normalização com teto seguro de ganho (`+26 dB`) para amplificar fala baixa sem saturar ruído residual
     /// - Escalonamento dinâmico de `--audio-ctx` proporcional à fala real (elimina padding de 30s no encoder)
     /// - Paralelismo ótimo de CPU (`threads` entre 4 e 8 se não especificado)
     /// - Sem injeção automática de prompt lexical para evitar alucinações em falas curtas.
@@ -206,6 +208,21 @@ impl LocalWhisperConfig {
         self = self.with_fast_decoding();
         self.auto_audio_ctx = true;
         self.trim_silence = true;
+        if std::env::var_os("YUKI_VOICE_SILENCE_DETECTOR").is_none() {
+            self.silence_detector = crate::voice::stt::silence::SilenceDetectorKind::Windowed(
+                crate::voice::stt::silence::WindowedSilenceConfig {
+                    window_ms: 20,
+                    active_rms_threshold: 55.0,
+                    active_peak_threshold: 190,
+                    min_consecutive_active_windows: 3,
+                    max_silence_ratio_pct: 95.0,
+                    min_variance_std_dev: 8.0,
+                },
+            );
+        }
+        if self.max_gain_db.is_none() {
+            self.max_gain_db = Some(26.0);
+        }
         if self.threads.is_none() {
             let hw = std::thread::available_parallelism()
                 .map(|n| n.get() as u32)
@@ -459,6 +476,90 @@ pub fn trim_silence_edges(
     let mut end_idx = (last_active_end + pad_samples).min(samples.len());
 
     let min_keep = ((sample_rate as usize) / 2).min(samples.len());
+    if end_idx.saturating_sub(start_idx) < min_keep {
+        let deficit = min_keep - (end_idx - start_idx);
+        let add_before = deficit / 2;
+        start_idx = start_idx.saturating_sub(add_before);
+        end_idx = (start_idx + min_keep).min(samples.len());
+    }
+
+    samples[start_idx..end_idx].to_vec()
+}
+
+/// Remove margens de silêncio inicial e final usando limiar adaptativo ao piso de ruído acústico (percentil 20),
+/// preservando sílabas átonas, fala baixa (~50–120 RMS) e números finais sem amputação prematura.
+pub fn trim_silence_edges_adaptive(samples: &[i16], sample_rate: u32) -> Vec<i16> {
+    if samples.is_empty() || sample_rate == 0 {
+        return samples.to_vec();
+    }
+    let window_len = ((sample_rate as usize) * 20 / 1000).max(1);
+    let n_windows = samples.len() / window_len;
+    if n_windows < 4 {
+        return samples.to_vec();
+    }
+
+    let mut rms_vals: Vec<f32> = Vec::with_capacity(n_windows);
+    let mut peak_vals: Vec<i16> = Vec::with_capacity(n_windows);
+    for w in 0..n_windows {
+        let win = &samples[w * window_len..(w + 1) * window_len];
+        let mut sq = 0.0f64;
+        let mut pk = 0i16;
+        for &s in win {
+            let av = s.saturating_abs();
+            if av > pk {
+                pk = av;
+            }
+            sq += (s as f64) * (s as f64);
+        }
+        rms_vals.push((sq / win.len() as f64).sqrt() as f32);
+        peak_vals.push(pk);
+    }
+
+    let mut sorted_rms = rms_vals.clone();
+    sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let noise_floor = sorted_rms[(n_windows / 5).min(n_windows - 1)];
+
+    let eff_rms = (noise_floor * 2.2).clamp(42.0, 85.0);
+    let eff_peak = ((noise_floor * 5.0) as i16).clamp(175, 260);
+
+    let mut first_win: Option<usize> = None;
+    let mut last_win: Option<usize> = None;
+
+    // Exige 2 janelas adjacentes de 20ms (40ms) para ancorar bordas sem prender em cliques isolados de 1 amostra
+    for w in 0..(n_windows - 1) {
+        let a0 = rms_vals[w] >= eff_rms || peak_vals[w] >= eff_peak;
+        let a1 = rms_vals[w + 1] >= eff_rms || peak_vals[w + 1] >= eff_peak;
+        if a0 && a1 {
+            if first_win.is_none() {
+                first_win = Some(w);
+            }
+            last_win = Some(w + 1);
+        }
+    }
+
+    // Fallback se houver apenas uma janela ativa curta
+    if first_win.is_none() {
+        for w in 0..n_windows {
+            if rms_vals[w] >= eff_rms || peak_vals[w] >= eff_peak {
+                if first_win.is_none() {
+                    first_win = Some(w);
+                }
+                last_win = Some(w);
+            }
+        }
+    }
+
+    let (Some(fw), Some(lw)) = (first_win, last_win) else {
+        return samples.to_vec();
+    };
+
+    let lead_pad = ((sample_rate as usize) * 280) / 1000;
+    let tail_pad = ((sample_rate as usize) * 380) / 1000;
+
+    let mut start_idx = (fw * window_len).saturating_sub(lead_pad);
+    let mut end_idx = (((lw + 1) * window_len) + tail_pad).min(samples.len());
+
+    let min_keep = (((sample_rate as usize) * 6) / 10).min(samples.len());
     if end_idx.saturating_sub(start_idx) < min_keep {
         let deficit = min_keep - (end_idx - start_idx);
         let add_before = deficit / 2;
@@ -876,15 +977,20 @@ impl LocalWhisperSttProvider {
             });
         }
 
-        // 5b. Recorte conservador das margens de silêncio antes de normalizar e codificar
+        // 5b. Recorte adaptativo das margens de silêncio antes de normalizar e codificar
         if self.config.trim_silence {
-            mono_samples = trim_silence_edges(&mono_samples, 16000, 160.0, 250);
+            mono_samples = trim_silence_edges_adaptive(&mono_samples, 16000);
         }
         let audio_prep_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
 
         // 6. Normaliza amplitude com margem de segurança contra saturação (clipping)
         let t_norm_start = std::time::Instant::now();
         AudioCodec::normalize_amplitude_bounded(&mut mono_samples, 28000, self.config.max_gain_db);
+        if self.config.trim_silence {
+            // Acrescenta 160ms (2560 amostras @ 16kHz) de silêncio digital limpo pós-normalização
+            // para evitar truncamento da sílaba/número final pelo janelamento STFT de 25ms do Whisper.
+            mono_samples.extend(std::iter::repeat_n(0i16, 2560));
+        }
 
         // Re-codifica áudio WAV normalizado para entrega ao processo do whisper
         let norm_format = crate::contracts::voice::AudioFormat {

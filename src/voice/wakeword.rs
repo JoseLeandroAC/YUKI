@@ -32,6 +32,7 @@ pub struct VoiceActivityDetector {
     max_rms_speech: f32,
     min_zcr: f32,
     max_zcr: f32,
+    min_std_dev: f32,
 }
 
 impl Default for VoiceActivityDetector {
@@ -41,6 +42,7 @@ impl Default for VoiceActivityDetector {
             max_rms_speech: 30000.0,
             min_zcr: 0.02,
             max_zcr: 0.40,
+            min_std_dev: 15.0,
         }
     }
 }
@@ -52,7 +54,19 @@ impl VoiceActivityDetector {
             max_rms_speech,
             min_zcr,
             max_zcr,
+            min_std_dev: 15.0,
         }
+    }
+
+    /// Configura o desvio padrão mínimo entre quadros para rejeição de ruído estacionário.
+    pub fn with_min_std_dev(mut self, min_std_dev: f32) -> Self {
+        self.min_std_dev = min_std_dev.max(0.0);
+        self
+    }
+
+    /// Retorna o limiar mínimo de RMS configurado para detecção de fala.
+    pub fn min_rms_speech(&self) -> f32 {
+        self.min_rms_speech
     }
 
     /// Avalia se a janela de quadros contém atividade acústica condizente com fala humana.
@@ -107,7 +121,7 @@ impl VoiceActivityDetector {
                 / (rms_list.len() as f32);
             let std_dev = variance.sqrt();
             // Ruído estacionário sintético tem desvio padrão ínfimo
-            if std_dev < 15.0 {
+            if std_dev < self.min_std_dev {
                 return false;
             }
         }

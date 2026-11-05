@@ -111,8 +111,12 @@ pub enum MissionCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum VoiceCommands {
-    /// Diagnóstico dos motores de STT, TTS, captura e reprodução local da Yuki
-    Status,
+    /// Diagnóstico dos motores de STT, TTS, provedor Gemini, captura e reprodução local da Yuki
+    Status {
+        /// Se configurado, executa uma verificação leve de conectividade real com o provedor Gemini via CredentialBroker
+        #[arg(long, default_value_t = false)]
+        check_gemini: bool,
+    },
     /// Lista os dispositivos de áudio disponíveis no sistema (microfones e alto-falantes/fones)
     Devices {
         /// Exibe todos os dispositivos conhecidos, incluindo desconectados e desabilitados
@@ -228,8 +232,8 @@ pub enum VoiceCommands {
         /// Duração da janela conversacional de follow-up em segundos (padrão: 7s)
         #[arg(long, default_value_t = 7)]
         follow_up_secs: u64,
-        /// Tempo de silêncio contínuo após fala para declarar fim de fala em ms (padrão: 650ms)
-        #[arg(long, default_value_t = 650)]
+        /// Tempo de silêncio contínuo após fala para declarar fim de fala em ms (padrão: 950ms)
+        #[arg(long, default_value_t = 950)]
         silence_hangover_ms: u64,
         /// Duração máxima de captura de cada frase em segundos (padrão: 10s)
         #[arg(long, default_value_t = 10)]
@@ -809,7 +813,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
     };
 
     match cmd {
-        VoiceCommands::Status => {
+        VoiceCommands::Status { check_gemini } => {
             println!("=== Diagnóstico do Subsistema de Voz da Yuki ===");
             let whisper = LocalWhisperSttProvider::default();
             let whisper_ready = whisper.is_environment_ready();
@@ -866,17 +870,51 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 }
             );
 
+            let gemini_report = yuki::models::diagnose_gemini_provider_readiness();
             match yuki::models::resolve_conversational_model_provider_from_env(false) {
                 Ok(provider) => {
                     println!(
-                        "Modelo Cognitivo (Conversa):   PRONTO — {}",
-                        yuki::models::format_active_model_provider_banner(provider.as_ref())
+                        "Modelo Cognitivo (Conversa):   PRONTO — {} [via {}]",
+                        yuki::models::format_active_model_provider_banner(provider.as_ref()),
+                        gemini_report.credential_source.public_label()
                     );
+                    if check_gemini {
+                        println!(
+                            "\n--- Verificação de Conectividade Real Gemini (--check-gemini) ---"
+                        );
+                        let mut ping_req =
+                            yuki::models::ModelRequest::from_prompt("Responda apenas: OK.");
+                        ping_req.max_output_tokens = Some(16);
+                        let t_ping = std::time::Instant::now();
+                        match provider.generate(&ping_req).await {
+                            Ok(resp) => {
+                                println!(
+                                    "Conexão Gemini API:            VALIDADA COM SUCESSO ({}ms, modelo: {}, resposta: {:?})",
+                                    t_ping.elapsed().as_millis(),
+                                    resp.model,
+                                    resp.raw_content.trim()
+                                );
+                            }
+                            Err(e) => {
+                                println!(
+                                    "Conexão Gemini API:            FALHOU NA CHAMADA REMOTA ({}ms) — {}",
+                                    t_ping.elapsed().as_millis(),
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(_) => {
                     println!(
-                        "Modelo Cognitivo (Conversa):   BLOQUEADO (Fail-Closed: configure YUKI_MODEL_PROVIDER=gemini + credencial)"
+                        "Modelo Cognitivo (Conversa):   BLOQUEADO (Fail-Closed | Provedor: {}, Credencial: {})",
+                        gemini_report.provider_selected,
+                        gemini_report.credential_source.public_label()
                     );
+                    if check_gemini {
+                        println!("\n--- Instruções Seguras para Ativação do Gemini Real ---");
+                        println!("{}", gemini_report.operator_guidance);
+                    }
                 }
             }
 
@@ -1050,10 +1088,16 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                                 eprintln!("Erro na reprodução física de áudio: {}", e);
                                 std::process::exit(1);
                             } else {
-                                let duration = std::time::Duration::from_millis(
-                                    audio_out.duration_ms.max(100) + 150,
+                                let max_wait = std::time::Duration::from_millis(
+                                    audio_out.duration_ms.max(100) + 1500,
                                 );
-                                tokio::time::sleep(duration).await;
+                                let t_wait = std::time::Instant::now();
+                                while playback.status()
+                                    == yuki::voice::playback::PlaybackStatus::Playing
+                                    && t_wait.elapsed() < max_wait
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
                                 println!("Reprodução concluída.");
                             }
                         }
@@ -1243,7 +1287,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
 
             let mut config = LocalWhisperConfig::default().with_language(effective_lang);
             if fast_stt {
-                config = config.with_fast_decoding();
+                config = config.with_live_optimizations();
             }
             if let Some(t) = threads {
                 if let Err(e) = config.set_threads(t) {
@@ -1880,6 +1924,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 );
                 println!("========================================================");
 
+                let playback_for_signal = playback_controller.clone();
                 let coordinator = Arc::new(VoiceConversationCoordinator::new(
                     core,
                     router,
@@ -1897,7 +1942,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                     silence_hangover_ms,
                     max_phrase_secs,
                     pre_roll_ms: 600,
-                    acoustic_cooldown_ms: 300,
+                    acoustic_cooldown_ms: 450,
                     input_device: target_input_id,
                     output_device: None,
                     resampler_kind: yuki::contracts::voice::ResamplerKind::FirAntialiasing,
@@ -1918,6 +1963,7 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                 tokio::spawn(async move {
                     if let Ok(()) = tokio::signal::ctrl_c().await {
                         println!("\n[Sinal] Ctrl+C detectado. Encerrando sessão de voz...");
+                        let _ = playback_for_signal.interrupt();
                         shutdown_trigger.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                 });

@@ -16,6 +16,12 @@ pub trait AudioPlaybackSink: Send + Sync + std::fmt::Debug {
 
     /// Nome descritivo da implementação de sink.
     fn name(&self) -> &str;
+
+    /// Indica se o driver/thread de renderização física ainda está drenando amostras no hardware
+    /// (ex.: buffer circular WASAPI `GetCurrentPadding > 0` antes de `IAudioClient::Stop`).
+    fn is_actively_rendering(&self) -> bool {
+        false
+    }
 }
 
 /// Estado atual da reprodução de áudio.
@@ -743,6 +749,7 @@ pub struct WasapiAudioPlaybackSink {
     #[cfg_attr(not(windows), allow(dead_code))]
     policy: AudioOutputPolicy,
     active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    active_rendering: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     current_wav_buffer: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
 }
 
@@ -757,6 +764,11 @@ impl Drop for WasapiAudioPlaybackSink {
         if let Ok(mut guard) = self.active_cancel.lock() {
             if let Some(cancel) = guard.take() {
                 cancel.store(true, Ordering::SeqCst);
+            }
+        }
+        if let Ok(mut guard) = self.active_rendering.lock() {
+            if let Some(rendering) = guard.take() {
+                rendering.store(false, Ordering::SeqCst);
             }
         }
     }
@@ -784,6 +796,7 @@ impl WasapiAudioPlaybackSink {
             device_id,
             policy,
             active_cancel: Arc::new(Mutex::new(None)),
+            active_rendering: Arc::new(Mutex::new(None)),
             current_wav_buffer: Arc::new(Mutex::new(None)),
         }
     }
@@ -852,13 +865,30 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
                 *guard = Some(cancel_token.clone());
             }
 
+            let render_active = Arc::new(AtomicBool::new(true));
+            {
+                let mut guard = self.active_rendering.lock().unwrap();
+                if let Some(prev) = guard.take() {
+                    prev.store(false, Ordering::SeqCst);
+                }
+                *guard = Some(render_active.clone());
+            }
+
             let target_device_id = self.device_id.clone();
             let input_sample_rate = format.sample_rate;
             let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
 
+            struct RenderActiveGuard(Arc<AtomicBool>);
+            impl Drop for RenderActiveGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+
             let spawn_res = std::thread::Builder::new()
                 .name("yuki-wasapi-render".to_string())
                 .spawn(move || unsafe {
+                    let _render_guard = RenderActiveGuard(render_active);
                     let hr = CoInitializeEx(std::ptr::null_mut(), 0);
                     if hr != 0 && hr != 1 {
                         let _ = init_tx.send(Err(VoiceError::PlaybackFailed(format!(
@@ -1144,6 +1174,11 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
                 });
 
             if let Err(e) = spawn_res {
+                if let Ok(mut guard) = self.active_rendering.lock() {
+                    if let Some(rendering) = guard.take() {
+                        rendering.store(false, Ordering::SeqCst);
+                    }
+                }
                 return Err(VoiceError::PlaybackFailed(format!(
                     "Falha ao criar thread WASAPI de renderização: {}",
                     e
@@ -1170,6 +1205,11 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
         if let Ok(mut guard) = self.active_cancel.lock() {
             if let Some(cancel) = guard.take() {
                 cancel.store(true, Ordering::SeqCst);
+            }
+        }
+        if let Ok(mut guard) = self.active_rendering.lock() {
+            if let Some(rendering) = guard.take() {
+                rendering.store(false, Ordering::SeqCst);
             }
         }
         let mut buf_lock = self.current_wav_buffer.lock().unwrap();
@@ -1201,6 +1241,14 @@ impl AudioPlaybackSink for WasapiAudioPlaybackSink {
 
     fn name(&self) -> &str {
         "WindowsAudioPlaybackSink (WASAPI Core Audio)"
+    }
+
+    fn is_actively_rendering(&self) -> bool {
+        self.active_rendering
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|f| f.load(Ordering::SeqCst)))
+            .unwrap_or(false)
     }
 }
 
@@ -1438,12 +1486,15 @@ impl AudioPlaybackController {
         self.sink.is_device_available()
     }
 
-    /// Retorna o estado atual da reprodução, atualizando atomicamente para Completed se a duração do áudio tiver expirado.
+    /// Retorna o estado atual da reprodução, atualizando atomicamente para Completed apenas quando
+    /// tanto a duração nominal quanto o dreno físico do buffer do sink (`!is_actively_rendering()`) concluíram.
     pub fn status(&self) -> PlaybackStatus {
+        let actively_rendering = self.sink.is_actively_rendering();
         let mut state = self.state.lock().unwrap();
         if state.status == PlaybackStatus::Playing {
             if let Some((start_instant, duration_ms)) = state.playback_timing {
-                if start_instant.elapsed().as_millis() as u64 >= duration_ms {
+                if start_instant.elapsed().as_millis() as u64 >= duration_ms && !actively_rendering
+                {
                     state.status = PlaybackStatus::Completed;
                     state.current_output = None;
                 }

@@ -167,6 +167,7 @@ pub fn resolve_conversational_model_provider_from_env(
                 let current = raw_provider.as_deref().unwrap_or("<não definido>");
                 Err(ModelError::Configuration(format!(
                     "Modo de conversação real bloqueou o uso silencioso do MockModelProvider (YUKI_MODEL_PROVIDER={}).\n\
+                     Nota: A assinatura do Antigravity IDE não injeta automaticamente chave de API no binário autônomo da Yuki.\n\
                      Para conversar com inteligência real via Gemini, configure no PowerShell:\n\
                        $env:YUKI_MODEL_PROVIDER = \"gemini\"\n\
                        $env:YUKI_GEMINI_API_KEY = \"<sua-chave-gemini>\"\n\
@@ -199,5 +200,143 @@ pub fn resolve_conversational_model_provider_from_env(
             "Provedor de modelo desconhecido: '{}'. Valores suportados: 'gemini' (ou 'mock' apenas com '--mock').",
             unknown
         ))),
+    }
+}
+
+/// Origem pública sanitizada da credencial Gemini resolvida pelo `CredentialBroker`.
+/// NUNCA contém valores de segredos, passphrases ou URIs privadas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeminiCredentialSource {
+    /// Variável de ambiente `YUKI_GEMINI_API_KEY` via `EnvSecretStore`.
+    EnvYukiGeminiApiKey,
+    /// Variável de ambiente `GEMINI_API_KEY` via `EnvSecretStore`.
+    EnvGeminiApiKey,
+    /// Cofre cifrado local `CredentialVault` (`VaultSecretStore`).
+    VaultEncrypted,
+    /// Referência explícita via `YUKI_GEMINI_SECRET_REF` resolvida pelo `CredentialBroker`.
+    ExplicitSecretRef,
+    /// Cofre cifrado existe no disco, porém `YUKI_VAULT_PASSPHRASE` não foi definida na sessão.
+    VaultPresentLocked,
+    /// Nenhuma credencial configurada no ambiente nem no cofre local.
+    Missing,
+}
+
+impl GeminiCredentialSource {
+    pub fn public_label(&self) -> &'static str {
+        match self {
+            Self::EnvYukiGeminiApiKey => "EnvSecretStore (YUKI_GEMINI_API_KEY)",
+            Self::EnvGeminiApiKey => "EnvSecretStore (GEMINI_API_KEY)",
+            Self::VaultEncrypted => "VaultSecretStore (CredentialVault cifrado)",
+            Self::ExplicitSecretRef => "CredentialBroker (YUKI_GEMINI_SECRET_REF)",
+            Self::VaultPresentLocked => {
+                "CredentialVault detectado em disco (bloqueado — defina YUKI_VAULT_PASSPHRASE)"
+            }
+            Self::Missing => "Não configurada",
+        }
+    }
+}
+
+/// Relatório público e sanitizado de prontidão do provedor Gemini via `CredentialBroker`.
+#[derive(Debug, Clone)]
+pub struct GeminiReadinessReport {
+    pub provider_selected: String,
+    pub model_id: String,
+    pub api_version: String,
+    pub credential_source: GeminiCredentialSource,
+    pub credential_resolvable: bool,
+    pub ready_for_live_conversation: bool,
+    pub operator_guidance: String,
+}
+
+/// Inspeciona com segurança a prontidão do provedor Gemini e do `CredentialBroker`
+/// sem exibir, registrar ou reter segredos em memória (`SecretLease` zeroizado imediatamente).
+pub fn diagnose_gemini_provider_readiness() -> GeminiReadinessReport {
+    let config = build_gemini_gateway_config_from_env();
+    let provider_selected = std::env::var("YUKI_MODEL_PROVIDER")
+        .ok()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "<não definido>".to_string());
+
+    let vault_cfg = VaultConfig::from_env();
+    let vault_file_exists = vault_cfg.vault_path.exists();
+    let passphrase_present = std::env::var("YUKI_VAULT_PASSPHRASE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    let has_explicit_ref = std::env::var("YUKI_GEMINI_SECRET_REF")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let has_yuki_env = std::env::var("YUKI_GEMINI_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let has_std_env = std::env::var("GEMINI_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    let mut credential_resolvable = false;
+    let credential_source = if let Ok((broker, vault_loaded)) = build_composite_broker_from_env() {
+        let candidate_source = if has_explicit_ref {
+            GeminiCredentialSource::ExplicitSecretRef
+        } else if has_yuki_env {
+            GeminiCredentialSource::EnvYukiGeminiApiKey
+        } else if has_std_env {
+            GeminiCredentialSource::EnvGeminiApiKey
+        } else if vault_loaded {
+            GeminiCredentialSource::VaultEncrypted
+        } else if vault_file_exists && !passphrase_present {
+            GeminiCredentialSource::VaultPresentLocked
+        } else {
+            GeminiCredentialSource::Missing
+        };
+
+        if !matches!(
+            candidate_source,
+            GeminiCredentialSource::Missing | GeminiCredentialSource::VaultPresentLocked
+        ) {
+            if let Ok(secret_ref) = resolve_gemini_secret_ref(&config, vault_loaded) {
+                if let Ok(lease) = broker.acquire(&secret_ref) {
+                    drop(lease);
+                    credential_resolvable = true;
+                }
+            }
+        }
+        candidate_source
+    } else if vault_file_exists {
+        GeminiCredentialSource::VaultPresentLocked
+    } else {
+        GeminiCredentialSource::Missing
+    };
+
+    let ready_for_live_conversation = provider_selected == "gemini" && credential_resolvable;
+
+    let operator_guidance = if ready_for_live_conversation {
+        format!(
+            "Provedor Gemini pronto via {} (modelo: {}).",
+            credential_source.public_label(),
+            config.model_id
+        )
+    } else {
+        "Nota: A assinatura do Antigravity IDE é independente e não disponibiliza automaticamente API ao aplicativo Yuki.\n\
+         Opção A (Sessão PowerShell rápida — sem persistir em texto puro no disco):\n\
+           $env:YUKI_MODEL_PROVIDER = \"gemini\"\n\
+           $env:YUKI_GEMINI_API_KEY = Read-Host \"Informe sua Gemini API Key\" -MaskInput\n\
+         Opção B (Cofre cifrado persistente via CredentialVault):\n\
+           $env:YUKI_VAULT_PASSPHRASE = Read-Host \"Defina/informe a senha do cofre\" -MaskInput\n\
+           .\\target\\release\\yuki.exe vault init\n\
+           .\\target\\release\\yuki.exe vault store gemini_api_key --provider gemini\n\
+           $env:YUKI_MODEL_PROVIDER = \"gemini\"\n\
+         (Para testar o pipeline acústico offline sem API, utilize '--mock' em 'yuki voice live --mock')."
+            .to_string()
+    };
+
+    GeminiReadinessReport {
+        provider_selected,
+        model_id: config.model_id,
+        api_version: config.api_version,
+        credential_source,
+        credential_resolvable,
+        ready_for_live_conversation,
+        operator_guidance,
     }
 }

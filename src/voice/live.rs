@@ -42,13 +42,20 @@ pub struct VoiceLiveListenerConfig {
     pub threshold: f32,
     /// Duração da janela conversacional de follow-up em segundos. Padrão: 7s.
     pub follow_up_secs: u64,
-    /// Tempo de silêncio contínuo após fala para declarar End of Speech (EOS). Padrão: 800ms.
+    /// Tempo de silêncio contínuo após fala para declarar End of Speech (EOS). Padrão: 950ms.
     pub silence_hangover_ms: u64,
+    /// Janela de tolerância inicial logo após o disparo de Wake Word antes do primeiro bloco de fala pós-gatilho
+    /// (preserva pausas prosódicas após a vírgula em "Yuki, ..."). `None` = proporcional (`1.5x silence_hangover_ms`, teto 1450ms).
+    pub initial_speech_grace_ms: Option<u64>,
+    /// Piso mínimo de energia RMS (16-bit PCM) para continuidade de fala durante `CapturingPhrase`. Padrão: 52.0.
+    pub speech_continuation_rms_floor: f32,
+    /// Limiar mínimo de energia RMS (16-bit PCM) para disparo de fala na janela `FollowUpWindow`. Padrão: 72.0.
+    pub followup_min_rms: f32,
     /// Tempo máximo de gravação de uma única frase em segundos. Padrão: 10s.
     pub max_phrase_secs: u64,
     /// Tamanho do buffer circular de pré-roll em milissegundos. Padrão: 600ms.
     pub pre_roll_ms: usize,
-    /// Cooldown acústico após término do playback para rejeitar ecos residuais. Padrão: 300ms.
+    /// Cooldown acústico após término físico do playback para rejeitar ecos residuais. Padrão: 450ms.
     pub acoustic_cooldown_ms: u64,
     /// Cooldown adicional antes de rearmar a detecção de Wake Word após turno/erro/expiração. Padrão: 600ms.
     pub wake_cooldown_ms: u64,
@@ -73,10 +80,13 @@ impl Default for VoiceLiveListenerConfig {
         Self {
             threshold: 0.45,
             follow_up_secs: 7,
-            silence_hangover_ms: 800,
+            silence_hangover_ms: 950,
+            initial_speech_grace_ms: None,
+            speech_continuation_rms_floor: 52.0,
+            followup_min_rms: 72.0,
             max_phrase_secs: 10,
             pre_roll_ms: 600,
-            acoustic_cooldown_ms: 300,
+            acoustic_cooldown_ms: 450,
             wake_cooldown_ms: 600,
             followup_confirm_frames: 3,
             input_device: None,
@@ -273,12 +283,91 @@ impl SpotterHandle {
     }
 }
 
+/// Avalia se um bloco canônico de 80ms (1280 amostras @ 16kHz) contém continuidade real de fala,
+/// preservando sílabas baixas e números finais (ex.: microfones integrados em ~60–250 RMS)
+/// enquanto descarta silêncio de sala (~14 RMS) e ruído estacionário contínuo (zumbido/ventoinha).
+fn is_speech_continuation_block(
+    block: &[i16],
+    vad_window: &[AudioFrame],
+    effective_min_rms: f32,
+) -> bool {
+    if block.is_empty() {
+        return false;
+    }
+
+    let mut total_sq: f64 = 0.0;
+    let mut zcr: usize = 0;
+    for (i, &s) in block.iter().enumerate() {
+        total_sq += (s as f64) * (s as f64);
+        if i > 0 && ((s >= 0 && block[i - 1] < 0) || (s < 0 && block[i - 1] >= 0)) {
+            zcr += 1;
+        }
+    }
+    let block_rms = (total_sq / block.len() as f64).sqrt() as f32;
+    let zcr_rate = zcr as f32 / block.len() as f32;
+
+    if !(0.012..=0.48).contains(&zcr_rate) {
+        return false;
+    }
+
+    // Sub-janelas de 20ms (320 amostras @ 16kHz) para preservar consoantes/finais curtos de baixa amplitude
+    let sub_len = 320usize;
+    let mut sub_rms = Vec::with_capacity(4);
+    let mut active_subs = 0usize;
+    for chunk in block.chunks(sub_len) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut sq = 0.0f64;
+        let mut peak = 0i16;
+        for &s in chunk {
+            let av = s.saturating_abs();
+            if av > peak {
+                peak = av;
+            }
+            sq += (s as f64) * (s as f64);
+        }
+        let r = (sq / chunk.len() as f64).sqrt() as f32;
+        sub_rms.push(r);
+        if r >= effective_min_rms || peak >= 190 {
+            active_subs += 1;
+        }
+    }
+
+    if block_rms < effective_min_rms && active_subs < 2 {
+        return false;
+    }
+
+    // Rejeita ruído contínuo estacionário (ex.: ventilador constante com variância nula em 20ms e 80ms)
+    if vad_window.len() >= 3 && !sub_rms.is_empty() {
+        let sub_mean = sub_rms.iter().sum::<f32>() / sub_rms.len() as f32;
+        let sub_var =
+            sub_rms.iter().map(|&r| (r - sub_mean).powi(2)).sum::<f32>() / sub_rms.len() as f32;
+        let sub_std = sub_var.sqrt();
+
+        let macro_rms: Vec<f32> = vad_window.iter().map(|f| f.rms_energy()).collect();
+        let macro_mean = macro_rms.iter().sum::<f32>() / macro_rms.len() as f32;
+        let macro_var = macro_rms
+            .iter()
+            .map(|&r| (r - macro_mean).powi(2))
+            .sum::<f32>()
+            / macro_rms.len() as f32;
+        let macro_std = macro_var.sqrt();
+
+        if macro_std < 1.5 && sub_std < 1.5 {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Orquestrador governado do ouvinte de voz contínuo da Yuki.
 pub struct VoiceLiveListener {
     config: VoiceLiveListenerConfig,
     coordinator: Arc<VoiceConversationCoordinator>,
     spotter: SpotterHandle,
-    vad: VoiceActivityDetector,
+    followup_vad: VoiceActivityDetector,
 }
 
 impl VoiceLiveListener {
@@ -287,11 +376,14 @@ impl VoiceLiveListener {
         coordinator: Arc<VoiceConversationCoordinator>,
         wakeword_engine: Arc<tokio::sync::Mutex<OpenWakeWordEngine>>,
     ) -> Self {
+        let followup_vad =
+            VoiceActivityDetector::new(config.followup_min_rms.max(45.0), 30000.0, 0.015, 0.45)
+                .with_min_std_dev(8.0);
         Self {
             config,
             coordinator,
             spotter: SpotterHandle::OpenWakeWord(wakeword_engine),
-            vad: VoiceActivityDetector::default(),
+            followup_vad,
         }
     }
 
@@ -302,11 +394,14 @@ impl VoiceLiveListener {
         coordinator: Arc<VoiceConversationCoordinator>,
         spotter: Arc<dyn LiveWakeWordSpotter>,
     ) -> Self {
+        let followup_vad =
+            VoiceActivityDetector::new(config.followup_min_rms.max(45.0), 30000.0, 0.015, 0.45)
+                .with_min_std_dev(8.0);
         Self {
             config,
             coordinator,
             spotter: SpotterHandle::Custom(spotter),
-            vad: VoiceActivityDetector::default(),
+            followup_vad,
         }
     }
 
@@ -340,12 +435,14 @@ impl VoiceLiveListener {
         let mut pre_roll_buffer: Vec<i16> = Vec::with_capacity(pre_roll_samples_capacity);
 
         let mut phrase_buffer: Vec<i16> = Vec::new();
-        let mut capture_eval_buf: Vec<i16> = Vec::with_capacity(2560);
         let mut vad_window: Vec<AudioFrame> = Vec::with_capacity(4);
         let mut consecutive_speech_blocks: usize = 0;
+        let mut trailing_silent_blocks: usize = 0;
 
         let mut phrase_start_instant: Option<Instant> = None;
         let mut last_speech_instant: Option<Instant> = None;
+        let mut post_trigger_speech_detected = false;
+        let mut ambient_rms_ema: f32 = 16.0;
 
         let mut turn_records: Vec<LiveTurnRecord> = Vec::new();
         let mut empty_stt_discards: usize = 0;
@@ -357,7 +454,7 @@ impl VoiceLiveListener {
 
         // Bloco PCM para o openWakeWord e VAD: 80 ms = 1280 amostras em 16 kHz mono
         let block_size = 1280usize;
-        let max_queue_samples = 32_000usize; // limite de 2s para impedir acúmulo de áudio atrasado
+        let max_queue_samples = 96_000usize; // limite de segurança de 6s contra acúmulo extremo
         let mut incoming_pcm_queue: Vec<i16> = Vec::new();
 
         println!("\n[Yuki] Sistema de voz contínuo iniciado.");
@@ -372,20 +469,31 @@ impl VoiceLiveListener {
         while shutdown_flag.load(Ordering::SeqCst) {
             // 1. Drena amostras recebidas do canal WASAPI sem bloquear
             let mut got_samples = false;
-            while let Ok(samples) = rx_samples.try_recv() {
-                if !samples.is_empty() {
-                    got_samples = true;
-                    // Se estivermos em playback ativo, descarta pacotes de entrada (supressão acústica de auto-gatilho)
-                    if self.coordinator.playback().status() == PlaybackStatus::Playing {
-                        incoming_pcm_queue.clear();
-                        pre_roll_buffer.clear();
-                        continue;
+            if self.coordinator.playback().status() == PlaybackStatus::Playing {
+                // Se estivermos em playback ativo, descarta pacotes de entrada (supressão acústica de auto-gatilho)
+                while let Ok(samples) = rx_samples.try_recv() {
+                    if !samples.is_empty() {
+                        got_samples = true;
                     }
-                    incoming_pcm_queue.extend_from_slice(&samples);
-                    if incoming_pcm_queue.len() > max_queue_samples {
-                        let excess = incoming_pcm_queue.len() - max_queue_samples;
-                        incoming_pcm_queue.drain(0..excess);
+                }
+                incoming_pcm_queue.clear();
+                pre_roll_buffer.clear();
+            } else {
+                // Drena incrementalmente até 2 blocos por iteração para preservar fronteiras exatas entre estados
+                while incoming_pcm_queue.len() < block_size * 2 {
+                    match rx_samples.try_recv() {
+                        Ok(samples) => {
+                            if !samples.is_empty() {
+                                got_samples = true;
+                                incoming_pcm_queue.extend_from_slice(&samples);
+                            }
+                        }
+                        Err(_) => break,
                     }
+                }
+                if incoming_pcm_queue.len() > max_queue_samples {
+                    let excess = incoming_pcm_queue.len() - max_queue_samples;
+                    incoming_pcm_queue.drain(0..excess);
                 }
             }
 
@@ -402,6 +510,24 @@ impl VoiceLiveListener {
                                 continue;
                             }
                             wake_cooldown_until = None;
+                        }
+
+                        // Atualiza estimativa adaptativa do piso de ruído de sala apenas em quadros calmos
+                        {
+                            let mut sq = 0.0f64;
+                            let mut pk = 0i16;
+                            for &s in &block {
+                                let av = s.saturating_abs();
+                                if av > pk {
+                                    pk = av;
+                                }
+                                sq += (s as f64) * (s as f64);
+                            }
+                            let b_rms = (sq / block.len() as f64).sqrt() as f32;
+                            if b_rms < 42.0 && pk < 175 {
+                                ambient_rms_ema =
+                                    (0.90 * ambient_rms_ema + 0.10 * b_rms).clamp(8.0, 40.0);
+                            }
                         }
 
                         // Atualiza buffer circular de pré-roll
@@ -436,9 +562,10 @@ impl VoiceLiveListener {
                             phrase_buffer.clear();
                             phrase_buffer.extend_from_slice(&pre_roll_buffer);
                             pre_roll_buffer.clear();
-                            capture_eval_buf.clear();
                             vad_window.clear();
                             consecutive_speech_blocks = 0;
+                            trailing_silent_blocks = 0;
+                            post_trigger_speech_detected = false;
 
                             phrase_start_instant = Some(Instant::now());
                             last_speech_instant = Some(Instant::now());
@@ -458,9 +585,9 @@ impl VoiceLiveListener {
                         );
                         self.spotter.reset().await;
                         pre_roll_buffer.clear();
-                        capture_eval_buf.clear();
                         vad_window.clear();
                         consecutive_speech_blocks = 0;
+                        trailing_silent_blocks = 0;
                         if self.config.wake_cooldown_ms > 0 {
                             wake_cooldown_until = Some(
                                 Instant::now()
@@ -490,22 +617,33 @@ impl VoiceLiveListener {
                         }
 
                         let frame = AudioFrame::new(block, 16000, 1, 0);
-                        let current_non_silent = !frame.is_silent(300.0);
-                        if vad_window.len() >= 4 {
-                            vad_window.remove(0);
+                        let frame_rms = frame.rms_energy();
+                        if frame_rms < 42.0 {
+                            ambient_rms_ema =
+                                (0.90 * ambient_rms_ema + 0.10 * frame_rms).clamp(8.0, 40.0);
                         }
-                        vad_window.push(frame);
+                        let followup_gate_rms =
+                            (ambient_rms_ema * 3.0).max(self.followup_vad.min_rms_speech());
+                        let current_non_silent = !frame.is_silent(followup_gate_rms);
 
-                        if vad_window.len() >= min_vad_window
-                            && current_non_silent
-                            && self.vad.is_speech(&vad_window)
-                        {
+                        if current_non_silent {
+                            if consecutive_speech_blocks == 0 {
+                                vad_window.clear();
+                            }
                             consecutive_speech_blocks += 1;
+                            if vad_window.len() >= 4 {
+                                vad_window.remove(0);
+                            }
+                            vad_window.push(frame);
                         } else {
                             consecutive_speech_blocks = 0;
+                            vad_window.clear();
                         }
 
-                        if consecutive_speech_blocks >= required_confirm {
+                        if consecutive_speech_blocks >= required_confirm
+                            && vad_window.len() >= min_vad_window
+                            && self.followup_vad.is_speech(&vad_window)
+                        {
                             println!(
                                 "\n[Yuki] >> Fala detectada na janela de follow-up! Ouvindo..."
                             );
@@ -516,8 +654,10 @@ impl VoiceLiveListener {
                             phrase_buffer.clear();
                             phrase_buffer.extend_from_slice(&pre_roll_buffer);
                             pre_roll_buffer.clear();
-                            capture_eval_buf.clear();
                             consecutive_speech_blocks = 0;
+                            trailing_silent_blocks = 0;
+                            // Na janela de follow-up a fala já foi confirmada por 3 quadros consecutivos
+                            post_trigger_speech_detected = true;
 
                             phrase_start_instant = Some(Instant::now());
                             last_speech_instant = Some(Instant::now());
@@ -530,62 +670,127 @@ impl VoiceLiveListener {
                 }
 
                 LiveConversationState::CapturingPhrase => {
-                    // Drena amostras para phrase_buffer e avalia VAD em blocos canônicos de 80ms (1280 amostras)
-                    if !incoming_pcm_queue.is_empty() {
-                        let chunk = std::mem::take(&mut incoming_pcm_queue);
-                        phrase_buffer.extend_from_slice(&chunk);
-                        capture_eval_buf.extend_from_slice(&chunk);
+                    let effective_cont_rms = (ambient_rms_ema * 2.5)
+                        .max(self.config.speech_continuation_rms_floor)
+                        .clamp(42.0, 120.0);
 
-                        while capture_eval_buf.len() >= block_size {
-                            let eval_block: Vec<i16> =
-                                capture_eval_buf.drain(0..block_size).collect();
-                            let frame = AudioFrame::new(eval_block, 16000, 1, 0);
-                            let non_silent = !frame.is_silent(300.0);
-                            if vad_window.len() >= 4 {
-                                vad_window.remove(0);
-                            }
-                            vad_window.push(frame);
+                    // Enquanto a fala pós-gatilho ainda não iniciou (ex.: pausa de vírgula após "Yuki,"),
+                    // respeita janela inicial de tolerância antes de declarar EOS.
+                    let calc_required_silence_ms = |post_speech: bool| -> u64 {
+                        if post_speech {
+                            self.config.silence_hangover_ms
+                        } else {
+                            self.config
+                                .initial_speech_grace_ms
+                                .unwrap_or_else(|| {
+                                    (self.config.silence_hangover_ms.saturating_mul(3) / 2)
+                                        .min(1450)
+                                })
+                                .max(self.config.silence_hangover_ms)
+                        }
+                    };
 
-                            if non_silent && self.vad.is_speech(&vad_window) {
-                                last_speech_instant = Some(Instant::now());
-                            }
+                    let mut triggered_turn = false;
+
+                    // Avalia continuidade de fala bloco a bloco (80ms = 1280 amostras @ 16kHz),
+                    // combinando tempo acústico real de amostras com relógio monotônico.
+                    while incoming_pcm_queue.len() >= block_size {
+                        let eval_block: Vec<i16> =
+                            incoming_pcm_queue.drain(0..block_size).collect();
+                        phrase_buffer.extend_from_slice(&eval_block);
+
+                        let frame = AudioFrame::new(eval_block.clone(), 16000, 1, 0);
+                        if vad_window.len() >= 4 {
+                            vad_window.remove(0);
+                        }
+                        vad_window.push(frame);
+
+                        if is_speech_continuation_block(
+                            &eval_block,
+                            &vad_window,
+                            effective_cont_rms,
+                        ) {
+                            last_speech_instant = Some(Instant::now());
+                            post_trigger_speech_detected = true;
+                            trailing_silent_blocks = 0;
+                        } else {
+                            trailing_silent_blocks += 1;
+                        }
+
+                        let wall_phrase_ms = phrase_start_instant
+                            .map(|i| i.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        let acoustic_phrase_ms = (phrase_buffer.len() as u64 * 1000) / 16000;
+                        let effective_phrase_ms = wall_phrase_ms.max(acoustic_phrase_ms);
+
+                        let wall_silence_ms = last_speech_instant
+                            .map(|i| i.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        let acoustic_silence_ms = (trailing_silent_blocks as u64) * 80;
+                        let effective_silence_ms = wall_silence_ms.max(acoustic_silence_ms);
+
+                        let required_silence_ms =
+                            calc_required_silence_ms(post_trigger_speech_detected);
+                        let reached_eos = effective_silence_ms >= required_silence_ms
+                            && effective_phrase_ms >= 400;
+                        let reached_max = effective_phrase_ms >= self.config.max_phrase_secs * 1000;
+
+                        if reached_eos || reached_max {
+                            println!(
+                                "[Yuki] Fim da fala detectado (duração: {:.2}s, silêncio: {}ms). Processando turno...",
+                                effective_phrase_ms as f32 / 1000.0,
+                                effective_silence_ms
+                            );
+                            state = LiveConversationState::ProcessingTurn;
+                            state_changed_instant = Instant::now();
+                            triggered_turn = true;
+                            break;
                         }
                     }
 
-                    let phrase_duration = phrase_start_instant
-                        .map(|i| i.elapsed())
-                        .unwrap_or(Duration::ZERO);
+                    if !triggered_turn {
+                        let wall_phrase_ms = phrase_start_instant
+                            .map(|i| i.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        let acoustic_phrase_ms =
+                            ((phrase_buffer.len() + incoming_pcm_queue.len()) as u64 * 1000)
+                                / 16000;
+                        let effective_phrase_ms = wall_phrase_ms.max(acoustic_phrase_ms);
 
-                    let silence_elapsed = last_speech_instant
-                        .map(|i| i.elapsed())
-                        .unwrap_or(Duration::ZERO);
+                        let wall_silence_ms = last_speech_instant
+                            .map(|i| i.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        let acoustic_silence_ms = (trailing_silent_blocks as u64) * 80;
+                        let effective_silence_ms = wall_silence_ms.max(acoustic_silence_ms);
 
-                    // Condição 1: Silêncio contínuo após fala (End of Speech)
-                    let reached_eos = silence_elapsed
-                        >= Duration::from_millis(self.config.silence_hangover_ms)
-                        && phrase_duration >= Duration::from_millis(400);
+                        let required_silence_ms =
+                            calc_required_silence_ms(post_trigger_speech_detected);
+                        let reached_eos = effective_silence_ms >= required_silence_ms
+                            && effective_phrase_ms >= 400;
+                        let reached_max = effective_phrase_ms >= self.config.max_phrase_secs * 1000;
 
-                    // Condição 2: Limite máximo de frase atingido
-                    let reached_max =
-                        phrase_duration >= Duration::from_secs(self.config.max_phrase_secs);
-
-                    if reached_eos || reached_max {
-                        println!(
-                            "[Yuki] Fim da fala detectado (duração: {:.2}s, silêncio: {}ms). Processando turno...",
-                            phrase_duration.as_secs_f32(),
-                            silence_elapsed.as_millis()
-                        );
-                        state = LiveConversationState::ProcessingTurn;
-                        state_changed_instant = Instant::now();
+                        if reached_eos || reached_max {
+                            if !incoming_pcm_queue.is_empty() {
+                                phrase_buffer.extend_from_slice(&incoming_pcm_queue);
+                                incoming_pcm_queue.clear();
+                            }
+                            println!(
+                                "[Yuki] Fim da fala detectado (duração: {:.2}s, silêncio: {}ms). Processando turno...",
+                                effective_phrase_ms as f32 / 1000.0,
+                                effective_silence_ms
+                            );
+                            state = LiveConversationState::ProcessingTurn;
+                            state_changed_instant = Instant::now();
+                        }
                     }
                 }
 
                 LiveConversationState::ProcessingTurn => {
-                    // Limpa filas de entrada para evitar resíduos
+                    // Limpa filas residuais de estado antes de decodificar a frase capturada
                     incoming_pcm_queue.clear();
-                    capture_eval_buf.clear();
                     vad_window.clear();
                     consecutive_speech_blocks = 0;
+                    trailing_silent_blocks = 0;
 
                     if phrase_buffer.len() < 3200 {
                         // Menos de 200ms de áudio é ruído irrelevante
@@ -739,9 +944,9 @@ impl VoiceLiveListener {
                             while rx_samples.try_recv().is_ok() {}
                             incoming_pcm_queue.clear();
                             pre_roll_buffer.clear();
-                            capture_eval_buf.clear();
                             vad_window.clear();
                             consecutive_speech_blocks = 0;
+                            trailing_silent_blocks = 0;
                             self.spotter.reset().await;
 
                             // Avalia se o usuário expressou intenção de encerramento
@@ -794,9 +999,9 @@ impl VoiceLiveListener {
                             while rx_samples.try_recv().is_ok() {}
                             incoming_pcm_queue.clear();
                             pre_roll_buffer.clear();
-                            capture_eval_buf.clear();
                             vad_window.clear();
                             consecutive_speech_blocks = 0;
+                            trailing_silent_blocks = 0;
                             self.spotter.reset().await;
 
                             if self.config.wake_cooldown_ms > 0 {
@@ -816,8 +1021,11 @@ impl VoiceLiveListener {
                 }
             }
 
-            // Se não recebeu amostras neste loop, dorme um tempo curto para não consumir 100% da CPU
-            if !got_samples {
+            // Se não há trabalho imediato pendente na fila nem transição síncrona, dorme 10ms para poupar CPU
+            let has_pending_work = got_samples
+                || incoming_pcm_queue.len() >= block_size
+                || state == LiveConversationState::ProcessingTurn;
+            if !has_pending_work {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
@@ -832,16 +1040,31 @@ impl VoiceLiveListener {
         Ok(stats)
     }
 
-    /// Avalia se a fala do usuário corresponde a um comando de despedida ou saída.
+    /// Avalia se a fala do usuário corresponde a um comando de despedida ou saída,
+    /// utilizando fronteiras de palavra para não confundir vocábulos como "compare" ou "parece" com "pare".
     pub fn is_exit_phrase(&self, text: &str) -> bool {
-        let clean = text.to_lowercase();
-        let stripped: String = clean
+        let normalized: String = text
+            .to_lowercase()
             .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
             .collect();
+        let words: Vec<&str> = normalized.split_whitespace().collect();
+        if words.is_empty() {
+            return false;
+        }
 
         for phrase in &self.config.exit_phrases {
-            if stripped == *phrase || stripped.starts_with(phrase) || stripped.contains(phrase) {
+            let p_norm: String = phrase
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                .collect();
+            let p_words: Vec<&str> = p_norm.split_whitespace().collect();
+            if !p_words.is_empty()
+                && words
+                    .windows(p_words.len())
+                    .any(|win| win == p_words.as_slice())
+            {
                 return true;
             }
         }

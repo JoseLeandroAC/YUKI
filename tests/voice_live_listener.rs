@@ -23,10 +23,10 @@ fn test_01_live_listener_config_defaults() {
     let cfg = VoiceLiveListenerConfig::default();
     assert!((cfg.threshold - 0.45).abs() < 1e-4);
     assert_eq!(cfg.follow_up_secs, 7);
-    assert_eq!(cfg.silence_hangover_ms, 800);
+    assert_eq!(cfg.silence_hangover_ms, 950);
     assert_eq!(cfg.max_phrase_secs, 10);
     assert_eq!(cfg.pre_roll_ms, 600);
-    assert_eq!(cfg.acoustic_cooldown_ms, 300);
+    assert_eq!(cfg.acoustic_cooldown_ms, 450);
     assert_eq!(cfg.resampler_kind, ResamplerKind::FirAntialiasing);
     assert!(!cfg.allow_cloud_stt);
     assert!(!cfg.allow_cloud_tts);
