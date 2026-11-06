@@ -1,4 +1,4 @@
-use crate::models::config::ModelGatewayConfig;
+﻿use crate::models::config::ModelGatewayConfig;
 use crate::models::errors::ModelError;
 use crate::models::gemini::{
     sanitize_gemini_api_version, sanitize_gemini_model_id, GeminiProviderAdapter,
@@ -38,6 +38,19 @@ fn build_gemini_gateway_config_from_env() -> ModelGatewayConfig {
     if let Ok(iterations_str) = std::env::var("YUKI_MAX_TOOL_ITERATIONS") {
         if let Ok(iterations) = iterations_str.trim().parse::<u32>() {
             config.max_tool_iterations = iterations;
+        }
+    }
+
+    if let Ok(budget_str) = std::env::var("YUKI_GEMINI_THINKING_BUDGET") {
+        if let Ok(b) = budget_str.trim().parse::<i32>() {
+            config.thinking_budget = Some(b);
+        }
+    }
+
+    if let Ok(level_str) = std::env::var("YUKI_GEMINI_THINKING_LEVEL") {
+        let trimmed = level_str.trim();
+        if !trimmed.is_empty() {
+            config.thinking_level = Some(trimmed.to_string());
         }
     }
 

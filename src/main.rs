@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+﻿use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use yuki::capabilities::registry::CapabilityRegistry;
 use yuki::contracts::input::UserInput;
@@ -172,8 +172,8 @@ pub enum VoiceCommands {
         /// Desativa fallbacks de temperatura em caso de incerteza (evita re-tentativas lentas)
         #[arg(long, default_value_t = false)]
         no_fallback: bool,
-        /// Modo experimental rápido (greedy search: beam_size=1, best_of=1, sem fallback)
-        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        /// Modo de baixa latência (greedy search: beam_size=1, best_of=1, sem fallback de temperatura)
+        #[arg(long, visible_alias = "fast", default_value_t = true, action = clap::ArgAction::Set)]
         fast_stt: bool,
         /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
         #[arg(long, visible_alias = "diag", default_value_t = false)]
@@ -211,8 +211,8 @@ pub enum VoiceCommands {
         /// Desativa fallbacks de temperatura em caso de incerteza (evita re-tentativas lentas)
         #[arg(long, default_value_t = false)]
         no_fallback: bool,
-        /// Modo experimental rápido (greedy search: beam_size=1, best_of=1, sem fallback)
-        #[arg(long, visible_alias = "fast", default_value_t = false)]
+        /// Modo de baixa latência (greedy search: beam_size=1, best_of=1, sem fallback de temperatura)
+        #[arg(long, visible_alias = "fast", default_value_t = true, action = clap::ArgAction::Set)]
         fast_stt: bool,
         /// Ativa modo de diagnóstico detalhado de áudio (grava WAVs e métricas acústicas em data/voice_diag/)
         #[arg(long, visible_alias = "diag", default_value_t = false)]
@@ -884,16 +884,38 @@ async fn handle_voice_command(cmd: VoiceCommands) {
                         );
                         let mut ping_req =
                             yuki::models::ModelRequest::from_prompt("Responda apenas: OK.");
-                        ping_req.max_output_tokens = Some(16);
+                        ping_req.max_output_tokens = Some(128);
                         let t_ping = std::time::Instant::now();
                         match provider.generate(&ping_req).await {
                             Ok(resp) => {
-                                println!(
-                                    "Conexão Gemini API:            VALIDADA COM SUCESSO ({}ms, modelo: {}, resposta: {:?})",
-                                    t_ping.elapsed().as_millis(),
-                                    resp.model,
-                                    resp.raw_content.trim()
-                                );
+                                let content = resp.raw_content.trim();
+                                if content.is_empty() {
+                                    println!(
+                                        "Conexão Gemini API:            FALHA (Resposta Vazia | {}ms, modelo: {})",
+                                        t_ping.elapsed().as_millis(),
+                                        resp.model
+                                    );
+                                } else {
+                                    let usage_summary = if let Some(u) = &resp.usage {
+                                        let thoughts = u
+                                            .thoughts_tokens
+                                            .map(|t| format!(", pensamentos: {}", t))
+                                            .unwrap_or_default();
+                                        format!(
+                                            " [tokens: prompt: {}, resposta: {}{}]",
+                                            u.prompt_tokens, u.candidate_tokens, thoughts
+                                        )
+                                    } else {
+                                        String::new()
+                                    };
+                                    println!(
+                                        "Conexão Gemini API:            VALIDADA COM SUCESSO ({}ms, modelo: {}, resposta: {:?}{})",
+                                        t_ping.elapsed().as_millis(),
+                                        resp.model,
+                                        content,
+                                        usage_summary
+                                    );
+                                }
                             }
                             Err(e) => {
                                 println!(

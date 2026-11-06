@@ -409,6 +409,10 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        println!(
+            "[Yuki] [1/4 STT] Transcrevendo áudio capturado ({}ms) com Whisper local...",
+            audio_input.duration_ms
+        );
         let t_stt_start = std::time::Instant::now();
         let transcribed_text = self
             .router
@@ -442,12 +446,22 @@ impl VoiceConversationCoordinator {
         .await;
 
         if transcribed_text.trim().is_empty() {
+            println!(
+                "[Yuki] [1/4 STT] Concluído em {}ms: <nenhuma fala reconhecida (descartado)>",
+                stt_duration_ms
+            );
             session.transition_to(VoiceSessionState::Idle)?;
             self.session_manager.update_session(session);
             return Err(VoiceError::TranscriptionFailed(
                 "Nenhuma fala reconhecida no áudio capturado".to_string(),
             ));
         }
+
+        println!(
+            "[Yuki] [1/4 STT] Concluído em {}ms: \"{}\"",
+            stt_duration_ms,
+            transcribed_text.trim()
+        );
 
         // 3. Processamento no YukiCore com suporte a histórico conversacional
         session.transition_to(VoiceSessionState::Processing)?;
@@ -461,6 +475,7 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        println!("[Yuki] [2/4 Core] Processando pensamento e resposta com o modelo cognitivo...");
         let t_core_start = std::time::Instant::now();
         let user_input = UserInput::new(&transcribed_text).with_history(conversation_history);
         let user_output = self
@@ -474,6 +489,12 @@ impl VoiceConversationCoordinator {
                 ))
             })?;
         let core_duration_ms = t_core_start.elapsed().as_millis() as u64;
+
+        println!(
+            "[Yuki] [2/4 Core] Resposta gerada em {}ms: \"{}\"",
+            core_duration_ms,
+            user_output.content.trim()
+        );
 
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -497,12 +518,19 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        println!("[Yuki] [3/4 TTS] Sintetizando voz com Piper Neural...");
         let t_tts_start = std::time::Instant::now();
         let audio_output = self
             .router
             .synthesize(&user_output.content, allow_cloud_tts)
             .await?;
         let tts_duration_ms = t_tts_start.elapsed().as_millis() as u64;
+
+        println!(
+            "[Yuki] [3/4 TTS] Concluído em {}ms (fala: {:.2}s)",
+            tts_duration_ms,
+            audio_output.duration_ms as f32 / 1000.0
+        );
 
         if !self.session_manager.update_session(session)
             || self.session_manager.is_interrupted(
@@ -540,6 +568,7 @@ impl VoiceConversationCoordinator {
             return Err(VoiceError::Interrupted);
         }
 
+        println!("[Yuki] [4/4 Áudio] Reproduzindo resposta física (WASAPI)...");
         self.playback.play(&audio_output)?;
         let total_to_playback_ms = t_turn_start.elapsed().as_millis() as u64;
 

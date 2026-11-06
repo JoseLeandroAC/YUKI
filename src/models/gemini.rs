@@ -56,21 +56,32 @@ struct GeminiTool {
     function_declarations: Vec<GeminiFunctionDeclaration>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeminiThinkingConfig {
+    #[serde(rename = "thinkingBudget", skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i32>,
+    #[serde(rename = "thinkingLevel", skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct GeminiGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
 }
 
 #[derive(Debug, Serialize)]
 struct GeminiGenerateRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiContent>,
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GeminiTool>,
+    #[serde(rename = "generationConfig")]
     generation_config: GeminiGenerationConfig,
 }
 
@@ -103,6 +114,8 @@ struct GeminiUsageMetadata {
     candidates_token_count: Option<u32>,
     #[serde(rename = "totalTokenCount")]
     total_token_count: Option<u32>,
+    #[serde(rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,10 +178,60 @@ impl GeminiProviderAdapter {
         self
     }
 
-    /// Executa uma única tentativa de requisição HTTP direta contra o endpoint Gemini.
+    /// Executa uma única tentativa de requisição HTTP direta contra o endpoint Gemini,
+    /// com suporte a controle de raciocínio interno (thinking) e fallback automático caso o endpoint rejeite.
     async fn execute_single_turn(
         &self,
         request: &ModelRequest,
+    ) -> Result<ModelResponse, ModelError> {
+        let default_thinking =
+            if self.config.thinking_budget.is_some() || self.config.thinking_level.is_some() {
+                Some(GeminiThinkingConfig {
+                    thinking_budget: self.config.thinking_budget,
+                    thinking_level: self.config.thinking_level.clone(),
+                })
+            } else {
+                let m = self.config.model_id.to_lowercase();
+                if m.contains("2.5") {
+                    Some(GeminiThinkingConfig {
+                        thinking_budget: Some(0),
+                        thinking_level: None,
+                    })
+                } else if m.contains("gemini-3") || m.contains("gemini-4") || m.contains("flash") {
+                    Some(GeminiThinkingConfig {
+                        thinking_budget: None,
+                        thinking_level: Some("minimal".to_string()),
+                    })
+                } else {
+                    None
+                }
+            };
+
+        match self
+            .execute_single_turn_with_thinking(request, default_thinking.clone())
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(ModelError::InvalidRequest(ref msg))
+                if default_thinking.is_some()
+                    && !msg.contains("HTTP 404")
+                    && (msg.to_lowercase().contains("thinking")
+                        || msg.to_lowercase().contains("invalid_argument")
+                        || msg.to_lowercase().contains("unrecognized")
+                        || msg.to_lowercase().contains("unknown")) =>
+            {
+                // Se o endpoint retornou HTTP 400 por rejeição de thinkingConfig,
+                // tenta novamente sem thinkingConfig como fallback transparente
+                self.execute_single_turn_with_thinking(request, None).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn execute_single_turn_with_thinking(
+        &self,
+        request: &ModelRequest,
+        thinking_config: Option<GeminiThinkingConfig>,
     ) -> Result<ModelResponse, ModelError> {
         // 1. Obter lease temporário de credencial imediatamente antes do envio
         let lease = self
@@ -324,6 +387,7 @@ impl GeminiProviderAdapter {
                 max_output_tokens: request
                     .max_output_tokens
                     .or(Some(self.config.max_output_tokens)),
+                thinking_config,
             },
         };
 
@@ -428,80 +492,115 @@ impl GeminiProviderAdapter {
             };
         }
 
-        // 8. Decodificar resposta de sucesso
-        let wire_resp: GeminiGenerateResponse =
-            serde_json::from_slice(&resp_bytes).map_err(|e| {
-                ModelError::MalformedResponse(format!("Falha ao decodificar JSON do Gemini: {}", e))
-            })?;
+        // 8. Decodificar resposta de sucesso e validar tokens de pensamento
+        decode_gemini_candidate_response(&resp_bytes, &request.request_id, &self.config.model_id)
+    }
+}
 
-        let candidate = wire_resp
-            .candidates
-            .as_ref()
-            .and_then(|c| c.first())
-            .ok_or_else(|| {
-                ModelError::MalformedResponse("Resposta não contém candidatos".to_string())
-            })?;
+/// Decodifica o payload JSON bruto de resposta do Gemini validando conformidade,
+/// finish_reason, candidates, usage metadata com thoughts_token_count e rejeição fail-closed de respostas vazias.
+pub fn decode_gemini_candidate_response(
+    resp_bytes: &[u8],
+    request_id: &crate::contracts::identifiers::ModelRequestId,
+    model_id: &str,
+) -> Result<ModelResponse, ModelError> {
+    let wire_resp: GeminiGenerateResponse = serde_json::from_slice(resp_bytes).map_err(|e| {
+        ModelError::MalformedResponse(format!("Falha ao decodificar JSON do Gemini: {}", e))
+    })?;
 
-        let finish_reason = candidate
-            .finish_reason
-            .clone()
-            .unwrap_or_else(|| "STOP".to_string());
+    let candidate = wire_resp
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .ok_or_else(|| {
+            ModelError::MalformedResponse("Resposta não contém candidatos".to_string())
+        })?;
 
-        if finish_reason == "SAFETY" || finish_reason == "BLOCKLIST" {
-            return Err(ModelError::ContentBlocked(format!(
-                "Resposta bloqueada por política de segurança upstream: {}",
-                finish_reason
-            )));
+    let finish_reason = candidate
+        .finish_reason
+        .clone()
+        .unwrap_or_else(|| "STOP".to_string());
+
+    if finish_reason == "SAFETY" || finish_reason == "BLOCKLIST" {
+        return Err(ModelError::ContentBlocked(format!(
+            "Resposta bloqueada por política de segurança upstream: {}",
+            finish_reason
+        )));
+    }
+
+    let parts = candidate
+        .content
+        .as_ref()
+        .and_then(|c| c.parts.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut text_content = String::new();
+    let mut raw_proposal = None;
+
+    for part in parts {
+        if let Some(txt) = part.text {
+            if !text_content.is_empty() {
+                text_content.push('\n');
+            }
+            text_content.push_str(&txt);
         }
+        if let Some(fc) = part.function_call {
+            raw_proposal = Some(RawProposalCandidate {
+                capability_name: fc.name,
+                arguments: fc.args,
+                opaque_signature: part.thought_signature.clone(),
+            });
+        }
+    }
 
-        let parts = candidate
-            .content
-            .as_ref()
-            .and_then(|c| c.parts.as_ref())
-            .cloned()
+    let thoughts_tokens = wire_resp
+        .usage_metadata
+        .as_ref()
+        .and_then(|u| u.thoughts_token_count);
+
+    if text_content.trim().is_empty() && raw_proposal.is_none() {
+        let thoughts_info = thoughts_tokens
+            .map(|t| format!(" (tokens de pensamento consumidos: {})", t))
             .unwrap_or_default();
 
-        let mut text_content = String::new();
-        let mut raw_proposal = None;
-
-        for part in parts {
-            if let Some(txt) = part.text {
-                if !text_content.is_empty() {
-                    text_content.push('\n');
-                }
-                text_content.push_str(&txt);
-            }
-            if let Some(fc) = part.function_call {
-                raw_proposal = Some(RawProposalCandidate {
-                    capability_name: fc.name,
-                    arguments: fc.args,
-                    opaque_signature: part.thought_signature.clone(),
-                });
-            }
+        if finish_reason == "MAX_TOKENS" {
+            return Err(ModelError::MalformedResponse(format!(
+                "Modelo atingiu MAX_TOKENS sem gerar texto final utilizável{}. \
+                O orçamento de tokens foi esgotado pelo raciocínio interno. \
+                Aumente max_output_tokens ou configure YUKI_GEMINI_THINKING_LEVEL=minimal / YUKI_GEMINI_THINKING_BUDGET=0.",
+                thoughts_info
+            )));
+        } else {
+            return Err(ModelError::MalformedResponse(format!(
+                "Resposta do modelo não contém texto nem proposta de ferramenta (finish_reason: '{}'{})",
+                finish_reason, thoughts_info
+            )));
         }
-
-        let usage = wire_resp.usage_metadata.map(|u| ModelUsage {
-            prompt_tokens: u.prompt_token_count.unwrap_or(0),
-            candidate_tokens: u.candidates_token_count.unwrap_or(0),
-            total_tokens: u.total_token_count.unwrap_or(0),
-        });
-
-        let provider_response_id = wire_resp
-            .response_id
-            .map(crate::contracts::identifiers::ProviderResponseId::new);
-
-        Ok(ModelResponse {
-            request_id: request.request_id.clone(),
-            provider: "GoogleGemini".to_string(),
-            model: self.config.model_id.clone(),
-            raw_content: text_content,
-            capability_proposal: None,
-            candidate_proposal: raw_proposal,
-            usage,
-            finish_reason,
-            provider_response_id,
-        })
     }
+
+    let usage = wire_resp.usage_metadata.map(|u| ModelUsage {
+        prompt_tokens: u.prompt_token_count.unwrap_or(0),
+        candidate_tokens: u.candidates_token_count.unwrap_or(0),
+        total_tokens: u.total_token_count.unwrap_or(0),
+        thoughts_tokens,
+    });
+
+    let provider_response_id = wire_resp
+        .response_id
+        .map(crate::contracts::identifiers::ProviderResponseId::new);
+
+    Ok(ModelResponse {
+        request_id: request_id.clone(),
+        provider: "GoogleGemini".to_string(),
+        model: model_id.to_string(),
+        raw_content: text_content,
+        capability_proposal: None,
+        candidate_proposal: raw_proposal,
+        usage,
+        finish_reason,
+        provider_response_id,
+    })
 }
 
 impl ModelProvider for GeminiProviderAdapter {

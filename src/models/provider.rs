@@ -232,6 +232,8 @@ pub struct ModelUsage {
     pub prompt_tokens: u32,
     pub candidate_tokens: u32,
     pub total_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thoughts_tokens: Option<u32>,
 }
 
 /// Resposta canônica e neutra emitida pelo gateway de modelos.

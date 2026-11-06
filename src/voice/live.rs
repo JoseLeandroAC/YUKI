@@ -314,6 +314,10 @@ fn is_speech_continuation_block(
     let sub_len = 320usize;
     let mut sub_rms = Vec::with_capacity(4);
     let mut active_subs = 0usize;
+    // Limiar dinâmico para picos/plosivas curtas: calibra com base no piso efetivo,
+    // evitando disparos falsos com o ruído/chiado residual de microfones Bluetooth (típico em 190–240 pico)
+    let peak_plosive_thresh = (effective_min_rms * 3.5).clamp(280.0, 600.0) as i16;
+
     for chunk in block.chunks(sub_len) {
         if chunk.is_empty() {
             continue;
@@ -329,16 +333,17 @@ fn is_speech_continuation_block(
         }
         let r = (sq / chunk.len() as f64).sqrt() as f32;
         sub_rms.push(r);
-        if r >= effective_min_rms || peak >= 190 {
+        if r >= effective_min_rms || peak >= peak_plosive_thresh {
             active_subs += 1;
         }
     }
 
-    if block_rms < effective_min_rms && active_subs < 2 {
+    if block_rms < effective_min_rms && (active_subs < 2 || block_rms < (effective_min_rms * 0.65))
+    {
         return false;
     }
 
-    // Rejeita ruído contínuo estacionário (ex.: ventilador constante com variância nula em 20ms e 80ms)
+    // Rejeita ruído contínuo estacionário (ex.: ventilador constante ou chiado de Bluetooth wireless)
     if vad_window.len() >= 3 && !sub_rms.is_empty() {
         let sub_mean = sub_rms.iter().sum::<f32>() / sub_rms.len() as f32;
         let sub_var =
@@ -354,7 +359,7 @@ fn is_speech_continuation_block(
             / macro_rms.len() as f32;
         let macro_std = macro_var.sqrt();
 
-        if macro_std < 1.5 && sub_std < 1.5 {
+        if macro_std < 3.5 && sub_std < 3.5 {
             return false;
         }
     }
@@ -524,9 +529,9 @@ impl VoiceLiveListener {
                                 sq += (s as f64) * (s as f64);
                             }
                             let b_rms = (sq / block.len() as f64).sqrt() as f32;
-                            if b_rms < 42.0 && pk < 175 {
+                            if b_rms < 55.0 && pk < 260 {
                                 ambient_rms_ema =
-                                    (0.90 * ambient_rms_ema + 0.10 * b_rms).clamp(8.0, 40.0);
+                                    (0.90 * ambient_rms_ema + 0.10 * b_rms).clamp(8.0, 65.0);
                             }
                         }
 
@@ -618,9 +623,9 @@ impl VoiceLiveListener {
 
                         let frame = AudioFrame::new(block, 16000, 1, 0);
                         let frame_rms = frame.rms_energy();
-                        if frame_rms < 42.0 {
+                        if frame_rms < 55.0 {
                             ambient_rms_ema =
-                                (0.90 * ambient_rms_ema + 0.10 * frame_rms).clamp(8.0, 40.0);
+                                (0.90 * ambient_rms_ema + 0.10 * frame_rms).clamp(8.0, 65.0);
                         }
                         let followup_gate_rms =
                             (ambient_rms_ema * 3.0).max(self.followup_vad.min_rms_speech());
@@ -672,7 +677,7 @@ impl VoiceLiveListener {
                 LiveConversationState::CapturingPhrase => {
                     let effective_cont_rms = (ambient_rms_ema * 2.5)
                         .max(self.config.speech_continuation_rms_floor)
-                        .clamp(42.0, 120.0);
+                        .clamp(42.0, 140.0);
 
                     // Enquanto a fala pós-gatilho ainda não iniciou (ex.: pausa de vírgula após "Yuki,"),
                     // respeita janela inicial de tolerância antes de declarar EOS.
@@ -731,8 +736,11 @@ impl VoiceLiveListener {
 
                         let required_silence_ms =
                             calc_required_silence_ms(post_trigger_speech_detected);
-                        let reached_eos = effective_silence_ms >= required_silence_ms
-                            && effective_phrase_ms >= 400;
+                        let reached_no_speech_timeout =
+                            !post_trigger_speech_detected && effective_phrase_ms >= 2500;
+                        let reached_eos = (effective_silence_ms >= required_silence_ms
+                            && effective_phrase_ms >= 400)
+                            || reached_no_speech_timeout;
                         let reached_max = effective_phrase_ms >= self.config.max_phrase_secs * 1000;
 
                         if reached_eos || reached_max {
@@ -765,8 +773,11 @@ impl VoiceLiveListener {
 
                         let required_silence_ms =
                             calc_required_silence_ms(post_trigger_speech_detected);
-                        let reached_eos = effective_silence_ms >= required_silence_ms
-                            && effective_phrase_ms >= 400;
+                        let reached_no_speech_timeout =
+                            !post_trigger_speech_detected && effective_phrase_ms >= 2500;
+                        let reached_eos = (effective_silence_ms >= required_silence_ms
+                            && effective_phrase_ms >= 400)
+                            || reached_no_speech_timeout;
                         let reached_max = effective_phrase_ms >= self.config.max_phrase_secs * 1000;
 
                         if reached_eos || reached_max {

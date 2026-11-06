@@ -35,6 +35,14 @@ pub struct ModelGatewayConfig {
     pub sanitized_credential_alias: String,
     /// Limite máximo de iterações do ciclo de ferramentas (tool continuation loop).
     pub max_tool_iterations: u32,
+    /// Orçamento explícito de tokens para raciocínio/pensamento interno (thinkingBudget).
+    /// Some(0) = desativa raciocínio para ultra baixa latência conversacional.
+    /// Some(-1) = dinâmico conforme complexidade.
+    /// None = padrão do modelo / não enviado.
+    pub thinking_budget: Option<i32>,
+    /// Nível de raciocínio para modelos mais recentes (thinkingLevel).
+    /// "minimal", "low", "medium", "high".
+    pub thinking_level: Option<String>,
 }
 
 impl Default for ModelGatewayConfig {
@@ -54,6 +62,8 @@ impl Default for ModelGatewayConfig {
             api_version: "v1beta".to_string(),
             sanitized_credential_alias: "cred_gemini_primary".to_string(),
             max_tool_iterations: 5,
+            thinking_budget: None,
+            thinking_level: None,
         }
     }
 }

@@ -342,3 +342,144 @@ async fn test_adapter_offline_unexpected_status_preserves_error_details() {
 
     std::env::remove_var("YUKI_TEST_GEMINI_KEY_3");
 }
+
+#[test]
+fn test_gemini_thinking_config_serialization() {
+    use yuki::models::gemini::GeminiThinkingConfig;
+
+    let cfg_budget = GeminiThinkingConfig {
+        thinking_budget: Some(0),
+        thinking_level: None,
+    };
+    let json_budget = serde_json::to_string(&cfg_budget).unwrap();
+    assert_eq!(json_budget, "{\"thinkingBudget\":0}");
+
+    let cfg_level = GeminiThinkingConfig {
+        thinking_budget: None,
+        thinking_level: Some("minimal".to_string()),
+    };
+    let json_level = serde_json::to_string(&cfg_level).unwrap();
+    assert_eq!(json_level, "{\"thinkingLevel\":\"minimal\"}");
+}
+
+#[test]
+fn test_decode_gemini_candidate_response_rejects_empty_output_with_max_tokens_diagnostic() {
+    use yuki::contracts::identifiers::ModelRequestId;
+    use yuki::models::gemini::decode_gemini_candidate_response;
+
+    let payload = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{ "text": "" }]
+            },
+            "finishReason": "MAX_TOKENS"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 8,
+            "candidatesTokenCount": 16,
+            "totalTokenCount": 24,
+            "thoughtsTokenCount": 16
+        }
+    });
+
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let req_id = ModelRequestId::new();
+    let result = decode_gemini_candidate_response(&bytes, &req_id, "gemini-3.8-flash");
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ModelError::MalformedResponse(msg) => {
+            assert!(
+                msg.contains("MAX_TOKENS"),
+                "Deve indicar MAX_TOKENS: {}",
+                msg
+            );
+            assert!(
+                msg.contains("raciocínio interno"),
+                "Deve diagnosticar raciocínio: {}",
+                msg
+            );
+            assert!(
+                msg.contains("16"),
+                "Deve conter a contagem de tokens de pensamento: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "Esperava ModelError::MalformedResponse, obteve: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_decode_gemini_candidate_response_rejects_empty_text_without_proposals() {
+    use yuki::contracts::identifiers::ModelRequestId;
+    use yuki::models::gemini::decode_gemini_candidate_response;
+
+    let payload = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{ "text": "   " }]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 0,
+            "totalTokenCount": 5
+        }
+    });
+
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let req_id = ModelRequestId::new();
+    let result = decode_gemini_candidate_response(&bytes, &req_id, "gemini-3.8-flash");
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        ModelError::MalformedResponse(msg) => {
+            assert!(
+                msg.contains("não contém texto"),
+                "Deve alertar sobre resposta vazia: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "Esperava ModelError::MalformedResponse, obteve: {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_decode_gemini_candidate_response_preserves_thoughts_tokens_on_success() {
+    use yuki::contracts::identifiers::ModelRequestId;
+    use yuki::models::gemini::decode_gemini_candidate_response;
+
+    let payload = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{ "text": "OK." }]
+            },
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 6,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 18,
+            "thoughtsTokenCount": 10
+        }
+    });
+
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let req_id = ModelRequestId::new();
+    let resp = decode_gemini_candidate_response(&bytes, &req_id, "gemini-3.8-flash").unwrap();
+
+    assert_eq!(resp.raw_content, "OK.");
+    assert_eq!(resp.model, "gemini-3.8-flash");
+    let usage = resp.usage.expect("Usage deve estar preenchido");
+    assert_eq!(usage.prompt_tokens, 6);
+    assert_eq!(usage.candidate_tokens, 2);
+    assert_eq!(usage.total_tokens, 18);
+    assert_eq!(usage.thoughts_tokens, Some(10));
+}
